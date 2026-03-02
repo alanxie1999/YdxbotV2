@@ -615,6 +615,69 @@ def test_process_bet_on_prediction_timeout_pauses_and_skips_bet(tmp_path, monkey
     assert any("模型可用性门控（超时）" in m for m in sent_messages)
 
 
+def test_process_bet_on_prediction_timeout_gate_dedup_same_snapshot(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "4005"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "超时去重用户"},
+            "telegram": {"user_id": 4005},
+            "groups": {"admin_chat": 4005},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["stop_count"] = 0
+    rt["initial_amount"] = 500
+    rt["bet_amount"] = 500
+    rt["lose_count"] = 0
+    rt["win_count"] = 0
+    ctx.state.history = [0, 1] * 20
+
+    async def fake_predict(user_ctx, global_cfg):
+        raise asyncio.TimeoutError("predict timeout")
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=1, id=len(sent_messages))
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_v10", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+
+    class DummyEvent:
+        def __init__(self):
+            history = " ".join((["0", "1"] * 20))
+            self.message = SimpleNamespace(message=f"[近 40 次结果][由近及远][0 小 1 大] {history}")
+            self.reply_markup = object()
+            self.chat_id = 1
+            self.id = 205
+            self.clicks = []
+
+        async def click(self, data):
+            self.clicks.append(data)
+
+    event = DummyEvent()
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {"betting": {"predict_timeout_sec": 2}}))
+    # 模拟倒计时走完但仍无新结算快照（同一连押阶段）。
+    rt["stop_count"] = 0
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {"betting": {"predict_timeout_sec": 2}}))
+
+    timeout_msgs = [m for m in sent_messages if "触发类型：模型可用性门控（超时）" in m]
+    assert len(timeout_msgs) == 1
+
+
 def test_process_bet_on_step3_quality_gate_blocks_low_confidence(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "4013"
     _write_json(
@@ -701,6 +764,7 @@ def test_process_bet_on_step4_quality_gate_blocks_non_whitelisted_tag(tmp_path, 
     rt["lose_count"] = 3
     rt["win_count"] = 0
     ctx.state.history = [0, 1] * 25
+    ctx.state.bet_sequence_log = [{"result": "赢"} for _ in range(40)]
 
     async def fake_predict(user_ctx, global_cfg):
         user_ctx.state.runtime["last_predict_source"] = "model"
@@ -738,7 +802,7 @@ def test_process_bet_on_step4_quality_gate_blocks_non_whitelisted_tag(tmp_path, 
     asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
 
     assert not event.clicks
-    assert len(ctx.state.bet_sequence_log) == 0
+    assert len(ctx.state.bet_sequence_log) == 40
     assert rt.get("stop_count") == 4  # 暂停3局，内部计数=3+1
     assert any("第4手强风控门控" in m for m in sent_messages)
 
