@@ -73,7 +73,6 @@ ENTRY_GUARD_STEP3_PAUSE_ROUNDS = 2
 ENTRY_GUARD_STEP4_MIN_CONF = 75
 ENTRY_GUARD_STEP4_PAUSE_ROUNDS = 3
 ENTRY_GUARD_STEP4_ALLOWED_TAGS = {"DRAGON_CANDIDATE", "SINGLE_JUMP", "SYMMETRIC_WRAP"}
-ENTRY_GUARD_WINRATE_WINDOW = 100
 
 
 def log_event(level, module, event, message=None, **kwargs):
@@ -1283,7 +1282,7 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
             await _apply_entry_gate_pause(client, user_ctx, global_config, non_model_gate, next_sequence)
             return
 
-        quality_gate = _evaluate_entry_quality_gate(state, rt, risk_pause, next_sequence)
+        quality_gate = _evaluate_entry_quality_gate(rt, risk_pause, next_sequence)
         if quality_gate.get("blocked", False):
             await _apply_entry_gate_pause(client, user_ctx, global_config, quality_gate, next_sequence)
             return
@@ -1660,7 +1659,7 @@ def _build_pause_resume_hint(rt: dict) -> str:
     return f"恢复后动作：继续第 {next_sequence} 手"
 
 
-def _evaluate_entry_quality_gate(state, rt: dict, risk_pause: dict, next_sequence: int) -> dict:
+def _evaluate_entry_quality_gate(rt: dict, risk_pause: dict, next_sequence: int) -> dict:
     """
     高倍入场质量门控：
     - 第3手：至少满足最低置信度，避免在弱信号下继续放大
@@ -1672,9 +1671,8 @@ def _evaluate_entry_quality_gate(state, rt: dict, risk_pause: dict, next_sequenc
     source = str(rt.get("last_predict_source", "unknown")).lower()
     tag = str(rt.get("last_predict_tag", "")).strip().upper()
     confidence = int(rt.get("last_predict_confidence", 0) or 0)
-    recent_outcomes = _get_recent_settled_outcomes(state, ENTRY_GUARD_WINRATE_WINDOW)
-    total = len(recent_outcomes)
-    wins = int(sum(recent_outcomes))
+    total = int(risk_pause.get("total", 0))
+    wins = int(risk_pause.get("wins", 0))
     win_rate = (wins / total) if total > 0 else 0.0
 
     reasons = []
@@ -1694,8 +1692,8 @@ def _evaluate_entry_quality_gate(state, rt: dict, risk_pause: dict, next_sequenc
             reasons.append(f"置信度 {confidence}% < {ENTRY_GUARD_STEP4_MIN_CONF}%")
         if tag not in ENTRY_GUARD_STEP4_ALLOWED_TAGS:
             reasons.append(f"标签 {tag or 'UNKNOWN'} 不在白名单")
-        if total >= ENTRY_GUARD_WINRATE_WINDOW and win_rate < 0.45:
-            reasons.append(f"最近{ENTRY_GUARD_WINRATE_WINDOW}笔胜率仅 {wins}/{total}（{win_rate * 100:.1f}%）")
+        if total >= RISK_WINDOW_BETS and win_rate < 0.45:
+            reasons.append(f"最近40笔胜率仅 {wins}/{total}（{win_rate * 100:.1f}%）")
 
     if reasons:
         return {

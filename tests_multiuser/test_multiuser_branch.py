@@ -701,17 +701,6 @@ def test_process_bet_on_step4_quality_gate_blocks_non_whitelisted_tag(tmp_path, 
     rt["lose_count"] = 3
     rt["win_count"] = 0
     ctx.state.history = [0, 1] * 25
-    ctx.state.bet_sequence_log = [
-        {
-            "bet_id": f"hist-{i}",
-            "sequence": 1,
-            "direction": "big",
-            "amount": 500,
-            "result": "赢" if i % 2 == 0 else "输",
-            "profit": 495 if i % 2 == 0 else -500,
-        }
-        for i in range(100)
-    ]
 
     async def fake_predict(user_ctx, global_cfg):
         user_ctx.state.runtime["last_predict_source"] = "model"
@@ -749,10 +738,9 @@ def test_process_bet_on_step4_quality_gate_blocks_non_whitelisted_tag(tmp_path, 
     asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
 
     assert not event.clicks
-    assert len(ctx.state.bet_sequence_log) == 100
+    assert len(ctx.state.bet_sequence_log) == 0
     assert rt.get("stop_count") == 4  # 暂停3局，内部计数=3+1
     assert any("第4手强风控门控" in m for m in sent_messages)
-    assert any("最近胜率：50/100（50.0%）" in m for m in sent_messages)
 
 
 def test_user_context_migrates_legacy_state_when_history_empty(tmp_path, monkeypatch):
