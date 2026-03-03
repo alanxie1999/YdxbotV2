@@ -2515,20 +2515,6 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
             )
             rt["balance_status"] = "network_error"
 
-        if rt.get("open_ydx", False):
-            monitor_targets = _iter_targets(user_ctx.config.groups.get("monitor", []))
-            for monitor_target in monitor_targets:
-                try:
-                    await client.send_message(monitor_target, "/ydx")
-                except Exception as e:
-                    log_event(
-                        logging.WARNING,
-                        'settle',
-                        '发送/ydx失败',
-                        user_id=user_ctx.user_id,
-                        data=f'target={monitor_target}, error={str(e)}'
-                    )
-        
         # 更新历史记录
         state.history.append(result)
         state.history = state.history[-2000:]
@@ -3307,12 +3293,11 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         if cmd == "help":
             mes = """**️ 命令列表 (Commands)**
 
-**基础控制**
-- `open` : 开启押注
-- `off`  : 停止押注
+**基础控制（推荐）**
+- `st [预设名]` : 启动预设并进入可下注状态 (例: `st yc10`)
 - `pause` : 仅暂停当前账号押注（不影响其他账号）
 - `resume` : 恢复当前账号押注
-- `st [预设名]` : 启动预设并自动测算 (例: `st yc`)
+- `open/off` : 兼容旧命令（分别等同 `resume/pause`）
 
 **参数设置**
 - `gf [金额]` : 设置本金 (例: `gf 1000000`)
@@ -3361,36 +3346,12 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 60))
             return
         
-        # open - 开启押注 - 与master一致
+        # open/off 兼容旧命令：分别等同 resume/pause。
+        # 为避免命令歧义，open/off 不再携带额外副作用（如自动发送 /ydx）。
         if cmd == "open":
-            rt["switch"] = True
-            rt["open_ydx"] = True
-            rt["bet"] = False
-            rt["bet_on"] = True
-            rt["mode_stop"] = True
-            rt["manual_pause"] = False
-            _clear_lose_recovery_tracking(rt)
-            user_ctx.save_state()
-            mes = "押注已启动"
-            message = await send_to_admin(client, mes, user_ctx, global_config)
-            log_event(logging.INFO, 'user_cmd', '开启押注', user_id=user_ctx.user_id)
-            asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-            return
-        
-        # off - 停止押注 - 与master一致
-        if cmd == "off":
-            rt["switch"] = False
-            rt["bet"] = False
-            rt["open_ydx"] = False
-            rt["bet_on"] = False
-            rt["manual_pause"] = False
-            _clear_lose_recovery_tracking(rt)
-            user_ctx.save_state()
-            mes = "押注已停止"
-            message = await send_to_admin(client, mes, user_ctx, global_config)
-            log_event(logging.INFO, 'user_cmd', '停止押注', user_id=user_ctx.user_id)
-            asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-            return
+            cmd = "resume"
+        elif cmd == "off":
+            cmd = "pause"
 
         if cmd == "xx":
             target_groups = []
@@ -3451,12 +3412,13 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
             return
         
-        # pause/resume - 暂停/恢复押注（新增，master没有但有用）
+        # pause/resume - 暂停/恢复押注
         if cmd in ("pause", "暂停"):
             if rt.get("manual_pause", False):
                 await send_to_admin(client, "⏸ 当前账号已是暂停状态", user_ctx, global_config)
                 return
             await _clear_pause_countdown_notice(client, user_ctx)
+            rt["switch"] = True
             rt["bet_on"] = False
             rt["bet"] = False
             rt["mode_stop"] = True
@@ -3469,10 +3431,10 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             return
         
         if cmd in ("resume", "恢复"):
-            if not rt.get("switch", True):
-                await send_to_admin(client, "当前为 off 状态，请先执行 `open`", user_ctx, global_config)
-                return
+            await _clear_pause_countdown_notice(client, user_ctx)
+            rt["switch"] = True
             rt["bet_on"] = True
+            rt["bet"] = False
             rt["mode_stop"] = True
             rt["manual_pause"] = False
             user_ctx.save_state()
@@ -3495,7 +3457,13 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 rt["initial_amount"] = int(preset[6])
                 rt["current_preset_name"] = preset_name
                 rt["bet_amount"] = int(preset[6])
-                rt["bet"] = False  # 修复：st命令不应直接设置bet=True
+                await _clear_pause_countdown_notice(client, user_ctx)
+                rt["switch"] = True
+                rt["manual_pause"] = False
+                rt["bet_on"] = True
+                rt["mode_stop"] = True
+                rt["open_ydx"] = False
+                rt["bet"] = False  # st 命令不直接设置 bet=True，等待真实盘口触发下注
                 rt["risk_deep_triggered_milestones"] = []
                 rt["fund_pause_notified"] = False
                 rt["limit_stop_notified"] = False

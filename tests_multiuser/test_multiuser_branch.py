@@ -965,7 +965,7 @@ def test_build_yc_result_message_uses_codeblock_table():
     assert msg.count("```") == 2
 
 
-def test_process_settle_open_ydx_supports_monitor_list(tmp_path, monkeypatch):
+def test_process_settle_no_longer_auto_sends_ydx(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5002"
     _write_json(
         user_dir / "config.json",
@@ -1005,8 +1005,7 @@ def test_process_settle_open_ydx_supports_monitor_list(tmp_path, monkeypatch):
     asyncio.run(zm.process_settle(client, event, ctx, {}))
 
     monitor_messages = [msg for msg in client.sent if msg[1] == "/ydx"]
-    assert (101, "/ydx") in monitor_messages
-    assert (102, "/ydx") in monitor_messages
+    assert monitor_messages == []
     assert ctx.state.history[-1] == 0
 
 
