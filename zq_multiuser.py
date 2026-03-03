@@ -75,6 +75,18 @@ ENTRY_GUARD_STEP4_MIN_CONF_EARLY = 68
 ENTRY_GUARD_STEP4_PAUSE_ROUNDS = 3
 ENTRY_GUARD_STEP4_ALLOWED_TAGS = {"DRAGON_CANDIDATE", "SINGLE_JUMP", "SYMMETRIC_WRAP"}
 
+# 高阶入场二次确认（第5手起）
+HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP = 5
+HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF = 70
+HIGH_STEP_DOUBLE_CONFIRM_PAUSE_ROUNDS = 2
+HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 4.0
+
+# 暂停结束后的影子验证（只预测不下注）
+SHADOW_PROBE_ENABLED = True
+SHADOW_PROBE_ROUNDS = 3
+SHADOW_PROBE_PASS_REQUIRED = 2
+SHADOW_PROBE_RETRY_PAUSE_ROUNDS = 2
+
 
 def log_event(level, module, event, message=None, **kwargs):
     # 兼容旧调用: log_event(level, event, message, user_id, data)
@@ -655,8 +667,8 @@ def fallback_prediction(history):
 
 def parse_analysis_result_insight(resp_text, default_prediction=1):
     """
-    天眼模式：解析AI输出，绝不返回暂停
-    只返回0或1，confidence和reason
+    解析 AI 输出，返回 prediction/confidence/reason。
+    prediction 允许: 1(大) / 0(小) / -1(SKIP)
     """
     try:
         cleaned = str(resp_text).replace('```json', '').replace('```', '').strip()
@@ -670,9 +682,20 @@ def parse_analysis_result_insight(resp_text, default_prediction=1):
         
         prediction = resp_json.get('prediction', default_prediction)
         if isinstance(prediction, str):
-            prediction = 1 if prediction.upper() in ['1', 'B', 'BIG', '大'] else 0
-        prediction = int(prediction)
-        if prediction not in [0, 1]:
+            pred_norm = prediction.strip().upper()
+            if pred_norm in {'-1', 'SKIP', 'NONE', 'PASS', 'WAIT', '观望', '跳过'}:
+                prediction = -1
+            elif pred_norm in {'1', 'B', 'BIG', '大'}:
+                prediction = 1
+            elif pred_norm in {'0', 'S', 'SMALL', '小'}:
+                prediction = 0
+            else:
+                prediction = default_prediction
+        try:
+            prediction = int(prediction)
+        except Exception:
+            prediction = default_prediction
+        if prediction not in [-1, 0, 1]:
             prediction = default_prediction
         
         confidence = int(resp_json.get('confidence', 50))
@@ -762,7 +785,7 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         current_model_id = rt.get('current_model_id', 'qwen3-coder-plus')
         
         prompt = f"""[System Instruction]
-你是专门破解博弈陷阱的量化交易员。在任何情况下，你的预测严禁输出"NONE"、"SKIP"或建议观望。
+你是专门破解博弈陷阱的量化交易员。你可以在证据不足时输出 SKIP（-1），避免低质量交易。
 
 [Context Reasoning Flow]
 请按顺序执行以下深度推理步骤：
@@ -798,16 +821,16 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
 - 证据接近或不充分：顺势优先；
 - 证据明显支持反转：允许逆势，并在 reasoning 中说明触发了哪两条强证据。
 
-你必须给出一个自信得分。但无论分值多低，prediction 只能选 0 或 1。
+若当前证据冲突明显、置信度不足（尤其第5手及以上），允许输出 SKIP（-1）以规避高风险。
 
 [Response Format]
 必须且只能输出如下 JSON：
-{{"logic": "50字内分析证据流", "reasoning": "你是顺风追龙还是逆风阻杀龙的原因", "confidence": 1-100, "prediction": 0或1}}
+{{"logic": "50字内分析证据流", "reasoning": "顺势/逆势/观望的原因", "confidence": 1-100, "prediction": -1或0或1}}
 
-记住：系统已废除暂停机制，你必须给出0或1！"""
+记住：prediction 只能是 -1、0、1 之一。"""
 
         messages = [
-            {'role': 'system', 'content': '你是专门破解博弈陷阱的量化交易员，只输出纯JSON，严禁解释性文本，严禁输出NONE或SKIP。'},
+            {'role': 'system', 'content': '你是专门破解博弈陷阱的量化交易员，只输出纯JSON。prediction 仅允许 -1/0/1。'},
             {'role': 'user', 'content': prompt}
         ]
         
@@ -857,7 +880,7 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         confidence = final_result['confidence']
         reason = final_result.get('reason', final_result.get('logic', '深度分析'))
         
-        if prediction not in [0, 1]:
+        if prediction not in [-1, 0, 1]:
             prediction = trend_gap['regression_target']
             confidence = 50
             reason = '强制校正：统计回归'
@@ -869,7 +892,10 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         )
         rt["last_predict_tag"] = pattern_tag
         rt["last_predict_confidence"] = int(confidence)
-        rt["last_predict_source"] = "model" if model_used else "fallback"
+        if prediction == -1:
+            rt["last_predict_source"] = "model_skip" if model_used else "fallback_skip"
+        else:
+            rt["last_predict_source"] = "model" if model_used else "fallback"
         rt["last_predict_reason"] = reason
         
         # 审计日志
@@ -972,7 +998,32 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
                 )
                 return
 
-            rt["bet"] = True
+            if rt.get("shadow_probe_rearm", False) or _should_start_shadow_after_pause(rt):
+                _start_shadow_probe(rt, str(rt.get("pause_countdown_reason", "自动暂停")))
+                rt["shadow_probe_rearm"] = False
+                rt["bet"] = False
+                rt["bet_on"] = True
+                rt["mode_stop"] = True
+                rt["flag"] = True
+                rt["pause_resume_pending"] = False
+                rt["pause_resume_pending_reason"] = ""
+                user_ctx.save_state()
+                await _send_transient_admin_notice(
+                    client,
+                    user_ctx,
+                    global_config,
+                    (
+                        "🧪 风控恢复影子验证已启动\n"
+                        f"来源：{rt.get('shadow_probe_origin_reason', '自动暂停')}\n"
+                        f"规则：先观察 {rt.get('shadow_probe_target_rounds', SHADOW_PROBE_ROUNDS)} 局，"
+                        f"命中 >= {rt.get('shadow_probe_pass_required', SHADOW_PROBE_PASS_REQUIRED)} 才恢复真钱下注"
+                    ),
+                    ttl_seconds=180,
+                    attr_name="pause_transition_message",
+                )
+                return
+
+            rt["bet"] = False
             rt["bet_on"] = True
             rt["mode_stop"] = True
             rt["flag"] = True
@@ -1010,6 +1061,119 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
     # 同一已结算快照不重复触发，避免重复暂停。
     next_sequence = int(rt.get("bet_sequence_count", 0)) + 1
     settled_count = _count_settled_bets(state)
+
+    # 影子验证阶段：只做预测，不真实下注。
+    if rt.get("shadow_probe_active", False):
+        target_rounds = max(1, int(rt.get("shadow_probe_target_rounds", SHADOW_PROBE_ROUNDS)))
+        pass_required = max(1, int(rt.get("shadow_probe_pass_required", SHADOW_PROBE_PASS_REQUIRED)))
+        checked = int(rt.get("shadow_probe_checked", 0))
+        hits = int(rt.get("shadow_probe_hits", 0))
+        pending_pred = rt.get("shadow_probe_pending_prediction", None)
+        history_len = len(state.history)
+        last_history_len = int(rt.get("shadow_probe_last_history_len", -1))
+
+        if pending_pred in (0, 1):
+            return
+        if last_history_len == history_len:
+            return
+
+        rt["shadow_probe_last_history_len"] = history_len
+        rt["last_predict_info"] = "影子验证初始化预测"
+        rt["last_predict_source"] = "shadow"
+        rt["last_predict_confidence"] = 0
+        rt["last_predict_tag"] = "SHADOW"
+
+        shadow_prediction = None
+        shadow_reason = ""
+        try:
+            shadow_prediction = await asyncio.wait_for(
+                predict_next_bet_v10(user_ctx, global_config),
+                timeout=predict_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            shadow_prediction = None
+            shadow_reason = f"影子验证预测超时（>{predict_timeout_sec:.1f}s）"
+            rt["last_predict_info"] = "影子验证预测超时"
+            rt["last_predict_source"] = "shadow_timeout"
+            rt["last_predict_tag"] = "SHADOW_TIMEOUT"
+            rt["last_predict_confidence"] = 0
+
+        if shadow_prediction in (0, 1):
+            rt["shadow_probe_pending_prediction"] = int(shadow_prediction)
+            side = "大" if int(shadow_prediction) == 1 else "小"
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                (
+                    "🧪 影子验证执行中（不下注）\n"
+                    f"进度：{checked}/{target_rounds}（命中 {hits}）\n"
+                    f"本局影子方向：{side}\n"
+                    "等待结算后自动评估"
+                ),
+                ttl_seconds=90,
+                attr_name="shadow_probe_message",
+            )
+        else:
+            checked += 1
+            rt["shadow_probe_checked"] = checked
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                (
+                    "🧪 影子验证执行中（不下注）\n"
+                    f"进度：{checked}/{target_rounds}（命中 {hits}）\n"
+                    f"本局判定：无效（按未命中计）\n"
+                    f"原因：{shadow_reason or '模型返回SKIP/无效'}"
+                ),
+                ttl_seconds=90,
+                attr_name="shadow_probe_message",
+            )
+
+            if checked >= target_rounds:
+                if hits >= pass_required:
+                    _clear_shadow_probe(rt)
+                    rt["bet_on"] = True
+                    rt["mode_stop"] = True
+                    rt["pause_resume_pending"] = True
+                    rt["pause_resume_pending_reason"] = "影子验证通过"
+                    await _send_transient_admin_notice(
+                        client,
+                        user_ctx,
+                        global_config,
+                        (
+                            "✅ 影子验证通过，恢复真钱下注\n"
+                            f"结果：{hits}/{target_rounds} 命中（阈值 {pass_required}）"
+                        ),
+                        ttl_seconds=150,
+                        attr_name="shadow_probe_message",
+                    )
+                else:
+                    _clear_shadow_probe(rt)
+                    rt["shadow_probe_rearm"] = True
+                    pause_rounds = int(SHADOW_PROBE_RETRY_PAUSE_ROUNDS)
+                    _enter_pause(rt, pause_rounds, "影子验证未达标")
+                    await send_to_admin(
+                        client,
+                        (
+                            "⛔ 影子验证未达标，继续暂停观察\n"
+                            f"结果：{hits}/{target_rounds} 命中（阈值 {pass_required}）\n"
+                            f"本次继续暂停：{pause_rounds} 局"
+                        ),
+                        user_ctx,
+                        global_config,
+                    )
+                    await _refresh_pause_countdown_notice(
+                        client,
+                        user_ctx,
+                        global_config,
+                        remaining_rounds=pause_rounds,
+                    )
+
+        user_ctx.save_state()
+        return
+
     snapshot_count = int(rt.get("risk_pause_snapshot_count", -1))
     pause_acc_rounds = int(rt.get("risk_pause_acc_rounds", 0))
 
@@ -1253,7 +1417,7 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
             await _apply_entry_gate_pause(client, user_ctx, global_config, timeout_gate, next_sequence)
             return
 
-        if prediction in (-1, None):
+        if prediction is None:
             rt["last_predict_info"] = "预测结果无效 - 本局不下注"
             rt["last_predict_source"] = "invalid"
             invalid_gate = {
@@ -1269,6 +1433,29 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
                 "win_rate": risk_pause.get("win_rate", 0.0),
             }
             await _apply_entry_gate_pause(client, user_ctx, global_config, invalid_gate, next_sequence)
+            return
+
+        if prediction == -1:
+            rt["bet"] = False
+            rt["bet_on"] = True
+            rt["mode_stop"] = True
+            last_notice_settled = int(rt.get("last_skip_notice_settled", -1))
+            if last_notice_settled != settled_count:
+                rt["last_skip_notice_settled"] = settled_count
+                await _send_transient_admin_notice(
+                    client,
+                    user_ctx,
+                    global_config,
+                    (
+                        "🧭 本局模型判定为观望（SKIP）\n"
+                        f"触发点：第 {next_sequence} 手\n"
+                        f"依据：{rt.get('last_predict_info', '信号冲突')}\n"
+                        "动作：不下注，等待下一局新信号"
+                    ),
+                    ttl_seconds=90,
+                    attr_name="shadow_probe_message",
+                )
+            user_ctx.save_state()
             return
 
         predict_source = str(rt.get("last_predict_source", "")).lower().strip()
@@ -1297,6 +1484,19 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
         if quality_gate.get("blocked", False):
             await _apply_entry_gate_pause(client, user_ctx, global_config, quality_gate, next_sequence)
             return
+
+        # 高阶手位二次确认：第5手起，主副模型需同向且置信度达标。
+        if next_sequence >= HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP:
+            dual_gate = await _evaluate_high_step_double_confirm(
+                user_ctx,
+                risk_pause,
+                next_sequence,
+                int(prediction),
+                int(rt.get("last_predict_confidence", 0) or 0),
+            )
+            if dual_gate.get("blocked", False):
+                await _apply_entry_gate_pause(client, user_ctx, global_config, dual_gate, next_sequence)
+                return
 
         if rt.get("ai_key_issue_active", False):
             await send_to_admin(client, _build_ai_key_warning_message(rt), user_ctx, global_config)
@@ -1690,6 +1890,277 @@ def _should_skip_repeated_entry_timeout_gate(rt: dict, next_sequence: int, settl
     rt["entry_timeout_gate_last_seq"] = int(next_sequence)
     rt["entry_timeout_gate_last_settled"] = int(settled_count)
     return False
+
+
+def _select_secondary_model_id(user_ctx: UserContext, primary_model_id: str) -> str:
+    """
+    从模型链中选择“不同于主模型”的副模型，用于高阶手位二次确认。
+    若不存在可用副模型，返回空字符串。
+    """
+    try:
+        model_mgr = user_ctx.get_model_manager()
+        primary_cfg = model_mgr.get_model(str(primary_model_id))
+        primary_actual = str(primary_cfg.get("model_id")) if primary_cfg else str(primary_model_id)
+
+        ordered_models = []
+        chain = list(model_mgr.fallback_chain or [])
+        if chain:
+            for key in chain:
+                cfg = model_mgr.get_model(str(key))
+                if not cfg or not cfg.get("enabled", True):
+                    continue
+                mid = str(cfg.get("model_id", "")).strip()
+                if mid and mid not in ordered_models:
+                    ordered_models.append(mid)
+        else:
+            for cfg in model_mgr.models:
+                if not cfg.get("enabled", True):
+                    continue
+                mid = str(cfg.get("model_id", "")).strip()
+                if mid and mid not in ordered_models:
+                    ordered_models.append(mid)
+
+        if not ordered_models:
+            return ""
+
+        if primary_actual in ordered_models:
+            idx = ordered_models.index(primary_actual)
+            for mid in ordered_models[idx + 1:]:
+                if mid != primary_actual:
+                    return mid
+            for mid in ordered_models[:idx]:
+                if mid != primary_actual:
+                    return mid
+            return ""
+
+        for mid in ordered_models:
+            if mid != primary_actual:
+                return mid
+    except Exception:
+        return ""
+    return ""
+
+
+async def _evaluate_high_step_double_confirm(
+    user_ctx: UserContext,
+    risk_pause: dict,
+    next_sequence: int,
+    primary_prediction: int,
+    primary_confidence: int,
+) -> dict:
+    """
+    第5手起执行二次确认：主模型 + 副模型必须同向且置信度达标。
+    """
+    if next_sequence < HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP:
+        return {"blocked": False}
+
+    reasons = []
+    gate_name = f"第{HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP}手双模型确认门控"
+    pause_rounds = HIGH_STEP_DOUBLE_CONFIRM_PAUSE_ROUNDS
+    wins = int(risk_pause.get("wins", 0))
+    total = int(risk_pause.get("total", 0))
+    win_rate = (wins / total) if total > 0 else 0.0
+    primary_model_id = str(user_ctx.state.runtime.get("current_model_id", ""))
+
+    if primary_prediction not in (0, 1):
+        reasons.append("主模型未给出可下注方向")
+    if int(primary_confidence or 0) < HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF:
+        reasons.append(
+            f"主模型置信度 {int(primary_confidence or 0)}% < {HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF}%"
+        )
+
+    secondary_model_id = _select_secondary_model_id(user_ctx, primary_model_id)
+    secondary_confidence = 0
+    secondary_prediction = -1
+    secondary_source = "none"
+
+    if secondary_model_id:
+        history = user_ctx.state.history
+        short_term_20 = history[-20:] if len(history) >= 20 else history[:]
+        medium_term_50 = history[-50:] if len(history) >= 50 else history[:]
+        short_str = "".join("1" if x == 1 else "0" for x in short_term_20)
+        medium_str = "".join("1" if x == 1 else "0" for x in medium_term_50)
+        pattern = extract_pattern_features(history)
+        trend_gap = calculate_trend_gap(history, window=100)
+        tail_streak_len = int(pattern.get("tail_streak_len", 0) or 0)
+        tail_side = "大" if int(pattern.get("tail_streak_char", 0) or 0) == 1 else "小"
+        gap = int(trend_gap.get("gap", 0) or 0)
+        main_dir = "大" if primary_prediction == 1 else "小"
+
+        prompt = f"""你是风控复核模型，只输出JSON。
+当前处于倍投第{next_sequence}手（高风险手位），请做方向复核：
+- 主模型方向：{main_dir}
+- 主模型置信度：{int(primary_confidence or 0)}%
+- 最近20局：{short_str}
+- 最近50局：{medium_str}
+- 尾部形态：{pattern.get('pattern_tag', 'UNKNOWN')}（{tail_streak_len}连{tail_side}）
+- 缺口：{gap:+d}
+
+只输出JSON：
+{{"prediction": -1或0或1, "confidence": 1-100, "reason": "20字内"}}"""
+
+        messages = [
+            {"role": "system", "content": "你是高风险入场复核器，只返回JSON。"},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            result = await asyncio.wait_for(
+                user_ctx.get_model_manager().call_model(
+                    secondary_model_id,
+                    messages,
+                    temperature=0.0,
+                    max_tokens=120,
+                ),
+                timeout=HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC,
+            )
+            if not result.get("success"):
+                raise RuntimeError(str(result.get("error", "unknown")))
+            parsed = parse_analysis_result_insight(
+                result.get("content", ""),
+                default_prediction=primary_prediction,
+            )
+            secondary_prediction = int(parsed.get("prediction", -1))
+            secondary_confidence = int(parsed.get("confidence", 0) or 0)
+            secondary_source = secondary_model_id
+
+            if secondary_prediction != primary_prediction:
+                if secondary_prediction == -1:
+                    reasons.append("副模型建议观望（SKIP）")
+                else:
+                    side = "大" if secondary_prediction == 1 else "小"
+                    reasons.append(f"副模型方向不一致（副模型={side}）")
+            if secondary_confidence < HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF:
+                reasons.append(
+                    f"副模型置信度 {secondary_confidence}% < {HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF}%"
+                )
+        except Exception as e:
+            secondary_source = "error"
+            reasons.append(f"副模型复核失败：{str(e)[:60]}")
+    else:
+        # 无副模型时，启用更严格单模型兜底，避免高风险手位盲目继续。
+        if int(primary_confidence or 0) < (HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF + 5):
+            reasons.append(
+                f"无副模型时主模型置信度需 >= {HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF + 5}%"
+            )
+        secondary_source = "single"
+
+    if reasons:
+        return {
+            "blocked": True,
+            "gate_name": gate_name,
+            "pause_rounds": pause_rounds,
+            "reason_text": "；".join(reasons),
+            "source": f"primary={primary_model_id},secondary={secondary_source}",
+            "tag": str(user_ctx.state.runtime.get("last_predict_tag", "") or "UNKNOWN"),
+            "confidence": int(primary_confidence or 0),
+            "wins": wins,
+            "total": total,
+            "win_rate": win_rate,
+        }
+    return {"blocked": False}
+
+
+def _clear_shadow_probe(rt: dict) -> None:
+    rt["shadow_probe_active"] = False
+    rt["shadow_probe_origin_reason"] = ""
+    rt["shadow_probe_target_rounds"] = 0
+    rt["shadow_probe_pass_required"] = 0
+    rt["shadow_probe_checked"] = 0
+    rt["shadow_probe_hits"] = 0
+    rt["shadow_probe_pending_prediction"] = None
+    rt["shadow_probe_last_history_len"] = -1
+
+
+def _start_shadow_probe(rt: dict, reason: str) -> None:
+    _clear_shadow_probe(rt)
+    rt["shadow_probe_active"] = True
+    rt["shadow_probe_origin_reason"] = str(reason or "风控暂停").strip() or "风控暂停"
+    rt["shadow_probe_target_rounds"] = int(SHADOW_PROBE_ROUNDS)
+    rt["shadow_probe_pass_required"] = int(SHADOW_PROBE_PASS_REQUIRED)
+    rt["shadow_probe_checked"] = 0
+    rt["shadow_probe_hits"] = 0
+    rt["shadow_probe_pending_prediction"] = None
+    rt["shadow_probe_last_history_len"] = -1
+
+
+def _should_start_shadow_after_pause(rt: dict) -> bool:
+    if not SHADOW_PROBE_ENABLED:
+        return False
+    if rt.get("manual_pause", False):
+        return False
+    reason = str(rt.get("pause_countdown_reason", "")).strip()
+    if not reason:
+        return False
+    return any(token in reason for token in ("风控", "高倍入场", "模型可用性门控"))
+
+
+def _consume_shadow_probe_settle_result(rt: dict, result: int) -> dict:
+    """
+    在结算阶段消费影子验证的待评估预测，并推进影子验证状态机。
+    返回结构:
+    {
+      "updated": bool,
+      "hit": bool,
+      "checked": int,
+      "hits": int,
+      "target_rounds": int,
+      "pass_required": int,
+      "done": bool,
+      "passed": bool,
+      "pause_rounds": int,
+    }
+    """
+    if not rt.get("shadow_probe_active", False):
+        return {"updated": False}
+
+    pending_pred = rt.get("shadow_probe_pending_prediction", None)
+    if pending_pred not in (0, 1):
+        return {"updated": False}
+
+    target_rounds = max(1, int(rt.get("shadow_probe_target_rounds", SHADOW_PROBE_ROUNDS)))
+    pass_required = max(1, int(rt.get("shadow_probe_pass_required", SHADOW_PROBE_PASS_REQUIRED)))
+    checked = int(rt.get("shadow_probe_checked", 0))
+    hits = int(rt.get("shadow_probe_hits", 0))
+
+    checked += 1
+    hit = int(pending_pred) == int(result)
+    if hit:
+        hits += 1
+
+    rt["shadow_probe_pending_prediction"] = None
+    rt["shadow_probe_checked"] = checked
+    rt["shadow_probe_hits"] = hits
+
+    done = checked >= target_rounds
+    passed = False
+    pause_rounds = 0
+
+    if done:
+        if hits >= pass_required:
+            passed = True
+            _clear_shadow_probe(rt)
+            rt["bet_on"] = True
+            rt["mode_stop"] = True
+            rt["pause_resume_pending"] = True
+            rt["pause_resume_pending_reason"] = "影子验证通过"
+        else:
+            _clear_shadow_probe(rt)
+            rt["shadow_probe_rearm"] = True
+            pause_rounds = int(SHADOW_PROBE_RETRY_PAUSE_ROUNDS)
+            _enter_pause(rt, pause_rounds, "影子验证未达标")
+
+    return {
+        "updated": True,
+        "hit": bool(hit),
+        "checked": checked,
+        "hits": hits,
+        "target_rounds": target_rounds,
+        "pass_required": pass_required,
+        "done": done,
+        "passed": passed,
+        "pause_rounds": pause_rounds,
+    }
 
 
 def _evaluate_entry_quality_gate(rt: dict, risk_pause: dict, next_sequence: int) -> dict:
@@ -2518,15 +2989,73 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
         # 更新历史记录
         state.history.append(result)
         state.history = state.history[-2000:]
+
+        # 影子验证结算消费：对“影子预测方向”做命中统计，不触发真实下注记账。
+        shadow_progress = _consume_shadow_probe_settle_result(rt, result)
+        if shadow_progress.get("updated", False):
+            checked = int(shadow_progress.get("checked", 0))
+            hits = int(shadow_progress.get("hits", 0))
+            target_rounds = int(shadow_progress.get("target_rounds", SHADOW_PROBE_ROUNDS))
+            pass_required = int(shadow_progress.get("pass_required", SHADOW_PROBE_PASS_REQUIRED))
+            hit_text = "命中" if shadow_progress.get("hit", False) else "未命中"
+            if shadow_progress.get("done", False):
+                if shadow_progress.get("passed", False):
+                    await _send_transient_admin_notice(
+                        client,
+                        user_ctx,
+                        global_config,
+                        (
+                            "✅ 影子验证通过，恢复真钱下注\n"
+                            f"结果：{hits}/{target_rounds} 命中（阈值 {pass_required}）\n"
+                            "后续动作：下一次有效信号将继续原倍投进度下注"
+                        ),
+                        ttl_seconds=150,
+                        attr_name="shadow_probe_message",
+                    )
+                else:
+                    pause_rounds = int(shadow_progress.get("pause_rounds", SHADOW_PROBE_RETRY_PAUSE_ROUNDS))
+                    await send_to_admin(
+                        client,
+                        (
+                            "⛔ 影子验证未达标，继续暂停观察\n"
+                            f"结果：{hits}/{target_rounds} 命中（阈值 {pass_required}）\n"
+                            f"本次继续暂停：{pause_rounds} 局"
+                        ),
+                        user_ctx,
+                        global_config,
+                    )
+                    await _refresh_pause_countdown_notice(
+                        client,
+                        user_ctx,
+                        global_config,
+                        remaining_rounds=pause_rounds,
+                    )
+            else:
+                await _send_transient_admin_notice(
+                    client,
+                    user_ctx,
+                    global_config,
+                    (
+                        "🧪 影子验证结算回写（不下注）\n"
+                        f"本局结果：{hit_text}\n"
+                        f"进度：{checked}/{target_rounds}（命中 {hits}，阈值 {pass_required}）"
+                    ),
+                    ttl_seconds=90,
+                    attr_name="shadow_probe_message",
+                )
         
         log_event(logging.INFO, 'settle', '更新历史记录', 
                   user_id=user_ctx.user_id, data=f'result={result}, history_len={len(state.history)}')
         
-        # 实时监控：每10局计算准确率
-        if len(state.history) >= 10 and len(state.history) % 10 == 0:
-            recent_acc = sum(1 for h, p in zip(state.history[-10:], state.predictions[-10:]) if h == p) / 10 * 100
+        # 实时监控：按“最近10笔已结算押注”统计命中率（避免SKIP/影子预测干扰）。
+        settled_count = _count_settled_bets(state)
+        last_monitor_settled = int(rt.get("model_monitor_last_settled", 0))
+        if settled_count >= 10 and settled_count % 10 == 0 and settled_count != last_monitor_settled:
+            recent_outcomes = _get_recent_settled_outcomes(state, 10)
+            recent_acc = (sum(recent_outcomes) / len(recent_outcomes) * 100) if recent_outcomes else 0.0
             log_event(logging.INFO, 'model_monitor', '最近10局准确率', 
                       user_id=user_ctx.user_id, data=f'accuracy={recent_acc:.2f}%')
+            rt["model_monitor_last_settled"] = settled_count
         
         result_text = None
         direction = None

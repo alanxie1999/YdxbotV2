@@ -129,6 +129,60 @@ def test_model_manager_apply_shared_config_uses_shared_chain():
     assert mgr.get_model("2")["model_id"] == "model-2"
 
 
+def test_parse_analysis_result_insight_supports_skip_prediction():
+    parsed = zm.parse_analysis_result_insight(
+        '{"prediction":"SKIP","confidence":66,"reason":"证据冲突"}',
+        default_prediction=1,
+    )
+    assert parsed["prediction"] == -1
+    assert parsed["confidence"] == 66
+
+
+def test_consume_shadow_probe_settle_result_pass_sets_resume_pending():
+    rt = {
+        "shadow_probe_active": True,
+        "shadow_probe_target_rounds": 2,
+        "shadow_probe_pass_required": 1,
+        "shadow_probe_checked": 1,
+        "shadow_probe_hits": 0,
+        "shadow_probe_pending_prediction": 1,
+        "stop_count": 0,
+    }
+
+    progress = zm._consume_shadow_probe_settle_result(rt, result=1)
+
+    assert progress["updated"] is True
+    assert progress["done"] is True
+    assert progress["passed"] is True
+    assert rt["shadow_probe_active"] is False
+    assert rt["pause_resume_pending"] is True
+    assert rt["pause_resume_pending_reason"] == "影子验证通过"
+
+
+def test_consume_shadow_probe_settle_result_fail_rearms_pause():
+    rt = {
+        "shadow_probe_active": True,
+        "shadow_probe_target_rounds": 2,
+        "shadow_probe_pass_required": 2,
+        "shadow_probe_checked": 1,
+        "shadow_probe_hits": 0,
+        "shadow_probe_pending_prediction": 1,
+        "stop_count": 0,
+        "bet_on": True,
+        "mode_stop": True,
+    }
+
+    progress = zm._consume_shadow_probe_settle_result(rt, result=0)
+
+    assert progress["updated"] is True
+    assert progress["done"] is True
+    assert progress["passed"] is False
+    assert rt["shadow_probe_active"] is False
+    assert rt["shadow_probe_rearm"] is True
+    assert rt["stop_count"] == zm.SHADOW_PROBE_RETRY_PAUSE_ROUNDS + 1
+    assert rt["pause_countdown_active"] is True
+
+
 def test_heal_stale_pending_bets_marks_orphan_none_records(tmp_path):
     user_dir = tmp_path / "users" / "heal_user_1"
     _write_json(
