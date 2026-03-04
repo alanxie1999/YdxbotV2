@@ -183,6 +183,20 @@ def test_consume_shadow_probe_settle_result_fail_rearms_pause():
     assert rt["pause_countdown_active"] is True
 
 
+def test_record_hand_stall_block_triggers_force_unlock_on_skip_limit():
+    rt = {}
+    zm._clear_hand_stall_guard(rt)
+    # 前两次允许观望
+    s1 = zm._record_hand_stall_block(rt, next_sequence=5, history_len=100, reason="skip")
+    s2 = zm._record_hand_stall_block(rt, next_sequence=5, history_len=101, reason="skip")
+    assert s1["force_unlock"] is False
+    assert s2["force_unlock"] is False
+    # 第三次触发解锁
+    s3 = zm._record_hand_stall_block(rt, next_sequence=5, history_len=102, reason="skip")
+    assert s3["force_unlock"] is True
+    assert s3["skip_streak"] == 3
+
+
 def test_heal_stale_pending_bets_marks_orphan_none_records(tmp_path):
     user_dir = tmp_path / "users" / "heal_user_1"
     _write_json(
@@ -730,6 +744,82 @@ def test_process_bet_on_prediction_timeout_gate_dedup_same_snapshot(tmp_path, mo
 
     timeout_msgs = [m for m in sent_messages if "触发类型：模型可用性门控（超时）" in m]
     assert len(timeout_msgs) == 1
+
+
+def test_process_bet_on_forces_unlock_after_repeated_skip_same_sequence(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "4016"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "防卡死用户"},
+            "telegram": {"user_id": 4016},
+            "groups": {"admin_chat": 4016},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["stop_count"] = 0
+    rt["initial_amount"] = 500
+    rt["bet_amount"] = 500
+    rt["lose_count"] = 4
+    rt["bet_sequence_count"] = 4  # 下一手=5
+    rt["win_count"] = 0
+    rt["stall_guard_sequence"] = 5
+    rt["stall_guard_no_bet_streak"] = 2
+    rt["stall_guard_skip_streak"] = 2
+    rt["stall_guard_timeout_streak"] = 0
+    rt["stall_guard_gate_streak"] = 0
+    rt["stall_guard_last_history_len"] = 39
+    ctx.state.history = [0, 1] * 20
+
+    async def fake_predict(user_ctx, global_cfg):
+        user_ctx.state.runtime["last_predict_source"] = "model_skip"
+        user_ctx.state.runtime["last_predict_tag"] = "CHAOS_SWITCH"
+        user_ctx.state.runtime["last_predict_confidence"] = 35
+        user_ctx.state.runtime["last_predict_info"] = "M-SMP/CHAOS_SWITCH | 观望"
+        return -1
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=1, id=len(sent_messages))
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_v10", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    class DummyEvent:
+        def __init__(self):
+            history = " ".join((["0", "1"] * 20))
+            self.message = SimpleNamespace(message=f"[近 40 次结果][由近及远][0 小 1 大] {history}")
+            self.reply_markup = object()
+            self.chat_id = 1
+            self.id = 206
+            self.clicks = []
+
+        async def click(self, data):
+            self.clicks.append(data)
+
+    event = DummyEvent()
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert event.clicks
+    assert len(ctx.state.bet_sequence_log) == 1
+    assert rt.get("stall_guard_force_unlock_total", 0) >= 1
+    assert any("防卡死解锁已触发" in m for m in sent_messages)
 
 
 def test_process_bet_on_step3_quality_gate_blocks_low_confidence(tmp_path, monkeypatch):

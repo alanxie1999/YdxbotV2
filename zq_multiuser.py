@@ -75,11 +75,16 @@ ENTRY_GUARD_STEP4_MIN_CONF_EARLY = 68
 ENTRY_GUARD_STEP4_PAUSE_ROUNDS = 3
 ENTRY_GUARD_STEP4_ALLOWED_TAGS = {"DRAGON_CANDIDATE", "SINGLE_JUMP", "SYMMETRIC_WRAP"}
 
-# 高阶入场二次确认（第5手起）
-HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP = 5
+# 高阶入场二次确认（第7手起，避免第5/6手过早双模型互卡）
+HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP = 7
 HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF = 70
 HIGH_STEP_DOUBLE_CONFIRM_PAUSE_ROUNDS = 2
 HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 4.0
+
+# 同手位防卡死：避免 SKIP/超时导致长期不落单
+STALL_GUARD_SKIP_MAX = 2
+STALL_GUARD_TIMEOUT_MAX = 2
+STALL_GUARD_TOTAL_MAX = 6
 
 # 暂停结束后的影子验证（只预测不下注）
 SHADOW_PROBE_ENABLED = True
@@ -1061,6 +1066,7 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
     # 同一已结算快照不重复触发，避免重复暂停。
     next_sequence = int(rt.get("bet_sequence_count", 0)) + 1
     settled_count = _count_settled_bets(state)
+    history_len = len(state.history)
 
     # 影子验证阶段：只做预测，不真实下注。
     if rt.get("shadow_probe_active", False):
@@ -1370,6 +1376,7 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
 
     log_event(logging.INFO, 'bet_on', '开始押注', user_id=user_ctx.user_id)
     try:
+        force_unlock_active = False
         rt["last_predict_info"] = "初始化预测"
         rt["last_predict_source"] = "unknown"
         rt["last_predict_confidence"] = 0
@@ -1392,71 +1399,114 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
                 user_id=user_ctx.user_id,
                 timeout=predict_timeout_sec,
             )
-            if _should_skip_repeated_entry_timeout_gate(rt, next_sequence, settled_count):
-                log_event(
-                    logging.INFO,
-                    'bet_on',
-                    '模型超时门控去重命中，跳过重复暂停',
-                    user_id=user_ctx.user_id,
-                    data=f'next_seq={next_sequence}, settled_count={settled_count}'
-                )
-                user_ctx.save_state()
-                return
-            timeout_gate = {
-                "blocked": True,
-                "gate_name": "模型可用性门控（超时）",
-                "pause_rounds": 1,
-                "reason_text": f"模型响应超过 {predict_timeout_sec:.1f}s，风险过高，跳过本局",
-                "source": "timeout",
-                "tag": "TIMEOUT",
-                "confidence": 0,
-                "wins": risk_pause.get("wins", 0),
-                "total": risk_pause.get("total", 0),
-                "win_rate": risk_pause.get("win_rate", 0.0),
-            }
-            await _apply_entry_gate_pause(client, user_ctx, global_config, timeout_gate, next_sequence)
-            return
-
-        if prediction is None:
-            rt["last_predict_info"] = "预测结果无效 - 本局不下注"
-            rt["last_predict_source"] = "invalid"
-            invalid_gate = {
-                "blocked": True,
-                "gate_name": "模型可用性门控（无效结果）",
-                "pause_rounds": 1,
-                "reason_text": "模型返回结果无效，跳过本局",
-                "source": "invalid",
-                "tag": str(rt.get("last_predict_tag", "") or "UNKNOWN"),
-                "confidence": int(rt.get("last_predict_confidence", 0) or 0),
-                "wins": risk_pause.get("wins", 0),
-                "total": risk_pause.get("total", 0),
-                "win_rate": risk_pause.get("win_rate", 0.0),
-            }
-            await _apply_entry_gate_pause(client, user_ctx, global_config, invalid_gate, next_sequence)
-            return
-
-        if prediction == -1:
-            rt["bet"] = False
-            rt["bet_on"] = True
-            rt["mode_stop"] = True
-            last_notice_settled = int(rt.get("last_skip_notice_settled", -1))
-            if last_notice_settled != settled_count:
-                rt["last_skip_notice_settled"] = settled_count
+            timeout_guard = _record_hand_stall_block(rt, next_sequence, history_len, "timeout")
+            if timeout_guard.get("force_unlock", False):
+                prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, timeout_guard)
+                force_unlock_active = True
                 await _send_transient_admin_notice(
                     client,
                     user_ctx,
                     global_config,
                     (
-                        "🧭 本局模型判定为观望（SKIP）\n"
+                        "🚨 防卡死解锁已触发\n"
                         f"触发点：第 {next_sequence} 手\n"
-                        f"依据：{rt.get('last_predict_info', '信号冲突')}\n"
-                        "动作：不下注，等待下一局新信号"
+                        f"阻断统计：总 {timeout_guard.get('no_bet_streak', 0)} / "
+                        f"SKIP {timeout_guard.get('skip_streak', 0)} / 超时 {timeout_guard.get('timeout_streak', 0)}\n"
+                        f"动作：本局改为兜底下注（{'大' if prediction == 1 else '小'}）"
                     ),
-                    ttl_seconds=90,
-                    attr_name="shadow_probe_message",
+                    ttl_seconds=120,
+                    attr_name="pause_transition_message",
                 )
-            user_ctx.save_state()
-            return
+            else:
+                if _should_skip_repeated_entry_timeout_gate(rt, next_sequence, settled_count):
+                    log_event(
+                        logging.INFO,
+                        'bet_on',
+                        '模型超时门控去重命中，跳过重复暂停',
+                        user_id=user_ctx.user_id,
+                        data=f'next_seq={next_sequence}, settled_count={settled_count}'
+                    )
+                    user_ctx.save_state()
+                    return
+                timeout_gate = {
+                    "blocked": True,
+                    "gate_name": "模型可用性门控（超时）",
+                    "pause_rounds": 1,
+                    "reason_text": f"模型响应超过 {predict_timeout_sec:.1f}s，风险过高，跳过本局",
+                    "source": "timeout",
+                    "tag": "TIMEOUT",
+                    "confidence": 0,
+                    "wins": risk_pause.get("wins", 0),
+                    "total": risk_pause.get("total", 0),
+                    "win_rate": risk_pause.get("win_rate", 0.0),
+                }
+                await _apply_entry_gate_pause(client, user_ctx, global_config, timeout_gate, next_sequence)
+                return
+
+        if prediction is None:
+            invalid_guard = _record_hand_stall_block(rt, next_sequence, history_len, "gate")
+            if invalid_guard.get("force_unlock", False):
+                prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, invalid_guard)
+                force_unlock_active = True
+            else:
+                rt["last_predict_info"] = "预测结果无效 - 本局不下注"
+                rt["last_predict_source"] = "invalid"
+                invalid_gate = {
+                    "blocked": True,
+                    "gate_name": "模型可用性门控（无效结果）",
+                    "pause_rounds": 1,
+                    "reason_text": "模型返回结果无效，跳过本局",
+                    "source": "invalid",
+                    "tag": str(rt.get("last_predict_tag", "") or "UNKNOWN"),
+                    "confidence": int(rt.get("last_predict_confidence", 0) or 0),
+                    "wins": risk_pause.get("wins", 0),
+                    "total": risk_pause.get("total", 0),
+                    "win_rate": risk_pause.get("win_rate", 0.0),
+                }
+                await _apply_entry_gate_pause(client, user_ctx, global_config, invalid_gate, next_sequence)
+                return
+
+        if prediction == -1:
+            skip_guard = _record_hand_stall_block(rt, next_sequence, history_len, "skip")
+            if skip_guard.get("force_unlock", False):
+                prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, skip_guard)
+                force_unlock_active = True
+                await _send_transient_admin_notice(
+                    client,
+                    user_ctx,
+                    global_config,
+                    (
+                        "🚨 防卡死解锁已触发\n"
+                        f"触发点：第 {next_sequence} 手（连续SKIP）\n"
+                        f"阻断统计：总 {skip_guard.get('no_bet_streak', 0)} / "
+                        f"SKIP {skip_guard.get('skip_streak', 0)} / 超时 {skip_guard.get('timeout_streak', 0)}\n"
+                        f"动作：本局改为兜底下注（{'大' if prediction == 1 else '小'}）"
+                    ),
+                    ttl_seconds=120,
+                    attr_name="pause_transition_message",
+                )
+            else:
+                rt["bet"] = False
+                rt["bet_on"] = True
+                rt["mode_stop"] = True
+                last_notice_settled = int(rt.get("last_skip_notice_settled", -1))
+                if last_notice_settled != settled_count:
+                    rt["last_skip_notice_settled"] = settled_count
+                    await _send_transient_admin_notice(
+                        client,
+                        user_ctx,
+                        global_config,
+                        (
+                            "🧭 本局模型判定为观望（SKIP）\n"
+                            f"触发点：第 {next_sequence} 手\n"
+                            f"依据：{rt.get('last_predict_info', '信号冲突')}\n"
+                            "动作：不下注，等待下一局新信号"
+                        ),
+                        ttl_seconds=90,
+                        attr_name="shadow_probe_message",
+                    )
+                user_ctx.save_state()
+                return
 
         predict_source = str(rt.get("last_predict_source", "")).lower().strip()
         if predict_source in ("", "unknown"):
@@ -1464,29 +1514,40 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
             predict_source = "model"
             rt["last_predict_source"] = "model"
 
-        if predict_source in {"timeout", "fallback", "hard_fallback", "invalid"}:
-            non_model_gate = {
-                "blocked": True,
-                "gate_name": "模型可用性门控（异常回退）",
-                "pause_rounds": 1,
-                "reason_text": "当前预测来自回退通道，信号不稳定，跳过本局",
-                "source": predict_source,
-                "tag": str(rt.get("last_predict_tag", "") or "UNKNOWN"),
-                "confidence": int(rt.get("last_predict_confidence", 0) or 0),
-                "wins": risk_pause.get("wins", 0),
-                "total": risk_pause.get("total", 0),
-                "win_rate": risk_pause.get("win_rate", 0.0),
-            }
-            await _apply_entry_gate_pause(client, user_ctx, global_config, non_model_gate, next_sequence)
-            return
+        if not force_unlock_active and predict_source in {"timeout", "fallback", "hard_fallback", "invalid"}:
+            source_guard = _record_hand_stall_block(rt, next_sequence, history_len, "gate")
+            if source_guard.get("force_unlock", False):
+                prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, source_guard)
+                force_unlock_active = True
+            else:
+                non_model_gate = {
+                    "blocked": True,
+                    "gate_name": "模型可用性门控（异常回退）",
+                    "pause_rounds": 1,
+                    "reason_text": "当前预测来自回退通道，信号不稳定，跳过本局",
+                    "source": predict_source,
+                    "tag": str(rt.get("last_predict_tag", "") or "UNKNOWN"),
+                    "confidence": int(rt.get("last_predict_confidence", 0) or 0),
+                    "wins": risk_pause.get("wins", 0),
+                    "total": risk_pause.get("total", 0),
+                    "win_rate": risk_pause.get("win_rate", 0.0),
+                }
+                await _apply_entry_gate_pause(client, user_ctx, global_config, non_model_gate, next_sequence)
+                return
 
-        quality_gate = _evaluate_entry_quality_gate(rt, risk_pause, next_sequence)
-        if quality_gate.get("blocked", False):
-            await _apply_entry_gate_pause(client, user_ctx, global_config, quality_gate, next_sequence)
-            return
+        if not force_unlock_active:
+            quality_gate = _evaluate_entry_quality_gate(rt, risk_pause, next_sequence)
+            if quality_gate.get("blocked", False):
+                quality_guard = _record_hand_stall_block(rt, next_sequence, history_len, "gate")
+                if quality_guard.get("force_unlock", False):
+                    prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, quality_guard)
+                    force_unlock_active = True
+                else:
+                    await _apply_entry_gate_pause(client, user_ctx, global_config, quality_gate, next_sequence)
+                    return
 
-        # 高阶手位二次确认：第5手起，主副模型需同向且置信度达标。
-        if next_sequence >= HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP:
+        # 高阶手位二次确认：第7手起，主副模型需同向且置信度达标。
+        if not force_unlock_active and next_sequence >= HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP:
             dual_gate = await _evaluate_high_step_double_confirm(
                 user_ctx,
                 risk_pause,
@@ -1495,8 +1556,13 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
                 int(rt.get("last_predict_confidence", 0) or 0),
             )
             if dual_gate.get("blocked", False):
-                await _apply_entry_gate_pause(client, user_ctx, global_config, dual_gate, next_sequence)
-                return
+                dual_guard = _record_hand_stall_block(rt, next_sequence, history_len, "gate")
+                if dual_guard.get("force_unlock", False):
+                    prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, dual_guard)
+                    force_unlock_active = True
+                else:
+                    await _apply_entry_gate_pause(client, user_ctx, global_config, dual_gate, next_sequence)
+                    return
 
         if rt.get("ai_key_issue_active", False):
             await send_to_admin(client, _build_ai_key_warning_message(rt), user_ctx, global_config)
@@ -1529,6 +1595,7 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
         rt["bet_on"] = True
         rt["fund_pause_notified"] = False
         rt["limit_stop_notified"] = False
+        _clear_hand_stall_guard(rt)
 
         bet_id = generate_bet_id(user_ctx)
         state.bet_sequence_log.append({
@@ -1890,6 +1957,80 @@ def _should_skip_repeated_entry_timeout_gate(rt: dict, next_sequence: int, settl
     rt["entry_timeout_gate_last_seq"] = int(next_sequence)
     rt["entry_timeout_gate_last_settled"] = int(settled_count)
     return False
+
+
+def _clear_hand_stall_guard(rt: dict) -> None:
+    """清理“同手位卡死防护”计数器。"""
+    rt["stall_guard_sequence"] = -1
+    rt["stall_guard_last_history_len"] = -1
+    rt["stall_guard_no_bet_streak"] = 0
+    rt["stall_guard_skip_streak"] = 0
+    rt["stall_guard_timeout_streak"] = 0
+    rt["stall_guard_gate_streak"] = 0
+
+
+def _record_hand_stall_block(rt: dict, next_sequence: int, history_len: int, reason: str) -> dict:
+    """
+    记录同手位“未下单”阻断事件，并判断是否触发防卡死解锁。
+    reason: skip/timeout/gate
+    """
+    reason = str(reason or "gate").strip().lower()
+    if reason not in {"skip", "timeout", "gate"}:
+        reason = "gate"
+
+    current_seq = int(rt.get("stall_guard_sequence", -1))
+    if current_seq != int(next_sequence):
+        _clear_hand_stall_guard(rt)
+        rt["stall_guard_sequence"] = int(next_sequence)
+
+    last_history_len = int(rt.get("stall_guard_last_history_len", -1))
+    if int(history_len) != last_history_len:
+        rt["stall_guard_last_history_len"] = int(history_len)
+        rt["stall_guard_no_bet_streak"] = int(rt.get("stall_guard_no_bet_streak", 0)) + 1
+        if reason == "skip":
+            rt["stall_guard_skip_streak"] = int(rt.get("stall_guard_skip_streak", 0)) + 1
+        elif reason == "timeout":
+            rt["stall_guard_timeout_streak"] = int(rt.get("stall_guard_timeout_streak", 0)) + 1
+        else:
+            rt["stall_guard_gate_streak"] = int(rt.get("stall_guard_gate_streak", 0)) + 1
+
+    no_bet_streak = int(rt.get("stall_guard_no_bet_streak", 0))
+    skip_streak = int(rt.get("stall_guard_skip_streak", 0))
+    timeout_streak = int(rt.get("stall_guard_timeout_streak", 0))
+    gate_streak = int(rt.get("stall_guard_gate_streak", 0))
+
+    force_unlock = (
+        skip_streak > STALL_GUARD_SKIP_MAX
+        or timeout_streak > STALL_GUARD_TIMEOUT_MAX
+        or no_bet_streak > STALL_GUARD_TOTAL_MAX
+    )
+    return {
+        "force_unlock": force_unlock,
+        "sequence": int(next_sequence),
+        "reason": reason,
+        "no_bet_streak": no_bet_streak,
+        "skip_streak": skip_streak,
+        "timeout_streak": timeout_streak,
+        "gate_streak": gate_streak,
+    }
+
+
+def _prepare_force_unlock_prediction(state, rt: dict, next_sequence: int, trigger: dict) -> int:
+    """生成防卡死强制解锁预测方向（统计兜底）。"""
+    prediction = int(fallback_prediction(state.history))
+    rt["last_predict_source"] = "unlock_fallback"
+    rt["last_predict_tag"] = "UNLOCK"
+    rt["last_predict_confidence"] = 0
+    rt["last_predict_reason"] = "同手位连续阻断，强制解锁"
+    rt["last_predict_info"] = (
+        "防卡死解锁 | "
+        f"第{next_sequence}手连续阻断 "
+        f"(总:{trigger.get('no_bet_streak', 0)}, "
+        f"skip:{trigger.get('skip_streak', 0)}, timeout:{trigger.get('timeout_streak', 0)}) "
+        f"| 兜底方向:{'大' if prediction == 1 else '小'}"
+    )
+    rt["stall_guard_force_unlock_total"] = int(rt.get("stall_guard_force_unlock_total", 0)) + 1
+    return prediction
 
 
 def _select_secondary_model_id(user_ctx: UserContext, primary_model_id: str) -> str:
