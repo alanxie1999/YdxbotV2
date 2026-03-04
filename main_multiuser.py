@@ -10,6 +10,8 @@ import asyncio
 import os
 import time
 import sys
+import errno
+import fcntl
 from typing import Any, List
 from telethon import TelegramClient, events
 from logging.handlers import TimedRotatingFileHandler
@@ -64,6 +66,62 @@ async def create_client(user_ctx: UserContext, global_config: dict) -> TelegramC
         user_ctx.config.telegram.get("api_hash")
     )
     return client
+
+
+def _get_session_path(user_ctx: UserContext) -> str:
+    return os.path.join(
+        user_ctx.user_dir,
+        user_ctx.config.telegram.get("session_name", "session")
+    )
+
+
+def _acquire_session_lock(user_ctx: UserContext) -> bool:
+    """
+    为每个账号的 Telethon session 增加进程级文件锁，避免多个进程同时写同一个 .session。
+    这类并发写入会触发 sqlite3.OperationalError: database is locked。
+    """
+    session_path = _get_session_path(user_ctx)
+    lock_path = f"{session_path}.lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fd = None
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        setattr(user_ctx, "_session_lock_fd", fd)
+        setattr(user_ctx, "_session_lock_path", lock_path)
+        return True
+    except OSError as e:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        if e.errno in (errno.EACCES, errno.EAGAIN):
+            log_event(
+                logging.ERROR,
+                'start',
+                '账号session已被其他进程占用',
+                user_id=user_ctx.user_id,
+                session=session_path,
+                lock=lock_path,
+            )
+            return False
+        raise
+
+
+def _release_session_lock(user_ctx: UserContext):
+    fd = getattr(user_ctx, "_session_lock_fd", None)
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+    setattr(user_ctx, "_session_lock_fd", None)
 
 
 def _resolve_admin_chat(user_ctx: UserContext):
@@ -362,6 +420,7 @@ async def fetch_account_balance(user_ctx: UserContext) -> int:
 
 
 async def start_user(user_ctx: UserContext, global_config: dict):
+    lock_acquired = False
     try:
         zq_group_targets = _iter_targets(user_ctx.config.groups.get("zq_group", []))
         zq_bot_targets = _iter_targets(user_ctx.config.groups.get("zq_bot"))
@@ -386,6 +445,10 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 user_id=user_ctx.user_id,
             )
 
+        lock_acquired = _acquire_session_lock(user_ctx)
+        if not lock_acquired:
+            return None
+
         client = await create_client(user_ctx, global_config)
         user_ctx.client = client
         
@@ -402,6 +465,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                     user_id=user_ctx.user_id,
                     session=user_ctx.config.telegram.get("session_name", ""),
                 )
+                _release_session_lock(user_ctx)
                 return None
             print(f"\n🔐 用户 {user_ctx.config.name} 需要登录 Telegram")
             print(f"   请按照提示输入手机号和验证码...\n")
@@ -414,6 +478,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 log_event(logging.ERROR, 'start', '登录失败',
                           user_id=user_ctx.user_id, error=str(e))
                 print(f"❌ 登录失败: {e}")
+                _release_session_lock(user_ctx)
                 return None
         
         register_handlers(client, user_ctx, global_config)
@@ -469,6 +534,8 @@ async def start_user(user_ctx: UserContext, global_config: dict):
     except Exception as e:
         log_event(logging.ERROR, 'start', '用户启动失败',
                   user_id=user_ctx.user_id, error=str(e))
+        if lock_acquired:
+            _release_session_lock(user_ctx)
         return None
 
 
@@ -532,10 +599,12 @@ async def main():
 
     asyncio.create_task(periodic_release_check_loop(notify_release))
     
-    await asyncio.gather(*tasks, return_exceptions=True)
-    
-    for user_ctx in user_manager.get_all_users().values():
-        user_ctx.save_state()
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        for user_ctx in user_manager.get_all_users().values():
+            user_ctx.save_state()
+            _release_session_lock(user_ctx)
     
     log_event(logging.INFO, 'main', '程序正常退出')
 

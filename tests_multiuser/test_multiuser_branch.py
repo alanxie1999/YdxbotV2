@@ -9,6 +9,7 @@ from user_manager import UserContext, UserManager
 from model_manager import ModelManager
 import constants
 import zq_multiuser as zm
+import main_multiuser as mm
 
 
 def _write_json(path: Path, data):
@@ -306,6 +307,31 @@ def test_main_multiuser_settle_regex_is_strict():
     assert pattern.search("已结算: 结果为 12 大")
     assert pattern.search("已结算: 结果为 8 小")
     assert pattern.search("已结算: 结果为 9 |") is None
+
+
+def test_main_multiuser_session_lock_prevents_duplicate_acquire(tmp_path):
+    user_dir = tmp_path / "users" / "lock_user"
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    ctx1 = SimpleNamespace(
+        user_dir=str(user_dir),
+        user_id=9001,
+        config=SimpleNamespace(telegram={"session_name": "dup"}),
+    )
+    ctx2 = SimpleNamespace(
+        user_dir=str(user_dir),
+        user_id=9002,
+        config=SimpleNamespace(telegram={"session_name": "dup"}),
+    )
+
+    assert mm._acquire_session_lock(ctx1) is True
+    try:
+        assert mm._acquire_session_lock(ctx2) is False
+        mm._release_session_lock(ctx1)
+        assert mm._acquire_session_lock(ctx2) is True
+    finally:
+        mm._release_session_lock(ctx1)
+        mm._release_session_lock(ctx2)
 
 
 def test_user_isolation_between_two_contexts(tmp_path):
