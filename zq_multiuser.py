@@ -414,6 +414,7 @@ def format_dashboard(user_ctx: UserContext) -> str:
     )}\n\n———————————————\n🎯 **策略设定**\n"""
     mes += f"🔢 **软件版本：{get_software_version_text()}**\n"
     mes += f"🤖 **模型 API：{rt.get('current_model_id', 'unknown')}**\n"
+    mes += f"🚦 **当前押注状态：{get_bet_status_text(rt)}**\n"
     preset_name = rt.get("current_preset_name", "none")
     preset_params = (
         f"{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} "
@@ -459,6 +460,34 @@ def get_bet_status_text(rt: Dict[str, Any]) -> str:
         return "手动暂停"
     if not rt.get("switch", True):
         return "已关闭"
+
+    pause_active = bool(rt.get("pause_countdown_active", False))
+    stop_count = max(0, int(rt.get("stop_count", 0) or 0))
+    if pause_active or stop_count > 0:
+        total_rounds = max(0, int(rt.get("pause_countdown_total_rounds", 0) or 0))
+        last_remaining = int(rt.get("pause_countdown_last_remaining", -1) or -1)
+        reason = str(rt.get("pause_countdown_reason", "") or "").strip()
+
+        remaining_rounds = 0
+        if total_rounds > 0 and 0 < last_remaining <= total_rounds:
+            remaining_rounds = last_remaining
+        elif total_rounds > 0 and stop_count > 0:
+            # 兼容内部 stop_count=暂停局数+1 的实现细节，展示时尽量贴近“真实剩余局数”。
+            if stop_count > total_rounds:
+                remaining_rounds = total_rounds
+            else:
+                remaining_rounds = stop_count
+        elif stop_count > 0:
+            remaining_rounds = max(0, stop_count - 1)
+
+        if remaining_rounds > 0 and reason:
+            return f"自动暂停（剩{remaining_rounds}局，{reason}）"
+        if remaining_rounds > 0:
+            return f"自动暂停（剩{remaining_rounds}局）"
+        if reason:
+            return f"自动暂停（{reason}）"
+        return "自动暂停"
+
     if rt.get("bet_on", False):
         return "运行中"
     return "已暂停"
