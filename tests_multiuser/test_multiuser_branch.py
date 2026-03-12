@@ -1929,6 +1929,103 @@ def test_reconcile_bet_runtime_from_log_ignores_stale_pending_entries(tmp_path):
     assert zm.calculate_bet_amount(rt) == 477_000
 
 
+def test_build_pending_bet_heal_notice_contains_reconciled_status():
+    rt = {
+        "initial_amount": 50_000,
+        "bet_sequence_count": 2,
+        "lose_count": 2,
+        "bet_amount": 225_000,
+        "lose_once": 2.1,
+        "lose_twice": 2.1,
+        "lose_three": 2.1,
+        "lose_four": 2.05,
+    }
+    notice = zm.build_pending_bet_heal_notice(
+        {"count": 3, "items": ["20260312_1_27", "20260312_1_29", "20260312_1_30"]},
+        {"continuous_count": 2, "lose_count": 2},
+        rt,
+    )
+
+    assert "已修正历史异常挂单" in notice
+    assert "修复条数：3" in notice
+    assert "当前连续押注：2 次" in notice
+    assert "当前连输：2 次" in notice
+    assert "下一手预计下注：477,000" in notice
+
+
+def test_process_bet_on_sends_heal_notice_when_stale_pending_entries_are_fixed(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "5094"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "自愈提示用户"},
+            "telegram": {"user_id": 5094},
+            "groups": {"admin_chat": 5094},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = False
+    rt["bet_on"] = True
+    rt["stop_count"] = 2
+    rt["initial_amount"] = 50_000
+    rt["bet_sequence_count"] = 6
+    rt["lose_count"] = 5
+    rt["bet_amount"] = 2_145_500
+    rt["lose_once"] = 2.1
+    rt["lose_twice"] = 2.1
+    rt["lose_three"] = 2.1
+    rt["lose_four"] = 2.05
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260312_1_25", "amount": 106_000, "result": "赢", "profit": 104_940},
+        {"bet_id": "20260312_1_26", "amount": 50_000, "result": "输", "profit": -50_000},
+        {"bet_id": "20260312_1_27", "amount": 106_000, "result": None, "profit": 0},
+        {"bet_id": "20260312_1_28", "amount": 225_000, "result": "输", "profit": -225_000},
+        {"bet_id": "20260312_1_29", "amount": 477_000, "result": None, "profit": 0},
+    ]
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5094, id=len(sent_messages))
+
+    async def fake_refresh_pause_countdown_notice(client, user_ctx, global_cfg, remaining_rounds):
+        return None
+
+    async def fake_clear_pause_countdown_notice(client, user_ctx):
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "_refresh_pause_countdown_notice", fake_refresh_pause_countdown_notice)
+    monkeypatch.setattr(zm, "_clear_pause_countdown_notice", fake_clear_pause_countdown_notice)
+
+    class DummyClient:
+        async def send_message(self, target, message, parse_mode=None):
+            return SimpleNamespace(chat_id=target, id=1)
+
+        async def delete_messages(self, chat_id, message_id):
+            return None
+
+    event = SimpleNamespace(
+        id=9902,
+        chat_id=5094,
+        reply_markup=None,
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(DummyClient(), event, ctx, {}))
+
+    assert any("已修正历史异常挂单" in message for message in sent_messages)
+    assert any("当前连续押注：2 次" in message for message in sent_messages)
+    assert any("下一手预计下注：477,000" in message for message in sent_messages)
+    assert rt["stop_count"] == 1
+    assert rt["bet_sequence_count"] == 2
+    assert rt["lose_count"] == 2
+
+
 def test_process_bet_on_skips_duplicate_trigger_when_previous_bet_pending(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5092"
     _write_json(

@@ -467,6 +467,37 @@ def reconcile_bet_runtime_from_log(user_ctx: UserContext, include_open: bool = F
     return summary
 
 
+def build_pending_bet_heal_notice(healed_pending: Dict[str, Any], summary: Dict[str, Any], rt: Dict[str, Any]) -> str:
+    """生成历史脏挂单自愈提示，便于管理员快速确认当前已对齐到哪一手。"""
+    healed_count = int(healed_pending.get("count", 0) or 0)
+    if healed_count <= 0:
+        return ""
+
+    continuous_count = int(summary.get("continuous_count", 0) or 0)
+    lose_count = int(summary.get("lose_count", 0) or 0)
+    healed_items = healed_pending.get("items", []) if isinstance(healed_pending.get("items"), list) else []
+
+    try:
+        next_bet_amount = int(calculate_bet_amount(rt))
+    except Exception:
+        next_bet_amount = int(rt.get("initial_amount", 0) or 0)
+
+    fixed_text = "、".join(str(item) for item in healed_items[:3]) if healed_items else "已自动修正"
+    if len(healed_items) > 3:
+        fixed_text += " 等"
+
+    lines = [
+        "🩹 已修正历史异常挂单",
+        f"修复条数：{healed_count}",
+        f"修复记录：{fixed_text}",
+        f"当前连续押注：{continuous_count} 次",
+        f"当前连输：{lose_count} 次",
+        f"下一手预计下注：{format_number(next_bet_amount)}",
+        "说明：已按真实已结算记录重新对齐状态",
+    ]
+    return "\n".join(lines)
+
+
 def _normalize_ai_keys(ai_cfg: Dict[str, Any]) -> List[str]:
     """统一读取 ai api_keys，兼容旧字段 api_key。"""
     if not isinstance(ai_cfg, dict):
@@ -1438,6 +1469,14 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
                 f"lose_count={summary.get('lose_count', 0)}, "
                 f"bet_amount={summary.get('last_amount', 0)}"
             ),
+        )
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            build_pending_bet_heal_notice(healed_pending, summary, rt),
+            ttl_seconds=180,
+            attr_name="pending_bet_heal_message",
         )
 
     stop_count = int(rt.get("stop_count", 0))
