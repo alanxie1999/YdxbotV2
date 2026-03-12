@@ -21,14 +21,20 @@ from update_manager import periodic_release_check_loop
 # 日志配置
 logger = logging.getLogger('main_multiuser')
 logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
 _MAIN_ACCOUNT_NAME_REGISTRY: Dict[str, str] = {}
+MAIN_ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
 
 
 def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
     raw = str(text or "").strip().lower().replace(" ", "-")
     cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in {"-", "_"})
     return cleaned or fallback
+
+
+def _build_account_label(account_slug: str) -> str:
+    return f"ydx-{account_slug}"
 
 
 def register_main_user_log_identity(user_ctx: UserContext) -> str:
@@ -88,6 +94,88 @@ console_handler.setFormatter(logging.Formatter(
 console_handler.setLevel(logging.INFO)
 console_handler.addFilter(_main_log_filter)
 logger.addHandler(console_handler)
+
+
+class _MainAccountCategoryRouterHandler(logging.Handler):
+    def __init__(self, root_dir: str, backup_count: int = 7):
+        super().__init__(level=logging.DEBUG)
+        self.root_dir = root_dir
+        self.backup_count = backup_count
+        self._handlers: Dict[tuple, TimedRotatingFileHandler] = {}
+        self._default_filter = _MainLogDefaultsFilter()
+        self._formatter = logging.Formatter(
+            '%(asctime)s | %(levelname)s | [%(category)s] [%(account_tag)s] [%(custom_module)s:%(event)s] %(message)s | %(data)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+
+    def _get_handler(self, account_slug: str, category: str) -> TimedRotatingFileHandler:
+        key = (account_slug, category)
+        if key in self._handlers:
+            return self._handlers[key]
+        account_dir = os.path.join(self.root_dir, account_slug)
+        os.makedirs(account_dir, exist_ok=True)
+        log_path = os.path.join(account_dir, f"{category}.log")
+        handler = TimedRotatingFileHandler(
+            log_path,
+            when='midnight',
+            interval=1,
+            backupCount=self.backup_count,
+            encoding='utf-8'
+        )
+        handler.setFormatter(self._formatter)
+        handler.addFilter(self._default_filter)
+        self._handlers[key] = handler
+        return handler
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            self._default_filter.filter(record)
+            account_slug = str(getattr(record, "account_slug", "unknown") or "unknown")
+            if account_slug == "unknown":
+                return
+            category = str(getattr(record, "category", "runtime") or "runtime")
+            handler = self._get_handler(account_slug, category)
+            handler.emit(record)
+        except Exception:
+            self.handleError(record)
+
+    def close(self):
+        for handler in self._handlers.values():
+            try:
+                handler.close()
+            except Exception:
+                pass
+        self._handlers.clear()
+        super().close()
+
+
+class _MainAccountIdentityFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        account_slug = str(getattr(record, "account_slug", "") or "").strip()
+        if not account_slug:
+            fallback_slug = f"user-{getattr(record, 'user_id', '0')}" if str(getattr(record, "user_id", "0")) != "0" else "unknown"
+            account_slug = _sanitize_account_slug("", fallback=fallback_slug)
+            record.account_slug = account_slug
+        record.account_label = _build_account_label(account_slug)
+        record.account_tag = f"【ydx-{account_slug}】"
+        return True
+
+
+account_category_handler = _MainAccountCategoryRouterHandler(MAIN_ACCOUNT_LOG_ROOT, backup_count=7)
+account_category_handler.addFilter(_main_log_filter)
+_main_account_identity_filter = _MainAccountIdentityFilter()
+account_category_handler.addFilter(_main_account_identity_filter)
+logger.addHandler(account_category_handler)
+console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(levelname)s | %(account_label)s | %(message)s',
+    datefmt='%H:%M:%S'
+))
+console_handler.addFilter(_main_account_identity_filter)
+try:
+    logger.removeHandler(file_handler)
+    file_handler.close()
+except Exception:
+    pass
 
 
 def log_event(level, module, event=None, message='', **kwargs):

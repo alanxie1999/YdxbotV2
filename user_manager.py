@@ -10,6 +10,7 @@ import json
 import threading
 import logging
 import importlib.util
+import re
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from logging.handlers import TimedRotatingFileHandler
@@ -18,12 +19,166 @@ import constants
 # 日志配置
 logger = logging.getLogger('user_manager')
 logger.setLevel(logging.DEBUG)
+logger.propagate = False
 file_handler = TimedRotatingFileHandler('user_manager.log', when='midnight', interval=1, backupCount=3, encoding='utf-8')
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
+ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
+
+
+def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
+    raw = str(text or "").strip().lower().replace(" ", "-")
+    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in {"-", "_"})
+    return cleaned or fallback
+
+
+def _build_account_label(account_slug: str) -> str:
+    return f"ydx-{account_slug}"
+
+
+def _parse_user_id_from_text(*parts: Any) -> str:
+    for part in parts:
+        match = re.search(r"user_id=(\d+)", str(part or ""))
+        if match:
+            return match.group(1)
+    return "0"
+
+
+def _resolve_user_identity(user_id: Any = 0, account_name: str = "") -> Dict[str, str]:
+    user_id_text = str(user_id or 0)
+    resolved_name = str(account_name or "").strip()
+    if not resolved_name and user_id_text not in {"", "0"}:
+        resolved_name = f"user-{user_id_text}"
+    account_slug = _sanitize_account_slug(
+        resolved_name,
+        fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"),
+    )
+    return {
+        "user_id": user_id_text,
+        "account_slug": account_slug,
+        "account_label": _build_account_label(account_slug),
+        "account_tag": f"【ydx-{account_slug}】",
+    }
+
+
+class _UserManagerLogDefaultsFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "user_id"):
+            record.user_id = "0"
+        if not hasattr(record, "module_name"):
+            record.module_name = "user_manager"
+        if not hasattr(record, "event"):
+            record.event = "general"
+        if not hasattr(record, "data"):
+            record.data = ""
+        if not hasattr(record, "category"):
+            record.category = "warning" if int(getattr(record, "levelno", logging.INFO)) >= logging.WARNING else "runtime"
+        if not hasattr(record, "account_slug"):
+            fallback_slug = f"user-{record.user_id}" if str(record.user_id) != "0" else "unknown"
+            record.account_slug = _sanitize_account_slug("", fallback=fallback_slug)
+        record.account_label = _build_account_label(record.account_slug)
+        record.account_tag = f"【ydx-{record.account_slug}】"
+        return True
+
+
+class _UserManagerAccountRouterHandler(logging.Handler):
+    def __init__(self, root_dir: str, backup_count: int = 7):
+        super().__init__(level=logging.DEBUG)
+        self.root_dir = root_dir
+        self.backup_count = backup_count
+        self._handlers: Dict[tuple, TimedRotatingFileHandler] = {}
+        self._default_filter = _UserManagerLogDefaultsFilter()
+        self._formatter = logging.Formatter(
+            '%(asctime)s | %(levelname)s | [%(account_tag)s] [%(module_name)s:%(event)s] %(message)s | %(data)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+
+    def _get_handler(self, account_slug: str, category: str) -> TimedRotatingFileHandler:
+        key = (account_slug, category)
+        if key in self._handlers:
+            return self._handlers[key]
+        account_dir = os.path.join(self.root_dir, account_slug)
+        os.makedirs(account_dir, exist_ok=True)
+        log_path = os.path.join(account_dir, f"{category}.log")
+        handler = TimedRotatingFileHandler(
+            log_path,
+            when='midnight',
+            interval=1,
+            backupCount=self.backup_count,
+            encoding='utf-8'
+        )
+        handler.setFormatter(self._formatter)
+        handler.addFilter(self._default_filter)
+        self._handlers[key] = handler
+        return handler
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            self._default_filter.filter(record)
+            account_slug = str(getattr(record, "account_slug", "unknown") or "unknown")
+            if account_slug == "unknown":
+                return
+            category = str(getattr(record, "category", "runtime") or "runtime")
+            handler = self._get_handler(account_slug, category)
+            handler.emit(record)
+        except Exception:
+            self.handleError(record)
+
+    def close(self):
+        for handler in self._handlers.values():
+            try:
+                handler.close()
+            except Exception:
+                pass
+        self._handlers.clear()
+        super().close()
+
+
+_user_manager_log_filter = _UserManagerLogDefaultsFilter()
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(levelname)s | %(account_label)s | %(message)s',
+    datefmt='%H:%M:%S'
+))
+console_handler.setLevel(logging.INFO)
+console_handler.addFilter(_user_manager_log_filter)
+logger.addHandler(console_handler)
+
+account_category_handler = _UserManagerAccountRouterHandler(ACCOUNT_LOG_ROOT, backup_count=7)
+account_category_handler.addFilter(_user_manager_log_filter)
+logger.addHandler(account_category_handler)
+try:
+    logger.removeHandler(file_handler)
+    file_handler.close()
+except Exception:
+    pass
 
 
 def log_event(level, module, event, message=None, **kwargs):
+    if message is None:
+        message = event
+        event = module
+        module = 'user_manager'
+    user_id = kwargs.pop("user_id", None)
+    user_id_text = _parse_user_id_from_text(user_id, message, kwargs)
+    identity = _resolve_user_identity(user_id=user_id_text)
+    category = "warning" if level >= logging.WARNING else "runtime"
+    data = ', '.join(f'{k}={v}' for k, v in kwargs.items())
+    logger.log(
+        level,
+        message,
+        extra={
+            "user_id": identity["user_id"],
+            "module_name": module,
+            "event": event,
+            "data": data,
+            "category": category,
+            "account_slug": identity["account_slug"],
+            "account_label": identity["account_label"],
+            "account_tag": identity["account_tag"],
+        },
+    )
+    return
     # 兼容旧调用: log_event(level, event, message, data)
     if message is None:
         message = event

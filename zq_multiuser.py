@@ -17,7 +17,7 @@ import time
 import math
 from collections import Counter
 from logging.handlers import TimedRotatingFileHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 from user_manager import UserContext, UserState
 from typing import Dict, Any, List, Optional
 import constants
@@ -33,6 +33,7 @@ from update_manager import (
 # 日志配置
 logger = logging.getLogger('zq_multiuser')
 logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
 ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
 _ACCOUNT_NAME_REGISTRY: Dict[str, str] = {}
@@ -42,6 +43,36 @@ def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
     raw = str(text or "").strip().lower().replace(" ", "-")
     cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in {"-", "_"})
     return cleaned or fallback
+
+
+def _build_account_label(account_slug: str) -> str:
+    return f"ydx-{account_slug}"
+
+
+def _resolve_account_identity(
+    user_ctx: Optional[UserContext] = None,
+    user_id: Any = 0,
+    account_name: str = "",
+) -> Dict[str, str]:
+    user_id_text = str(user_id or 0)
+    resolved_name = str(account_name or "").strip()
+    if user_ctx is not None:
+        user_id_text = str(getattr(user_ctx, "user_id", user_id_text) or user_id_text)
+        if not resolved_name:
+            resolved_name = str(getattr(getattr(user_ctx, "config", None), "name", "") or "").strip()
+    if not resolved_name and user_id_text not in {"", "0"}:
+        resolved_name = f"user-{user_id_text}"
+    account_slug = _sanitize_account_slug(
+        resolved_name,
+        fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"),
+    )
+    return {
+        "user_id": user_id_text,
+        "account_name": resolved_name,
+        "account_slug": account_slug,
+        "account_label": _build_account_label(account_slug),
+        "account_tag": f"【ydx-{account_slug}】",
+    }
 
 
 def register_user_log_identity(user_ctx: UserContext) -> str:
@@ -163,6 +194,33 @@ logger.addHandler(console_handler)
 account_category_handler = _AccountCategoryRouterHandler(ACCOUNT_LOG_ROOT, backup_count=7)
 account_category_handler.addFilter(_default_log_filter)
 logger.addHandler(account_category_handler)
+
+
+class _AccountIdentityFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        account_slug = str(getattr(record, "account_slug", "") or "").strip()
+        if not account_slug:
+            fallback_slug = f"user-{getattr(record, 'user_id', '0')}" if str(getattr(record, "user_id", "0")) != "0" else "unknown"
+            account_slug = _sanitize_account_slug("", fallback=fallback_slug)
+            record.account_slug = account_slug
+        record.account_label = _build_account_label(account_slug)
+        record.account_tag = f"【ydx-{account_slug}】"
+        return True
+
+
+_account_identity_filter = _AccountIdentityFilter()
+console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(levelname)s | %(account_label)s | %(message)s',
+    datefmt='%H:%M:%S'
+))
+console_handler.setLevel(logging.INFO)
+console_handler.addFilter(_account_identity_filter)
+account_category_handler.addFilter(_account_identity_filter)
+try:
+    logger.removeHandler(file_handler)
+    file_handler.close()
+except Exception:
+    pass
 
 # 自动统计推送节奏：每 10 局一次，保留 10 分钟后自动删除
 AUTO_STATS_INTERVAL_ROUNDS = 10
@@ -827,6 +885,143 @@ def _resolve_admin_chat(user_ctx: UserContext):
     return admin_chat
 
 
+def _append_text_record(file_path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _cleanup_daily_interaction_files(root_dir: str, retention_days: int = 7) -> None:
+    if retention_days <= 0 or not os.path.isdir(root_dir):
+        return
+    cutoff = datetime.now().date() - timedelta(days=retention_days - 1)
+    for entry in os.scandir(root_dir):
+        if not entry.is_file() or not entry.name.endswith((".jsonl", ".log")):
+            continue
+        try:
+            stem = entry.name.rsplit(".", 1)[0]
+            file_date = datetime.strptime(stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            try:
+                os.remove(entry.path)
+            except OSError:
+                pass
+
+
+def _mask_command_text(command_text: str) -> tuple[str, bool]:
+    text = str(command_text or "").strip()
+    if not text:
+        return "", False
+    parts = text.split()
+    if not parts:
+        return text, False
+    normalized_cmd = parts[0][1:] if parts[0].startswith("/") else parts[0]
+    cmd = normalized_cmd.lower()
+    if cmd in {"apikey", "ak"} and len(parts) >= 2:
+        sub_cmd = parts[1].lower()
+        if sub_cmd in {"set", "add"} and len(parts) >= 3:
+            return " ".join(parts[:2] + ["***"]), True
+    return text, False
+
+
+def _build_interaction_entry(record: Dict[str, Any]) -> str:
+    ts = str(record.get("ts", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    direction = str(record.get("direction", "") or "").strip().lower()
+    kind = str(record.get("kind", "") or "").strip().lower()
+    channel = str(record.get("channel", "") or "").strip().lower() or "-"
+    text = str(record.get("text", "") or "")
+
+    direction_label = "发送" if direction == "outbound" else "接收" if direction == "inbound" else direction or "未知"
+    kind_label = "通知" if kind == "notification" else "命令" if kind == "command" else kind or "事件"
+
+    header_parts = [f"[{ts}]", direction_label, channel, kind_label]
+    command = str(record.get("command", "") or "").strip()
+    msg_type = str(record.get("msg_type", "") or "").strip()
+    if command:
+        header_parts.append(command)
+    elif msg_type:
+        header_parts.append(msg_type)
+
+    if "success" in record:
+        header_parts.append("成功" if bool(record.get("success")) else "失败")
+    if bool(record.get("masked", False)):
+        header_parts.append("已脱敏")
+    chat_id = record.get("chat_id", None)
+    if chat_id not in (None, ""):
+        header_parts.append(f"chat_id={chat_id}")
+    error = str(record.get("error", "") or "").strip()
+    if error:
+        header_parts.append(f"error={error[:160]}")
+
+    header = " | ".join(part for part in header_parts if part)
+    body = text if text else "(空内容)"
+    separator = "─" * 72
+    return f"{header}\n{body}\n{separator}\n\n"
+
+
+def append_interaction_event(
+    user_ctx: UserContext,
+    *,
+    direction: str,
+    kind: str,
+    channel: str,
+    text: str,
+    **extra: Any,
+) -> None:
+    identity = _resolve_account_identity(user_ctx)
+    interaction_dir = os.path.join(ACCOUNT_LOG_ROOT, identity["account_slug"], "interactions")
+    file_name = datetime.now().strftime("%Y-%m-%d") + ".log"
+    record = {
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "user_id": int(identity["user_id"]) if str(identity["user_id"]).isdigit() else identity["user_id"],
+        "account_name": identity["account_name"],
+        "account_slug": identity["account_slug"],
+        "account_label": identity["account_label"],
+        "direction": str(direction or "").strip().lower() or "unknown",
+        "kind": str(kind or "").strip().lower() or "unknown",
+        "channel": str(channel or "").strip().lower() or "unknown",
+        "text": str(text or ""),
+    }
+    for key, value in extra.items():
+        if value is None:
+            continue
+        record[key] = value
+    try:
+        _append_text_record(os.path.join(interaction_dir, file_name), _build_interaction_entry(record))
+        _cleanup_daily_interaction_files(interaction_dir, retention_days=7)
+    except Exception as e:
+        log_event(logging.WARNING, "interaction", "写入交互审计失败", user_id=user_ctx.user_id, data=str(e))
+
+
+def _record_outbound_message(
+    user_ctx: UserContext,
+    *,
+    channel: str,
+    text: str,
+    msg_type: str,
+    success: bool,
+    parse_mode: Optional[str] = None,
+    title: Optional[str] = None,
+    chat_id: Any = None,
+    error: Optional[str] = None,
+) -> None:
+    append_interaction_event(
+        user_ctx,
+        direction="outbound",
+        kind="notification",
+        channel=channel,
+        text=text,
+        msg_type=msg_type,
+        success=bool(success),
+        parse_mode=parse_mode,
+        title=title,
+        chat_id=chat_id,
+        error=error,
+    )
+
+
 async def _post_form_async(url: str, payload: dict, timeout: int = 5):
     """在异步上下文中安全发送 form 请求，避免阻塞事件循环。"""
     return await asyncio.to_thread(requests.post, url, data=payload, timeout=timeout)
@@ -863,14 +1058,36 @@ async def send_message_v2(
     priority_desp = _ensure_account_prefix(desp if desp is not None else message, account_prefix)
 
     sent_message = None
+    admin_chat = None
     if "admin" in channels or "all" in channels:
         try:
             admin_chat = _resolve_admin_chat(user_ctx)
             if admin_chat:
                 # 修复：多用户分支 - 返回管理员消息对象，确保仪表盘/统计可被后续刷新删除。
                 sent_message = await client.send_message(admin_chat, admin_message, parse_mode=parse_mode)
+                _record_outbound_message(
+                    user_ctx,
+                    channel="admin_chat",
+                    text=admin_message,
+                    msg_type=msg_type,
+                    success=True,
+                    parse_mode=parse_mode,
+                    chat_id=admin_chat,
+                )
         except Exception as e:
             log_event(logging.ERROR, 'send_msg', '发送管理员消息失败', user_id=user_ctx.user_id, data=str(e))
+
+    if admin_chat is not None and sent_message is None:
+        _record_outbound_message(
+            user_ctx,
+            channel="admin_chat",
+            text=admin_message,
+            msg_type=msg_type,
+            success=False,
+            parse_mode=parse_mode,
+            chat_id=admin_chat,
+            error="send_failed",
+        )
 
     if "priority" in channels or "all" in channels:
         iyuu_cfg = user_ctx.config.notification.get("iyuu", {})
@@ -884,6 +1101,15 @@ async def send_message_v2(
                     iyuu_url = f"https://iyuu.cn/{token}.send" if token else None
                 if iyuu_url:
                     await _post_form_async(iyuu_url, payload, timeout=5)
+                    _record_outbound_message(
+                        user_ctx,
+                        channel="iyuu",
+                        text=priority_desp,
+                        msg_type=msg_type,
+                        success=True,
+                        parse_mode=parse_mode,
+                        title=final_title,
+                    )
             except Exception as e:
                 log_event(logging.ERROR, 'send_msg', 'IYUU通知失败', user_id=user_ctx.user_id, data=str(e))
 
@@ -896,6 +1122,15 @@ async def send_message_v2(
                     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
                     payload = {"chat_id": chat_id, "text": priority_message}
                     await _post_json_async(url, payload, timeout=5)
+                    _record_outbound_message(
+                        user_ctx,
+                        channel="tg_bot",
+                        text=priority_message,
+                        msg_type=msg_type,
+                        success=True,
+                        parse_mode=parse_mode,
+                        chat_id=chat_id,
+                    )
             except Exception as e:
                 log_event(logging.ERROR, 'send_msg', 'TG Bot通知失败', user_id=user_ctx.user_id, data=str(e))
 
@@ -947,6 +1182,15 @@ async def send_message(
                 iyuu_url = f"https://iyuu.cn/{token}.send" if token else None
             if iyuu_url:
                 await _post_form_async(iyuu_url, payload, timeout=5)
+                _record_outbound_message(
+                    user_ctx,
+                    channel="iyuu",
+                    text=priority_desp,
+                    msg_type=msg_type,
+                    success=True,
+                    parse_mode=parse_mode,
+                    title=final_title,
+                )
     if to in ("priority", "tgbot"):
         tg_bot_cfg = user_ctx.config.notification.get("tg_bot", {})
         if tg_bot_cfg.get("enable"):
@@ -956,6 +1200,15 @@ async def send_message(
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
                 payload = {"chat_id": chat_id, "text": priority_message}
                 await _post_json_async(url, payload, timeout=5)
+                _record_outbound_message(
+                    user_ctx,
+                    channel="tg_bot",
+                    text=priority_message,
+                    msg_type=msg_type,
+                    success=True,
+                    parse_mode=parse_mode,
+                    chat_id=chat_id,
+                )
     return None
 
 
@@ -4556,6 +4809,18 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
     safe_log_text = text[:50]
     if cmd in {"apikey", "ak"}:
         safe_log_text = f"{raw_cmd} ***"
+    masked_text, was_masked = _mask_command_text(text)
+    append_interaction_event(
+        user_ctx,
+        direction="inbound",
+        kind="command",
+        channel="admin_chat",
+        text=masked_text,
+        command=cmd,
+        masked=was_masked,
+        chat_id=getattr(event, "chat_id", None),
+        message_id=getattr(event, "id", None),
+    )
     log_event(logging.INFO, 'user_cmd', '处理用户命令', user_id=user_ctx.user_id, data=safe_log_text)
     
     try:

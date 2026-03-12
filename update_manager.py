@@ -711,6 +711,14 @@ def _is_runtime_file(path: str) -> bool:
         return True
     if normalized.startswith("tests_multiuser/users/"):
         return True
+    if normalized.startswith("logs/"):
+        return True
+    if normalized.startswith(".venv/"):
+        return True
+    if normalized.startswith("analysis_outputs/"):
+        return True
+    if "__pycache__/" in normalized:
+        return True
     if normalized.startswith("user/"):
         # legacy 单用户目录统一视为运行时数据
         return True
