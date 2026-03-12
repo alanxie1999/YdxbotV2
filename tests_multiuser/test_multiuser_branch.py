@@ -1886,6 +1886,170 @@ def test_process_settle_skips_lose_end_when_range_is_invalid(tmp_path, monkeypat
     assert rt["lose_start_info"] == {}
 
 
+def test_reconcile_bet_runtime_from_log_ignores_stale_pending_entries(tmp_path):
+    user_dir = tmp_path / "users" / "5091"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "脏挂单修复用户"},
+            "telegram": {"user_id": 5091},
+            "groups": {"admin_chat": 5091},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["initial_amount"] = 50_000
+    rt["bet"] = False
+    rt["bet_sequence_count"] = 6
+    rt["lose_count"] = 5
+    rt["bet_amount"] = 2_145_500
+    rt["lose_once"] = 2.1
+    rt["lose_twice"] = 2.1
+    rt["lose_three"] = 2.1
+    rt["lose_four"] = 2.05
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260312_1_25", "amount": 106_000, "result": "赢", "profit": 104_940},
+        {"bet_id": "20260312_1_26", "amount": 50_000, "result": "输", "profit": -50_000},
+        {"bet_id": "20260312_1_27", "amount": 106_000, "result": None, "profit": 0},
+        {"bet_id": "20260312_1_28", "amount": 225_000, "result": "输", "profit": -225_000},
+        {"bet_id": "20260312_1_29", "amount": 477_000, "result": None, "profit": 0},
+        {"bet_id": "20260312_1_30", "amount": 1_011_500, "result": None, "profit": 0},
+    ]
+
+    healed = zm.heal_stale_pending_bets(ctx)
+    summary = zm.reconcile_bet_runtime_from_log(ctx)
+
+    assert healed["count"] == 3
+    assert summary["continuous_count"] == 2
+    assert summary["lose_count"] == 2
+    assert rt["bet_sequence_count"] == 2
+    assert rt["lose_count"] == 2
+    assert rt["bet_amount"] == 225_000
+    assert zm.calculate_bet_amount(rt) == 477_000
+
+
+def test_process_bet_on_skips_duplicate_trigger_when_previous_bet_pending(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "5092"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "重复下注保护用户"},
+            "telegram": {"user_id": 5092},
+            "groups": {"admin_chat": 5092},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = True
+    rt["bet_on"] = True
+    ctx.state.history = [0, 1] * 30
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260312_1_28", "sequence": 2, "direction": "small", "amount": 225_000, "result": None, "profit": 0}
+    ]
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5092, id=1)
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+
+    class DummyClient:
+        async def send_message(self, target, message, parse_mode=None):
+            return SimpleNamespace(chat_id=target, id=1)
+
+        async def delete_messages(self, chat_id, message_id):
+            return None
+
+    event = SimpleNamespace(
+        id=9901,
+        chat_id=5092,
+        reply_markup=None,
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(DummyClient(), event, ctx, {}))
+
+    assert len(ctx.state.bet_sequence_log) == 1
+    assert ctx.state.bet_sequence_log[0]["bet_id"] == "20260312_1_28"
+    assert ctx.state.bet_sequence_log[0]["result"] is None
+    assert rt["bet"] is True
+    assert sent_messages == []
+
+
+def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "5093"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "连押纠偏用户"},
+            "telegram": {"user_id": 5093},
+            "groups": {"admin_chat": 5093},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet"] = True
+    rt["bet_type"] = 0  # 押小，下面开大 -> 输
+    rt["bet_amount"] = 2_145_500
+    rt["bet_sequence_count"] = 6
+    rt["lose_count"] = 2
+    rt["warning_lose_count"] = 3
+    rt["current_round"] = 1
+    rt["current_bet_seq"] = 32
+    rt["current_preset_name"] = "yc50000"
+    rt["account_balance"] = 14_508_552
+    rt["gambling_fund"] = 6_187_734
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260312_1_25", "amount": 106_000, "result": "赢", "profit": 104_940},
+        {"bet_id": "20260312_1_26", "amount": 50_000, "result": "输", "profit": -50_000},
+        {"bet_id": "20260312_1_27", "amount": 106_000, "result": None, "profit": 0},
+        {"bet_id": "20260312_1_28", "amount": 225_000, "result": "输", "profit": -225_000},
+        {"bet_id": "20260312_1_29", "amount": 477_000, "result": None, "profit": 0},
+        {"bet_id": "20260312_1_30", "amount": 1_011_500, "result": None, "profit": 0},
+        {"bet_id": "20260312_1_31", "amount": 2_145_500, "result": None, "profit": 0},
+    ]
+
+    captured = {}
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", title=None, desp=None):
+        if msg_type == "lose_streak":
+            captured["message"] = message
+        return None
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        return SimpleNamespace(chat_id=5093, id=1)
+
+    async def fake_fetch_balance(user_ctx):
+        return rt["account_balance"]
+
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "fetch_balance", fake_fetch_balance)
+
+    class DummyClient:
+        async def send_message(self, target, message, parse_mode=None):
+            return SimpleNamespace(chat_id=target, id=1)
+
+        async def delete_messages(self, chat_id, message_id):
+            return None
+
+    event = SimpleNamespace(id=45031, message=SimpleNamespace(message="已结算: 结果为 9 大"))
+    asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
+
+    msg = captured["message"]
+    assert "⚠️⚠️  3 连输告警 ⚠️⚠️" in msg
+    assert "😀 连续押注：3 次" in msg
+    assert "💰 累计损失：2,420,500" in msg
+    assert rt["bet_sequence_count"] == 3
+    assert rt["lose_count"] == 3
+
+
 def test_process_settle_profit_pause_does_not_immediately_resume(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5014"
     _write_json(

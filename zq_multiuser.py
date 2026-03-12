@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import requests
 import aiohttp
 import time
@@ -17,8 +18,8 @@ import math
 from collections import Counter
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
-from user_manager import UserContext
-from typing import Dict, Any, List
+from user_manager import UserContext, UserState
+from typing import Dict, Any, List, Optional
 import constants
 from update_manager import (
     get_current_repo_info,
@@ -315,6 +316,155 @@ def heal_stale_pending_bets(user_ctx: UserContext) -> Dict[str, Any]:
         rt["pending_bet_last_heal_at"] = now_text
 
     return {"count": healed_count, "items": healed_items}
+
+
+def _get_latest_open_bet_entry(state: UserState) -> Optional[Dict[str, Any]]:
+    """返回最新一条未结算押注，供重复下注保护和结算对位使用。"""
+    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    for item in reversed(logs):
+        if isinstance(item, dict) and item.get("result") is None:
+            return item
+    return None
+
+
+def _collect_effective_bet_chain(state: UserState, include_open: bool = False) -> List[Dict[str, Any]]:
+    """
+    取出“上一笔赢单之后到当前”的真实下注链。
+    - 忽略“异常未结算”等脏记录
+    - 可选把最后一条未结算押注也算进当前链路
+    """
+    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    effective_logs: List[Dict[str, Any]] = []
+    open_included = False
+
+    for item in logs:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        if result == "异常未结算":
+            continue
+        if result is None:
+            if include_open and not open_included:
+                effective_logs.append(item)
+                open_included = True
+            continue
+        effective_logs.append(item)
+
+    chain: List[Dict[str, Any]] = []
+    for item in reversed(effective_logs):
+        chain.append(item)
+        if item.get("result") == "赢" and len(chain) > 1:
+            chain.pop()
+            break
+        if item.get("result") == "赢":
+            chain = []
+            break
+    chain.reverse()
+    return chain
+
+
+def _summarize_effective_bet_chain(state: UserState, include_open: bool = False) -> Dict[str, Any]:
+    """根据真实下注链回算连续押注、连输和下一手基准，避免幽灵挂单污染 runtime。"""
+    chain = _collect_effective_bet_chain(state, include_open=include_open)
+    continuous_count = len(chain)
+    lose_count = sum(1 for item in chain if item.get("result") == "输")
+    total_losses = sum(
+        abs(int(item.get("profit", 0) or 0))
+        for item in chain
+        if int(item.get("profit", 0) or 0) < 0
+    )
+
+    last_amount = 0
+    if chain:
+        try:
+            last_amount = int(chain[-1].get("amount", 0) or 0)
+        except Exception:
+            last_amount = 0
+
+    start_round = "?"
+    start_seq = "?"
+    if chain:
+        first_bet_id = str(chain[0].get("bet_id", "") or "")
+        try:
+            if "_" in first_bet_id:
+                _, parsed_round, parsed_seq = first_bet_id.split("_")
+                start_round, start_seq = parsed_round, parsed_seq
+            else:
+                nums = re.findall(r"\d+", first_bet_id)
+                if len(nums) >= 4:
+                    start_round, start_seq = nums[-2], nums[-1]
+                else:
+                    start_round = chain[0].get("round", "?")
+                    start_seq = chain[0].get("sequence", "?")
+        except Exception:
+            start_round = chain[0].get("round", "?")
+            start_seq = chain[0].get("sequence", "?")
+
+    return {
+        "chain": chain,
+        "continuous_count": continuous_count,
+        "lose_count": lose_count,
+        "total_losses": total_losses,
+        "last_amount": last_amount,
+        "start_round": start_round,
+        "start_seq": start_seq,
+    }
+
+
+def _summarize_recent_resolved_chain(state: UserState) -> Dict[str, Any]:
+    """
+    返回“以最近一次真实结算为结尾”的链路。
+    例如：输输输赢 -> 返回 4 手；输输输 -> 返回 3 手。
+    """
+    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    effective_logs: List[Dict[str, Any]] = []
+    for item in logs:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        if result in (None, "异常未结算"):
+            continue
+        effective_logs.append(item)
+
+    if not effective_logs:
+        chain: List[Dict[str, Any]] = []
+    else:
+        chain = [effective_logs[-1]]
+        for item in reversed(effective_logs[:-1]):
+            if item.get("result") == "赢":
+                break
+            chain.append(item)
+        chain.reverse()
+
+    total_losses = sum(
+        abs(int(item.get("profit", 0) or 0))
+        for item in chain
+        if int(item.get("profit", 0) or 0) < 0
+    )
+    lose_count = sum(1 for item in chain if item.get("result") == "输")
+
+    return {
+        "chain": chain,
+        "continuous_count": len(chain),
+        "lose_count": lose_count,
+        "total_losses": total_losses,
+    }
+
+
+def reconcile_bet_runtime_from_log(user_ctx: UserContext, include_open: bool = False) -> Dict[str, Any]:
+    """
+    用真实下注链回写 runtime。
+    这一步专门兜底“重复触发下注导致 sequence 脏掉”的情况。
+    """
+    state = user_ctx.state
+    rt = state.runtime
+    summary = _summarize_effective_bet_chain(state, include_open=include_open)
+    initial_amount = int(rt.get("initial_amount", 500) or 500)
+
+    rt["bet_sequence_count"] = int(summary["continuous_count"])
+    rt["lose_count"] = int(summary["lose_count"])
+    rt["bet_amount"] = int(summary["last_amount"] or initial_amount) if summary["continuous_count"] > 0 else initial_amount
+    return summary
 
 
 def _normalize_ai_keys(ai_cfg: Dict[str, Any]) -> List[str]:
@@ -1257,6 +1407,38 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
             user_ctx.save_state()
         log_event(logging.DEBUG, 'bet_on', '手动暂停中，跳过押注', user_id=user_ctx.user_id)
         return
+
+    open_bet_entry = _get_latest_open_bet_entry(state)
+    if rt.get("bet", False) and open_bet_entry is not None:
+        log_event(
+            logging.INFO,
+            'bet_on',
+            '检测到上一手仍待结算，跳过重复下注触发',
+            user_id=user_ctx.user_id,
+            data=f"bet_id={open_bet_entry.get('bet_id', 'unknown')}",
+        )
+        return
+    if rt.get("bet", False) and open_bet_entry is None:
+        # 防御式修正：runtime 仍显示待结算，但日志里已经没有开放挂单。
+        rt["bet"] = False
+        user_ctx.save_state()
+
+    healed_pending = heal_stale_pending_bets(user_ctx)
+    if healed_pending.get("count", 0) > 0:
+        summary = reconcile_bet_runtime_from_log(user_ctx)
+        user_ctx.save_state()
+        log_event(
+            logging.WARNING,
+            'bet_on',
+            '自愈历史异常未结算挂单并回算连押状态',
+            user_id=user_ctx.user_id,
+            data=(
+                f"healed={healed_pending.get('count', 0)}, "
+                f"continuous={summary.get('continuous_count', 0)}, "
+                f"lose_count={summary.get('lose_count', 0)}, "
+                f"bet_amount={summary.get('last_amount', 0)}"
+            ),
+        )
 
     stop_count = int(rt.get("stop_count", 0))
     if stop_count > 0:
@@ -3658,11 +3840,12 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
 
         if rt.get("bet", False):
                 try:
-                    if state.bet_sequence_log and state.bet_sequence_log[-1].get("result") in ("赢", "输"):
-                        # 异常兜底：如果最后一笔已结算但 bet 标记未清理，防止重复发送“押注结果”。
+                    settled_entry = _get_latest_open_bet_entry(state)
+                    if settled_entry is None:
+                        # 异常兜底：runtime 认为有待结算，但日志里已经找不到开放挂单。
                         rt["bet"] = False
                         user_ctx.save_state()
-                        log_event(logging.WARNING, 'settle', '检测到已结算下注，跳过重复结算', user_id=user_ctx.user_id)
+                        log_event(logging.WARNING, 'settle', '未找到待结算押注，跳过重复结算', user_id=user_ctx.user_id)
                         return
 
                     prediction = int(rt.get("bet_type", -1))
@@ -3690,6 +3873,16 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                         # 结束本轮连输后，重置深度风控里程碑触发记录
                         rt["risk_deep_triggered_milestones"] = []
                         rt["risk_pause_level1_hit"] = False
+
+                    settled_entry["result"] = result_text
+                    settled_entry["profit"] = profit
+                    settled_entry["settled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    active_chain_summary = _summarize_effective_bet_chain(state)
+                    recent_resolved_summary = _summarize_recent_resolved_chain(state)
+                    if not win:
+                        rt["bet_sequence_count"] = int(active_chain_summary.get("continuous_count", rt.get("bet_sequence_count", 0)))
+                        rt["lose_count"] = int(active_chain_summary.get("lose_count", rt.get("lose_count", 0)))
+                        rt["bet_amount"] = int(active_chain_summary.get("last_amount", bet_amount) or bet_amount)
                     
                     # 连输逻辑处理
                     if not win:
@@ -3713,23 +3906,17 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                             
                             # --- 连输实时告警逻辑 (Real-time Lose Streak Warning) ---
                             try:
-                                total_losses = bet_amount
-                                if rt.get("lose_count", 0) > 1 and state.bet_sequence_log:
-                                    start_idx = max(0, len(state.bet_sequence_log) - rt.get("lose_count", 0) + 1)
-                                    for entry in state.bet_sequence_log[start_idx:]:
-                                        entry_profit = entry.get('profit')
-                                        if entry_profit is not None and isinstance(entry_profit, (int, float)) and entry_profit < 0:
-                                            total_losses += abs(entry_profit)
-
                                 date_str = datetime.now().strftime("%m月%d日")
                                 bet_dir_str = "大" if prediction == 1 else "小"
                                 preset_name = rt.get("current_preset_name", "none")
                                 lose_count = int(rt.get("lose_count", 0))
+                                continuous_count = int(active_chain_summary.get("continuous_count", rt.get("bet_sequence_count", 0)))
+                                total_losses = int(active_chain_summary.get("total_losses", abs(profit)))
                                 warn_msg = (
                                     f"⚠️⚠️  {lose_count} 连输告警 ⚠️⚠️\n\n"
                                     f"🔢 {date_str} 第 {settle_round} 轮第 {settle_seq} 次：\n"
                                     f"📋 预设名称：{preset_name}\n"
-                                    f"😀 连续押注：{rt.get('bet_sequence_count', 0)} 次\n"
+                                    f"😀 连续押注：{continuous_count} 次\n"
                                     f"⚡️ 押注方向：{bet_dir_str}\n"
                                     f"💵 押注本金：{format_number(bet_amount)}\n"
                                     f"💰 累计损失：{format_number(total_losses)}\n"
@@ -3782,7 +3969,10 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                                 int(old_lose_count) >= warning_lose_count
                                 and _is_valid_lose_range(start_round, start_seq, end_round, end_seq)
                             ):
-                                continuous_count = max(int(rt.get("bet_sequence_count", 0)), old_lose_count + 1)
+                                continuous_count = max(
+                                    int(recent_resolved_summary.get("continuous_count", 0)),
+                                    old_lose_count + 1,
+                                )
                                 lose_end_payload = {
                                     "start_round": start_round,
                                     "start_seq": start_seq,
@@ -3818,17 +4008,15 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                     
                     user_ctx.save_state()
                     
-                    # 更新押注日志（存储在 state 中，不是 rt 中）
-                    if state.bet_sequence_log:
-                        state.bet_sequence_log[-1]["result"] = result_text
-                        state.bet_sequence_log[-1]["profit"] = profit
-                    
                     result_amount = format_number(int(bet_amount * 0.99) if win else bet_amount)
-                    last_bet_id = state.bet_sequence_log[-1].get("bet_id", "") if state.bet_sequence_log else ""
+                    last_bet_id = settled_entry.get("bet_id", "") if isinstance(settled_entry, dict) else ""
                     bet_id = format_bet_id(last_bet_id) if last_bet_id else f"{datetime.now().strftime('%m月%d日')}第 {rt.get('current_round', 1)} 轮第 {rt.get('current_bet_seq', 1)} 次"
+                    settle_sequence_count = int(
+                        recent_resolved_summary.get("continuous_count", rt.get("bet_sequence_count", 0))
+                    )
                     
                     mes = f"🔢 **{bet_id}押注结果：**\n"
-                    mes += f"😀 连续押注：{rt.get('bet_sequence_count', 0)} 次\n"
+                    mes += f"😀 连续押注：{settle_sequence_count} 次\n"
                     mes += f"⚡ 押注方向：{direction}\n"
                     mes += f"💵 押注本金：{format_number(bet_amount)}\n"
                     mes += f"📉 输赢结果：{result_text} {result_amount}\n"
