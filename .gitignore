@@ -1,5 +1,6 @@
 # 配置文件（包含敏感信息）
 config.py
+config/global_config.json
 
 # 用户数据目录（多用户版本）
 users/*
