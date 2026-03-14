@@ -887,8 +887,7 @@ def migrate_from_legacy(config_module, variable_module) -> UserContext:
         },
         "groups": {
             "zq_group": config_module.zq_group,
-            "zq_bot": config_module.zq_bot,
-            "monitor": getattr(config_module, "monitor", [])
+            "zq_bot": config_module.zq_bot
         },
         "zhuque": {
             "cookie": config_module.ZHUQUE_COOKIE,

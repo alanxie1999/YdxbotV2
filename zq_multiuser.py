@@ -645,27 +645,28 @@ def format_dashboard(user_ctx: UserContext) -> str:
     state = user_ctx.state
     rt = state.runtime
     
-    # 显示近期40次结果（由近及远）
     reversed_data = ["✅" if x == 1 else "❌" for x in state.history[-40:][::-1]]
-    mes = f"""📊 **近期 40 次结果**（由近及远）\n✅：大（1）  ❌：小（0）\n{os.linesep.join(
+    mes = f"""📊 **近期 40 次结果**（由近及远）
+✅：大（1）  ❌：小（0）
+{os.linesep.join(
         " ".join(map(str, reversed_data[i:i + 10])) 
         for i in range(0, len(reversed_data), 10)
-    )}\n\n———————————————\n🎯 **策略设定**\n"""
-    mes += f"🔢 **软件版本：{get_software_version_text()}**\n"
-    mes += f"🤖 **模型 API：{rt.get('current_model_id', 'unknown')}**\n"
-    mes += f"🚦 **当前押注状态：{get_bet_status_text(rt)}**\n"
-    preset_name = rt.get("current_preset_name", "none")
-    preset_params = (
-        f"{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} "
-        f"{rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} "
-        f"{rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}"
-    )
-    mes += f"📋 **预设名称：{preset_name}**\n"
-    mes += f"🤖 **预设参数：{preset_params}**\n"
-    mes += f"💰 **初始金额：{rt.get('initial_amount', 500)}**\n⏹ **押注 {rt.get('lose_stop', 13)} 次停止**\n"
-    mes += f"💥 **炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局**\n📚 **押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}**\n\n"
+    )}
+
+———————————————
+🎯 **策略设定**
+🔢 **软件版本：{get_software_version_text()}**
+🤖 **模型 API：{rt.get('current_model_id', 'unknown')}**
+🚦 **当前押注状态：{get_bet_status_text(rt)}**
+📋 **预设名称：{rt.get('current_preset_name', 'none')}**
+🤖 **预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}**
+💰 **初始金额：{rt.get('initial_amount', 500)}**
+⏹ **押注 {rt.get('lose_stop', 13)} 次停止**
+💥 **炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局**
+📚 **押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}**
+
+"""
     
-    # 余额显示逻辑 - 与master一致
     balance_status = rt.get('balance_status', 'ok')
     account_balance = rt.get('account_balance', 0)
     
@@ -678,17 +679,21 @@ def format_dashboard(user_ctx: UserContext) -> str:
     else:
         balance_str = f"{account_balance / 10000:.2f} 万"
         
-    mes += f"💰 **账户余额：{balance_str}**\n"
-    # 防止资金显示为负数
-    display_fund = max(0, rt.get('gambling_fund', 0))
-    mes += f"💰 **菠菜余额：{display_fund / 10000:.2f} 万**\n📈 **盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局**\n"
-    mes += f"📈 **本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万**\n📈 **总盈利：{rt.get('earnings', 0) / 10000:.2f} 万**\n\n"
+    mes += f"""💰 **账户余额：{balance_str}**
+💰 **菠菜余额：{max(0, rt.get('gambling_fund', 0)) / 10000:.2f} 万**
+📈 **盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局**
+📈 **本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万**
+📈 **总盈利：{rt.get('earnings', 0) / 10000:.2f} 万**
+
+"""
     
     win_total = rt.get('win_total', 0)
     total = rt.get('total', 0)
     if win_total > 0 or total > 0:
         win_rate = (win_total / total * 100) if total > 0 else 0.00
-        mes += f"🎯 **押注次数：{total}**\n🏆 **胜率：{win_rate:.2f}%**\n💰 **收益：{format_number(rt.get('earnings', 0))}**"
+        mes += f"""🎯 **押注次数：{total}**
+🏆 **胜率：{win_rate:.2f}%**
+💰 **收益：{format_number(rt.get('earnings', 0))}**"""
     
     return mes
 
@@ -785,12 +790,12 @@ def apply_account_risk_default_mode(rt: Dict[str, Any]) -> Dict[str, bool]:
 def _build_risk_state_text(rt: Dict[str, Any], include_usage: bool = True) -> str:
     risk_modes = _normalize_risk_switches(rt, apply_default=False)
     mes = (
-        "🛡️ 当前风控开关（账号默认模式）\n"
-        f"- 基础风控：{_risk_switch_label(risk_modes['base_enabled'])}"
-        f"（默认：{_risk_switch_label(risk_modes['base_default_enabled'])}）\n"
-        f"- 深度风控（含高倍入场门控）：{_risk_switch_label(risk_modes['deep_enabled'])}"
-        f"（默认：{_risk_switch_label(risk_modes['deep_default_enabled'])}）\n\n"
-        "说明：`risk` 命令会同步写入当前账号默认，脚本重启后按默认模式生效。"
+        f"🛡️🛡️ 风控状态 🛡️🛡️\n\n"
+        f"- 基础风控：{_risk_switch_label(risk_modes['base_enabled'])}\n"
+        f"- 深度风控：{_risk_switch_label(risk_modes['deep_enabled'])}\n\n"
+        f"📊 最近 40 笔统计（基础风控依据）\n"
+        f"- 胜率：{rt.get('risk_pause_wins', 0)}/{rt.get('risk_pause_total', 40)}（{rt.get('risk_pause_win_rate', 0) * 100:.1f}%）\n"
+        f"- 连输档位：{rt.get('risk_deep_milestone', 3)}（已触发 {rt.get('risk_deep_triggered_count', 0)}/{rt.get('risk_deep_trigger_limit', 5)} 次）\n"
     )
     if include_usage:
         mes += "\n用法：`risk base on|off` / `risk deep on|off` / `risk all on|off`"
@@ -2031,15 +2036,15 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
             reason_text = "最近40笔胜率<=37.5%"
             resume_hint = _build_pause_resume_hint(rt)
             pause_msg = (
-                "⛔ 自动风控暂停（已生效）\n"
-                "触发层级：基础风控\n"
+                f"⛔⛔ 自动风控暂停 ⛔⛔\n\n"
+                f"触发层级：基础风控\n"
                 f"触发原因：{reason_text}\n"
                 f"最近{total}笔胜率：{wins}/{total}（{win_rate:.1f}%）\n"
                 f"触发点：第 {next_sequence} 手下注前\n"
                 f"模型建议：{model_pause_rounds} 局（来源：{model_source}）\n"
                 f"本次暂停：{pause_rounds} 局（连续命中 {base_hit_streak}/{RISK_BASE_TRIGGER_STREAK_NEEDED}，基础预算累计 {rt.get('risk_pause_acc_rounds', 0)}/{RISK_PAUSE_TOTAL_CAP_ROUNDS}）\n"
                 f"模型依据：{model_reason}\n"
-                "暂停期间：保留当前倍投进度，不会重置首注\n"
+                f"暂停期间：保留当前倍投进度，不会重置首注\n"
                 f"{resume_hint}"
             )
 
@@ -2421,11 +2426,11 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
         if rt.get("pause_resume_pending", False):
             reason_text = str(rt.get("pause_resume_pending_reason", "自动暂停")).strip() or "自动暂停"
             resume_msg = (
-                "✅ 恢复押注（已执行）\n"
+                f"✅✅ 恢复押注 ✅✅\n\n"
                 f"恢复原因：{reason_text} 倒计时结束\n"
                 f"模型信号：{_format_predict_signal_brief(rt)}\n"
                 f"当前动作：已执行第 {rt.get('bet_sequence_count', 1)} 手，方向 {direction}，金额 {format_number(rt['bet_amount'])}\n"
-                "提示：若盘面仍触发风控，会再次自动暂停"
+                f"提示：若盘面仍触发风控，会再次自动暂停"
             )
             await _send_transient_admin_notice(
                 client,
@@ -2559,7 +2564,7 @@ async def process_red_packet(client, event, user_ctx: UserContext, global_config
             if "已获得" in response_msg:
                 bonus_match = re.search(r"已获得\s*(\d+)\s*灵石", response_msg)
                 bonus = bonus_match.group(1) if bonus_match else "未知数量"
-                mes = f"🎉 抢到红包{bonus}灵石！"
+                mes = f"🧧🧧 红包已领取 🧧🧧\n\n💰 金额：{bonus}"
                 log_event(
                     logging.INFO,
                     "red_packet",
@@ -2571,7 +2576,7 @@ async def process_red_packet(client, event, user_ctx: UserContext, global_config
                 return
 
             if any(flag in response_msg for flag in ("不能重复领取", "来晚了", "领过")):
-                mes = "⚠️ 抢到红包，但是没有获取到灵石数量！"
+                mes = "🧧🧧 红包领取失败 🧧🧧\n\n原因：来晚了，红包已被领完"
                 log_event(
                     logging.INFO,
                     "red_packet",
@@ -3210,14 +3215,14 @@ async def _apply_entry_gate_pause(
         wr_text = "样本不足（N/A）"
 
     pause_msg = (
-        "⛔ 高倍入场暂停（已生效）\n"
+        f"⛔⛔ 自动风控暂停 ⛔⛔\n\n"
         f"触发点：第 {next_sequence} 手下注前\n"
         f"触发类型：{gate.get('gate_name', '高倍入场门控')}\n"
         f"当前信号：标签 {gate.get('tag', 'UNKNOWN')} | 置信度 {gate.get('confidence', 0)}% | 来源 {gate.get('source', 'unknown')}\n"
         f"最近胜率：{wr_text}\n"
         f"未通过条件：{gate.get('reason_text', '信号质量不足')}\n"
         f"本次暂停：{pause_rounds} 局\n"
-        "暂停期间：保留当前倍投进度，不会重置首注\n"
+        f"暂停期间：保留当前倍投进度，不会重置首注\n"
         f"{_build_pause_resume_hint(rt)}"
     )
 
@@ -3612,7 +3617,7 @@ async def _trigger_deep_risk_pause_after_settle(
         reason_text = f"{reason_text}；{deep_cap_adjust_reason}"
     resume_hint = _build_pause_resume_hint(rt)
     pause_msg = (
-        "⛔ 自动风控暂停（已生效）\n"
+        f"⛔⛔ 自动风控暂停 ⛔⛔\n\n"
         f"触发层级：{level_label}\n"
         f"触发原因：{reason_text}\n"
         f"最近{total}笔胜率：{wins}/{total}（{win_rate:.1f}%）\n"
@@ -3620,7 +3625,7 @@ async def _trigger_deep_risk_pause_after_settle(
         f"模型建议：{model_pause_rounds} 局（来源：{model_source}）\n"
         f"本次暂停：{pause_rounds} 局（该层上限 {deep_cap}，不占基础预算）\n"
         f"模型依据：{model_reason}\n"
-        "暂停期间：保留当前倍投进度，不会重置首注\n"
+        f"暂停期间：保留当前倍投进度，不会重置首注\n"
         f"{resume_hint}"
     )
 
@@ -3711,10 +3716,10 @@ async def _handle_goal_pause_after_settle(
 
     resume_hint = _build_pause_resume_hint(rt)
     pause_msg = (
-        "⏸️ 目标暂停（已生效）\n"
+        f"⛔⛔ {'被炸保护暂停' if notify_type == 'explode' else '盈利达成暂停'} ⛔⛔\n\n"
         f"原因：{'被炸保护' if notify_type == 'explode' else '盈利达成'}\n"
         f"本次暂停：{configured_stop_rounds} 局\n"
-        "暂停期间：保留策略状态，等待倒计时结束\n"
+        f"暂停期间：保留策略状态，等待倒计时结束\n"
         f"{resume_hint}"
     )
     log_event(
@@ -3887,14 +3892,13 @@ def generate_mobile_bet_report(
     sequence_count: int,
     bet_id: str = ""
 ) -> str:
-    """生成简短押注执行报告（与 master 一致）。"""
     streak_len, streak_side = _get_current_streak(history)
     return (
-        "🎯 押注执行\n"
-        f"方向: {direction}\n"
-        f"金额: {format_number(amount)}\n"
-        f"连押: 第 {sequence_count} 次\n"
-        f"当前连{streak_side}: {streak_len}"
+        f"🎯🎯 **{bet_id}押注执行** 🎯🎯\n\n"
+        f"😀 连续押注：{sequence_count} 次\n"
+        f"⚡ 押注方向：{direction}\n"
+        f"💵 押注本金：{format_number(amount)}\n"
+        f"📊 当前连{streak_side}：{streak_len}"
     )
 
 
@@ -3904,7 +3908,6 @@ def generate_mobile_pause_report(
     confidence: float = None,
     entropy: float = None
 ) -> str:
-    """生成简短风控暂停报告（与 master 一致）。"""
     streak_len, streak_side = _get_current_streak(history)
     reason_text = _compact_reason_text(pause_reason)
     w5 = _format_recent_binary(history, 5)
@@ -3912,20 +3915,21 @@ def generate_mobile_pause_report(
     w40 = _format_recent_binary(history, 40)
 
     lines = [
-        "⛔ 风控暂停",
-        f"原因: {reason_text}",
+        "⛔⛔ 风控暂停简报 ⛔⛔",
+        "",
+        f"原因：{reason_text}",
     ]
     if confidence is not None:
-        lines.append(f"置信度: {confidence}%")
+        lines.append(f"置信度：{confidence}%")
     if entropy is not None:
-        lines.append(f"熵值: {entropy:.2f}")
+        lines.append(f"熵值：{entropy:.2f}")
     lines.extend(
         [
-            f"近5局: {w5}",
-            f"近10局: {w10}",
-            f"近40局: {w40}",
-            f"当前连{streak_side}: {streak_len}",
-            "动作: 暂停下注，继续观察",
+            f"近5局：{w5}",
+            f"近10局：{w10}",
+            f"近40局：{w40}",
+            f"当前连{streak_side}：{streak_len}",
+            "动作：暂停下注，继续观察",
         ]
     )
     return "\n".join(lines)
@@ -4205,8 +4209,8 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                                 continuous_count = int(active_chain_summary.get("continuous_count", rt.get("bet_sequence_count", 0)))
                                 total_losses = int(active_chain_summary.get("total_losses", abs(profit)))
                                 warn_msg = (
-                                    f"⚠️⚠️  {lose_count} 连输告警 ⚠️⚠️\n\n"
-                                    f"🔢 {date_str} 第 {settle_round} 轮第 {settle_seq} 次：\n"
+                                    f"⚠️⚠️ {lose_count} 连输告警 ⚠️⚠️\n\n"
+                                    f"🔢 {date_str} 第 {settle_round} 轮第 {settle_seq} 次\n"
                                     f"📋 预设名称：{preset_name}\n"
                                     f"😀 连续押注：{continuous_count} 次\n"
                                     f"⚡️ 押注方向：{bet_dir_str}\n"
@@ -4307,7 +4311,7 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                         recent_resolved_summary.get("continuous_count", rt.get("bet_sequence_count", 0))
                     )
                     
-                    mes = f"🔢 **{bet_id}押注结果：**\n"
+                    mes = f"🔢🔢 **{bet_id}押注结果** 🔢🔢\n\n"
                     mes += f"😀 连续押注：{settle_sequence_count} 次\n"
                     mes += f"⚡ 押注方向：{direction}\n"
                     mes += f"💵 押注本金：{format_number(bet_amount)}\n"
@@ -4505,14 +4509,13 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                 range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_round} 轮第 {end_seq} 次"
 
             rec_msg = (
-                f"✅✅  {lose_count} 连输已终止！✅✅\n\n"
-                f"🔢 {range_text}\n"
+                f"🎉🎉 连输终止播报 🎉🎉\n\n"
+                f"📅 时间：{range_text}\n"
                 f"📋 预设名称：{rt.get('current_preset_name', 'none')}\n"
-                f"😀 连续押注：{lose_end_payload.get('continuous_count', lose_count + 1)} 次\n"
-                f"⚠️本局连输： {lose_count} 次\n"
-                f"💰 本局盈利： {format_number(lose_end_payload.get('total_profit', 0))}\n"
-                f"💰 账户余额：{rt.get('account_balance', 0) / 10000:.2f} 万\n"
-                f"💰 菠菜资金剩余：{rt.get('gambling_fund', 0) / 10000:.2f} 万"
+                f"📊 连输次数：{lose_count} 次\n"
+                f"💰 累计损失：{format_number(abs(lose_end_payload.get('total_loss', 0)))}\n"
+                f"💰 回补金额：{format_number(lose_end_payload.get('total_profit', 0))}\n"
+                f"💰 净收益：{format_number(lose_end_payload.get('net_profit', 0))}"
             )
             if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
                 await cleanup_message(client, user_ctx.lose_streak_message)
@@ -4898,7 +4901,6 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         if cmd == "xx":
             target_groups = []
             target_groups.extend(_iter_targets(user_ctx.config.groups.get("zq_group", [])))
-            target_groups.extend(_iter_targets(user_ctx.config.groups.get("monitor", [])))
 
             # 去重并保持顺序
             unique_groups = []
@@ -4911,7 +4913,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 unique_groups.append(gid)
 
             if not unique_groups:
-                message = await send_to_admin(client, "未配置可清理的群组（zq_group/monitor）", user_ctx, global_config)
+                message = await send_to_admin(client, "未配置可清理的群组（zq_group）", user_ctx, global_config)
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
                 if message:
                     asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
@@ -4957,7 +4959,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         # pause/resume - 暂停/恢复押注
         if cmd in ("pause", "暂停"):
             if rt.get("manual_pause", False):
-                await send_to_admin(client, "⏸ 当前账号已是暂停状态", user_ctx, global_config)
+                await send_to_admin(client, "⏸️⏸️ 当前账号已是暂停状态 ⏸️⏸️", user_ctx, global_config)
                 return
             await _clear_pause_countdown_notice(client, user_ctx)
             rt["switch"] = True
@@ -4967,7 +4969,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             rt["manual_pause"] = True
             _clear_lose_recovery_tracking(rt)
             user_ctx.save_state()
-            mes = "⏸ 已暂停当前账号押注"
+            mes = "⏸️⏸️ 已暂停当前账号押注 ⏸️⏸️"
             await send_to_admin(client, mes, user_ctx, global_config)
             log_event(logging.INFO, 'user_cmd', '暂停押注', user_id=user_ctx.user_id)
             return
@@ -4980,7 +4982,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             rt["mode_stop"] = True
             rt["manual_pause"] = False
             user_ctx.save_state()
-            mes = "▶️ 已恢复当前账号押注"
+            mes = "▶️▶️ 已恢复当前账号押注 ▶️▶️"
             await send_to_admin(client, mes, user_ctx, global_config)
             log_event(logging.INFO, 'user_cmd', '恢复押注', user_id=user_ctx.user_id)
             return
@@ -5080,7 +5082,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 _clear_lose_recovery_tracking(rt)
                 user_ctx.save_state()
                 
-                mes = f"预设启动成功: {preset_name} ({preset[0]} {preset[1]} {preset[2]} {preset[3]} {preset[4]} {preset[5]} {preset[6]})"
+                mes = f"🎯🎯 预设启动成功 🎯🎯\n\n名称：{preset_name}\n参数：{preset[0]} {preset[1]} {preset[2]} {preset[3]} {preset[4]} {preset[5]} {preset[6]}"
                 log_event(logging.INFO, 'user_cmd', '启动预设', user_id=user_ctx.user_id, preset=preset_name)
                 message = await send_to_admin(client, mes, user_ctx, global_config)
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -5095,7 +5097,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     auto_trigger=True,
                 )
             else:
-                await send_to_admin(client, f"预设不存在: {preset_name}", user_ctx, global_config)
+                await send_to_admin(client, f"❌❌ 预设不存在 ❌❌\n\n预设名称：{preset_name}", user_ctx, global_config)
             return
         
         # stats - 查看连大、连小、连输统计

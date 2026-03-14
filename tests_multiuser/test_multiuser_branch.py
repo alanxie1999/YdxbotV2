@@ -73,7 +73,7 @@ def test_user_context_merges_global_common_and_user_private_config(tmp_path):
     _write_json(
         config_dir / "global_config.json",
         {
-            "groups": {"monitor": [101, 102], "zq_group": [201], "zq_bot": 8},
+            "groups": {"zq_group": [201], "zq_bot": 8},
             "zhuque": {"api_url": "https://zhuque.in/api/user/getInfo?"},
         },
     )
@@ -101,7 +101,6 @@ def test_user_context_merges_global_common_and_user_private_config(tmp_path):
 
     ctx = mgr.get_user(6001)
     assert ctx is not None
-    assert ctx.config.groups["monitor"] == [101, 102]
     assert ctx.config.groups["admin_chat"] == 6001
     assert ctx.config.zhuque["api_url"] == "https://zhuque.in/api/user/getInfo?"
     assert ctx.config.zhuque["cookie"] == "c1"
@@ -466,7 +465,7 @@ def test_main_log_event_includes_account_prefix(monkeypatch):
 def test_user_isolation_between_two_contexts(tmp_path):
     users_dir = tmp_path / "users"
     config_dir = tmp_path / "config"
-    _write_json(config_dir / "global_config.json", {"groups": {"monitor": [1]}})
+    _write_json(config_dir / "global_config.json", {"groups": {"zq_group": [1]}})
 
     _write_json(users_dir / "1001" / "config.json", {"account": {"name": "U1"}, "telegram": {"user_id": 1001}})
     _write_json(users_dir / "1002" / "config.json", {"account": {"name": "U2"}, "telegram": {"user_id": 1002}})
@@ -1395,7 +1394,7 @@ def test_process_settle_no_longer_auto_sends_ydx(tmp_path, monkeypatch):
         {
             "account": {"name": "结算用户"},
             "telegram": {"user_id": 5002},
-            "groups": {"admin_chat": 5002, "monitor": [101, 102]},
+            "groups": {"admin_chat": 5002, "zq_group": [101, 102]},
             "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
         },
     )
@@ -1427,8 +1426,8 @@ def test_process_settle_no_longer_auto_sends_ydx(tmp_path, monkeypatch):
     client = DummyClient()
     asyncio.run(zm.process_settle(client, event, ctx, {}))
 
-    monitor_messages = [msg for msg in client.sent if msg[1] == "/ydx"]
-    assert monitor_messages == []
+    ydx_messages = [msg for msg in client.sent if msg[1] == "/ydx"]
+    assert ydx_messages == []
     assert ctx.state.history[-1] == 0
 
 
@@ -2821,7 +2820,7 @@ def test_xx_command_cleans_messages_in_config_groups(tmp_path, monkeypatch):
         {
             "account": {"name": "清理用户"},
             "telegram": {"user_id": 5009},
-            "groups": {"admin_chat": 5009, "zq_group": [111], "monitor": [222]},
+            "groups": {"admin_chat": 5009, "zq_group": [111, 222]},
             "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
         },
     )
