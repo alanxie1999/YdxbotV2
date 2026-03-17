@@ -658,7 +658,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
         
         register_handlers(client, user_ctx, global_config)
         
-        await check_models_for_user(client, user_ctx)
+        # await check_models_for_user(client, user_ctx)
         
         balance = await fetch_account_balance(user_ctx)
         # 复原为旧机制：启动只更新账户余额，不自动覆盖菠菜资金。
@@ -723,17 +723,18 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                     )
 
         if admin_chat:
-            try:
-                focus_msg = build_startup_focus_reminder(user_ctx)
-                await client.send_message(admin_chat, focus_msg)
-            except Exception as e:
-                log_event(
-                    logging.ERROR,
-                    'start',
-                    '启动重点设置提醒发送失败',
-                    user_id=user_ctx.user_id,
-                    error=str(e),
-                )
+            pass
+            # try:
+            #     focus_msg = build_startup_focus_reminder(user_ctx)
+            #     await client.send_message(admin_chat, focus_msg)
+            # except Exception as e:
+            #     log_event(
+            #         logging.ERROR,
+            #         'start',
+            #         '启动重点设置提醒发送失败',
+            #         user_id=user_ctx.user_id,
+            #         error=str(e),
+            #     )
         
         log_event(logging.INFO, 'start', '用户启动成功',
                   user_id=user_ctx.user_id, name=user_ctx.config.name, balance=balance)

