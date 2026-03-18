@@ -42,8 +42,10 @@ _AUTO_ZZ_TASKS: Dict[str, asyncio.Task] = {}
 AUTO_ZZ_TRANSFER_AMOUNT = 100000
 AUTO_ZZ_INTERVAL_SECONDS = 7200
 AUTO_ZZ_TRIGGER_USER_ID = 5721909476
-AUTO_ZZ_SUCCESS_RETRY_COUNT = 5
-AUTO_ZZ_SUCCESS_RETRY_DELAY_SECONDS = 0.5
+AUTO_ZZ_TRIGGER_SCAN_LIMIT = 50
+AUTO_ZZ_SUCCESS_SCAN_LIMIT = 20
+AUTO_ZZ_SUCCESS_RETRY_COUNT = 12
+AUTO_ZZ_SUCCESS_RETRY_DELAY_SECONDS = 1.0
 
 
 def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
@@ -4598,6 +4600,32 @@ def _clear_auto_zz_task(user_ctx: UserContext, task: Optional[asyncio.Task] = No
         _AUTO_ZZ_TASKS.pop(key, None)
 
 
+def _normalize_text_digits(text: str) -> str:
+    return "".join(ch for ch in str(text or "") if ch.isdigit())
+
+
+def _is_zz_success_text(text: str, amount: int, require_amount: bool = False) -> bool:
+    body = str(text or "").strip()
+    if not body:
+        return False
+    if any(token in body for token in ("失败", "不足", "错误", "未成功")):
+        return False
+    if not any(token in body for token in ("转账成功", "成功转账", "已转账", "转出成功", "转账已完成")):
+        return False
+    if not require_amount:
+        return True
+    amount_digits = _normalize_text_digits(amount)
+    text_digits = _normalize_text_digits(body)
+    return bool(amount_digits and amount_digits in text_digits)
+
+
+def _is_zz_failure_text(text: str) -> bool:
+    body = str(text or "").strip()
+    if not body:
+        return False
+    return any(token in body for token in ("转账失败", "积分不足", "余额不足", "未成功", "操作失败"))
+
+
 def cancel_auto_zz_scheduler(user_ctx: UserContext) -> bool:
     task = _get_auto_zz_task(user_ctx)
     if task is None:
@@ -4665,7 +4693,7 @@ async def _do_zz_transfer(client, amount, user_ctx: UserContext, rt: Dict[str, A
     found_group = None
     for gid in zq_groups:
         try:
-            async for msg in client.iter_messages(gid, limit=20):
+            async for msg in client.iter_messages(gid, limit=AUTO_ZZ_TRIGGER_SCAN_LIMIT):
                 if str(getattr(msg, "sender_id", "") or "") != str(AUTO_ZZ_TRIGGER_USER_ID):
                     continue
                 found_msg = msg
@@ -4696,16 +4724,21 @@ async def _do_zz_transfer(client, amount, user_ctx: UserContext, rt: Dict[str, A
             pass
 
         success_msg = None
+        failure_text = ""
         min_id = max(0, int(getattr(sent_msg, "id", 0) or 0) - 1)
         for _ in range(AUTO_ZZ_SUCCESS_RETRY_COUNT):
-            async for msg in client.iter_messages(found_group, limit=10, min_id=min_id):
+            async for msg in client.iter_messages(found_group, limit=AUTO_ZZ_SUCCESS_SCAN_LIMIT, min_id=min_id):
                 sender_id = str(getattr(msg, "sender_id", "") or "")
-                if zq_bot_targets and sender_id not in zq_bot_targets:
-                    continue
                 text = (getattr(msg, "raw_text", None) or getattr(msg, "text", None) or "").strip()
-                if "转账成功" in text:
+                sender_matches = (not zq_bot_targets) or sender_id in zq_bot_targets
+                if sender_matches and _is_zz_success_text(text, amount, require_amount=False):
                     success_msg = msg
                     break
+                if (not sender_matches) and _is_zz_success_text(text, amount, require_amount=True):
+                    success_msg = msg
+                    break
+                if _is_zz_failure_text(text):
+                    failure_text = text[:120]
             if success_msg is not None:
                 break
             await asyncio.sleep(AUTO_ZZ_SUCCESS_RETRY_DELAY_SECONDS)
@@ -4718,6 +4751,7 @@ async def _do_zz_transfer(client, amount, user_ctx: UserContext, rt: Dict[str, A
                 user_id=user_ctx.user_id,
                 amount=amount,
                 group=found_group,
+                detail=failure_text,
             )
             return False
 

@@ -3031,6 +3031,12 @@ def test_auto_zz_scheduler_reuses_single_task_and_cancels(tmp_path, monkeypatch)
     assert zm.cancel_auto_zz_scheduler(ctx) is False
 
 
+def test_zz_success_text_accepts_known_success_patterns():
+    assert zm._is_zz_success_text("转账成功", 11000) is True
+    assert zm._is_zz_success_text("已转账 11000 积分", 11000, require_amount=True) is True
+    assert zm._is_zz_success_text("转账失败：余额不足", 11000) is False
+
+
 def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "fallback_model_user"
     _write_json(
