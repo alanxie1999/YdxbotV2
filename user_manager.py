@@ -307,9 +307,7 @@ def get_default_runtime() -> Dict[str, Any]:
     return {
         # 核心控制变量
         "switch": True,
-        "open_ydx": False,
         "manual_pause": False,
-        "consequence": "大",
         
         # 历史和状态管理
         "current_round": 1,
@@ -358,7 +356,6 @@ def get_default_runtime() -> Dict[str, Any]:
         "profit_stop": 2,
         "explode_count": 0,
         "stop_count": 0,
-        "mark": True,
         "flag": True,
         "pause_count": 0,
         "pause_resume_pending": False,

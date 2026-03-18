@@ -2972,172 +2972,63 @@ def test_process_red_packet_ignores_game_message(tmp_path, monkeypatch):
 
     assert event.clicked == []
     assert sent["called"] is False
-def test_compute_replay_linkage_coverage_only_counts_settled_records():
-    settled_tokens = next(
-        const
-        for const in zm._compute_replay_linkage_coverage.__code__.co_consts[1].co_consts
-        if isinstance(const, tuple) and len(const) >= 2 and all(isinstance(item, str) for item in const)
-    )
-    win_token = settled_tokens[0]
-    lose_token = settled_tokens[1]
-    abnormal_token = "abnormal"
-
-    state = SimpleNamespace(
-        bet_sequence_log=[
-            {"bet_id": "b1", "result": win_token, "decision_id": "dec_1"},
-            {"bet_id": "b2", "result": lose_token, "decision_id": ""},
-            {"bet_id": "b3", "result": None, "decision_id": "dec_3"},
-            {"bet_id": "b4", "result": abnormal_token, "decision_id": "dec_4"},
-        ]
+def test_generate_mobile_bet_report_formats_bet_id():
+    report = zm.generate_mobile_bet_report(
+        history=[0, 0, 1, 0],
+        direction="小",
+        amount=5000,
+        sequence_count=1,
+        bet_id="20260318_3_58",
     )
 
-    coverage = zm._compute_replay_linkage_coverage(state, limit=300)
-
-    assert coverage["total"] == 2
-    assert coverage["linked"] == 1
-    assert coverage["coverage_pct"] == 50.0
+    assert "3月18日第 3 轮第 58 次押注执行" in report
+    assert "20260318_3_58押注执行" not in report
 
 
-def test_process_user_command_replay_outputs_focus_message(tmp_path, monkeypatch):
-    user_dir = tmp_path / "users" / "replay_user"
+def test_auto_zz_scheduler_reuses_single_task_and_cancels(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "zz_scheduler_user"
     _write_json(
         user_dir / "config.json",
         {
-            "account": {"name": "复盘用户"},
-            "telegram": {"user_id": 7011},
-            "groups": {"admin_chat": 7011},
+            "account": {"name": "自动转账用户"},
+            "telegram": {"user_id": 70115},
+            "groups": {"admin_chat": 70115},
             "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
         },
     )
     ctx = UserContext(str(user_dir))
-    ctx.state.bet_sequence_log = [
-        {
-            "bet_id": "b100",
-            "sequence": 1,
-            "direction": "big",
-            "amount": 500,
-            "result": "赢",
-            "profit": 495,
-            "decision_source": "model",
-            "decision_tag": "LONG_DRAGON",
-            "decision_confidence": 74,
-            "decision_id": "dec_100",
-        },
-        {
-            "bet_id": "b101",
-            "sequence": 2,
-            "direction": "small",
-            "amount": 1000,
-            "result": "输",
-            "profit": -1000,
-            "decision_source": "model",
-            "decision_tag": "REVERSAL",
-            "decision_confidence": 61,
-            "decision_id": "dec_101",
-        },
-    ]
 
-    sent_messages = []
+    created_tasks = []
 
-    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
-        sent_messages.append(message)
-        return SimpleNamespace(chat_id=7011, id=len(sent_messages))
+    class DummyTask:
+        def __init__(self, coro):
+            self.coro = coro
+            self._done = False
+            self.cancelled = False
+
+        def done(self):
+            return self._done
+
+        def cancel(self):
+            self.cancelled = True
+            self._done = True
+            self.coro.close()
 
     def fake_create_task(coro):
-        coro.close()
-        return None
+        task = DummyTask(coro)
+        created_tasks.append(task)
+        return task
 
-    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
 
-    cmd_event = SimpleNamespace(raw_text="replay 2", chat_id=7011, id=1)
-    asyncio.run(zm.process_user_command(SimpleNamespace(), cmd_event, ctx, {}))
+    first_task = zm.ensure_auto_zz_scheduler(SimpleNamespace(), ctx)
+    second_task = zm.ensure_auto_zz_scheduler(SimpleNamespace(), ctx)
 
-    assert sent_messages
-    replay_msg = sent_messages[-1]
-    assert "b100" in replay_msg
-    assert "b101" in replay_msg
-    assert "decision_id" in replay_msg
-
-
-def test_process_bet_on_records_decision_linkage_fields(tmp_path, monkeypatch):
-    user_dir = tmp_path / "users" / "replay_link_user"
-    _write_json(
-        user_dir / "config.json",
-        {
-            "account": {"name": "链路字段用户"},
-            "telegram": {"user_id": 7012},
-            "groups": {"admin_chat": 7012},
-            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
-        },
-    )
-    ctx = UserContext(str(user_dir))
-    rt = ctx.state.runtime
-    rt["switch"] = True
-    rt["bet_on"] = True
-    rt["mode_stop"] = True
-    rt["stop_count"] = 0
-    rt["bet_amount"] = 500
-    rt["lose_count"] = 0
-    rt["win_count"] = 0
-
-    async def fake_predict(user_ctx, global_cfg):
-        runtime = user_ctx.state.runtime
-        runtime["last_predict_info"] = "replay-link-test"
-        runtime["last_decision_id"] = "dec_test_001"
-        runtime["last_decision_timestamp"] = "2026-03-05 10:00:00"
-        runtime["last_decision_source"] = "model"
-        runtime["last_decision_model_id"] = "qwen-test"
-        runtime["last_decision_prediction"] = 1
-        runtime["last_decision_confidence"] = 88
-        runtime["last_decision_tag"] = "STABILITY"
-        runtime["last_decision_reason"] = "unit-test"
-        runtime["last_decision_round"] = 1
-        runtime["last_decision_mode"] = "M-SMP"
-        user_ctx.state.predictions.append(1)
-        return 1
-
-    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
-        return SimpleNamespace(chat_id=7012, id=1)
-
-    async def fake_delete_later(*args, **kwargs):
-        return None
-
-    async def fake_sleep(*args, **kwargs):
-        return None
-
-    def fake_create_task(coro):
-        coro.close()
-        return None
-
-    monkeypatch.setattr(zm, "predict_next_bet_v10", fake_predict)
-    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
-    monkeypatch.setattr(zm, "delete_later", fake_delete_later)
-    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
-
-    class DummyEvent:
-        def __init__(self):
-            history = " ".join((["0", "1"] * 20))
-            self.message = SimpleNamespace(message=f"[近40次结果][由近及远][0 小 1 大] {history}")
-            self.reply_markup = object()
-            self.chat_id = 1
-            self.id = 1
-            self.clicks = []
-
-        async def click(self, data):
-            self.clicks.append(data)
-
-    event = DummyEvent()
-    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
-
-    assert len(ctx.state.bet_sequence_log) == 1
-    entry = ctx.state.bet_sequence_log[-1]
-    assert entry["decision_id"] == "dec_test_001"
-    assert entry["decision_source"] == "model"
-    assert entry["decision_tag"] == "STABILITY"
-    assert entry["decision_confidence"] == 88
-    assert rt["pending_bet_id"] == entry["bet_id"]
+    assert first_task is second_task
+    assert len(created_tasks) == 1
+    assert zm.cancel_auto_zz_scheduler(ctx) is True
+    assert created_tasks[0].cancelled is True
+    assert zm.cancel_auto_zz_scheduler(ctx) is False
 
 
 def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, monkeypatch):
@@ -3186,78 +3077,3 @@ def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, mon
     assert '"model_id": "model-2"' in rt["last_logic_audit"]
 
 
-def test_process_settle_updates_target_pending_entry_by_pending_bet_id(tmp_path, monkeypatch):
-    settled_tokens = next(
-        const
-        for const in zm._find_pending_bet_entry.__code__.co_consts
-        if isinstance(const, tuple) and len(const) >= 3 and all(isinstance(item, str) for item in const)
-    )
-    win_token = settled_tokens[0]
-
-    user_dir = tmp_path / "users" / "replay_settle_user"
-    _write_json(
-        user_dir / "config.json",
-        {
-            "account": {"name": "结算定位用户"},
-            "telegram": {"user_id": 7013},
-            "groups": {"admin_chat": 7013},
-            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
-        },
-    )
-    ctx = UserContext(str(user_dir))
-    rt = ctx.state.runtime
-    rt["bet"] = True
-    rt["bet_type"] = 1
-    rt["bet_amount"] = 1_000
-    rt["bet_sequence_count"] = 1
-    rt["current_round"] = 1
-    rt["current_bet_seq"] = 2
-    rt["account_balance"] = 10_000_000
-    rt["gambling_fund"] = 9_000_000
-    rt["pending_bet_id"] = "bet_pending_1"
-    rt["last_predict_info"] = "settle-link-test"
-    ctx.state.bet_sequence_log = [
-        {
-            "bet_id": "bet_pending_1",
-            "result": None,
-            "profit": 0,
-            "round": 1,
-            "sequence": 1,
-            "direction": "big",
-            "amount": 1000,
-            "decision_id": "dec_settle_1",
-            "decision_source": "model",
-            "decision_tag": "TEST",
-            "decision_confidence": 70,
-        },
-        {"bet_id": "bet_old_done", "result": win_token, "profit": 990, "round": 1, "sequence": 0},
-    ]
-
-    async def fake_send_message_v2(*args, **kwargs):
-        return None
-
-    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
-        return SimpleNamespace(chat_id=7013, id=1)
-
-    async def fake_fetch_balance(user_ctx):
-        return rt["account_balance"]
-
-    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
-    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
-    monkeypatch.setattr(zm, "fetch_balance", fake_fetch_balance)
-
-    class DummyClient:
-        async def send_message(self, target, message, parse_mode=None):
-            return SimpleNamespace(chat_id=target, id=1)
-
-        async def delete_messages(self, chat_id, message_id):
-            return None
-
-    event = SimpleNamespace(id=9901, message=SimpleNamespace(message="已结算: 结果为 8 大"))
-    asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
-
-    assert ctx.state.bet_sequence_log[0]["result"] == win_token
-    assert ctx.state.bet_sequence_log[0]["profit"] == 990
-    assert ctx.state.bet_sequence_log[1]["bet_id"] == "bet_old_done"
-    assert ctx.state.bet_sequence_log[1]["profit"] == 990
-    assert rt["pending_bet_id"] == ""

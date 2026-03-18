@@ -11,7 +11,13 @@ import os
 import time
 import sys
 import errno
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+    import msvcrt
+else:
+    msvcrt = None
 from typing import Any, Dict, List
 from telethon import TelegramClient, events
 from logging.handlers import TimedRotatingFileHandler
@@ -236,6 +242,36 @@ def _get_session_path(user_ctx: UserContext) -> str:
     )
 
 
+def _is_session_lock_conflict(error: OSError) -> bool:
+    return error.errno in (errno.EACCES, errno.EAGAIN) or getattr(error, "winerror", None) in {32, 33}
+
+
+def _lock_session_fd(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+
+    if msvcrt is None:
+        raise OSError(errno.ENOSYS, "session file locking is unavailable")
+
+    if os.lseek(fd, 0, os.SEEK_END) == 0:
+        os.write(fd, b"0")
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+
+def _unlock_session_fd(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+
+    if msvcrt is None:
+        return
+
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
 def _acquire_session_lock(user_ctx: UserContext) -> bool:
     """
     为每个账号的 Telethon session 增加进程级文件锁，避免多个进程同时写同一个 .session。
@@ -247,7 +283,7 @@ def _acquire_session_lock(user_ctx: UserContext) -> bool:
     fd = None
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_session_fd(fd)
         setattr(user_ctx, "_session_lock_fd", fd)
         setattr(user_ctx, "_session_lock_path", lock_path)
         return True
@@ -257,7 +293,7 @@ def _acquire_session_lock(user_ctx: UserContext) -> bool:
                 os.close(fd)
             except Exception:
                 pass
-        if e.errno in (errno.EACCES, errno.EAGAIN):
+        if _is_session_lock_conflict(e):
             log_event(
                 logging.ERROR,
                 'start',
@@ -275,7 +311,7 @@ def _release_session_lock(user_ctx: UserContext):
     if fd is None:
         return
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _unlock_session_fd(fd)
     except Exception:
         pass
     try:
@@ -580,6 +616,16 @@ async def fetch_account_balance(user_ctx: UserContext) -> int:
         return user_ctx.get_runtime("account_balance", 0)
 
 
+def _apply_startup_balance_snapshot(user_ctx: UserContext, balance: int) -> int:
+    user_ctx.set_runtime("account_balance", int(balance))
+    try:
+        gambling_fund = int(user_ctx.get_runtime("gambling_fund", 0) or 0)
+    except (TypeError, ValueError):
+        gambling_fund = 0
+    user_ctx.set_runtime("gambling_fund", gambling_fund)
+    return gambling_fund
+
+
 async def start_user(user_ctx: UserContext, global_config: dict):
     lock_acquired = False
     try:
@@ -661,21 +707,22 @@ async def start_user(user_ctx: UserContext, global_config: dict):
         # await check_models_for_user(client, user_ctx)
         
         balance = await fetch_account_balance(user_ctx)
-        # 复原为旧机制：启动只更新账户余额，不自动覆盖菠菜资金。
-        user_ctx.set_runtime("account_balance", balance)
+        # 启动时只刷新账户余额，保留手动维护的博彩资金。
+        gambling_fund = _apply_startup_balance_snapshot(user_ctx, balance)
         log_event(
             logging.INFO,
             'start',
             '启动余额快照已刷新（菠菜资金保持独立）',
             user_id=user_ctx.user_id,
             account_balance=balance,
-            gambling_fund=user_ctx.get_runtime("gambling_fund", 0),
+            gambling_fund=gambling_fund,
         )
 
         # 启动恢复：按账号默认风控模式生效，并清理历史遗留挂单。
         from zq_multiuser import (
             apply_account_risk_default_mode,
             build_startup_focus_reminder,
+            ensure_auto_zz_scheduler,
             heal_stale_pending_bets,
         )
         risk_mode = apply_account_risk_default_mode(user_ctx.state.runtime)
@@ -690,6 +737,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
         heal_result = heal_stale_pending_bets(user_ctx)
 
         user_ctx.save_state()
+        ensure_auto_zz_scheduler(client, user_ctx)
 
         healed_count = int(heal_result.get("count", 0) or 0)
         if healed_count > 0:
