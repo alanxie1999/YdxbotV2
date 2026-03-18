@@ -1,24 +1,24 @@
-"""验证项目依赖安装状态。"""
+"""Verify required project dependencies."""
 
 import sys
 
 
 def check_import(module_name, package_name=None):
-    """检查模块是否可以导入。"""
+    """Return whether a module can be imported."""
     if package_name is None:
         package_name = module_name
     try:
         __import__(module_name)
-        print(f"✅ {package_name}")
+        print(f"OK {package_name}")
         return True
-    except ImportError as e:
-        print(f"❌ {package_name}: {e}")
+    except ImportError as error:
+        print(f"FAIL {package_name}: {error}")
         return False
 
 
 def main():
-    """执行依赖检查并返回进程退出码。"""
-    print("正在验证依赖安装...\n")
+    """Run dependency checks and return a process exit code."""
+    print("Checking dependencies...\n")
     all_ok = True
     all_ok &= check_import("telethon")
     all_ok &= check_import("aiohttp")
@@ -28,12 +28,12 @@ def main():
 
     print("\n" + "=" * 40)
     if all_ok:
-        print("✅ 所有核心依赖验证通过！")
+        print("All core dependencies are available.")
         return 0
-    print("❌ 部分依赖未正确安装")
+    print("Some dependencies are missing.")
     return 1
 
 
 if __name__ == "__main__":
-    # 修复：模块导入即退出的问题，原因：旧实现在 import 时直接执行 sys.exit。
+    # Keep module import side-effect free for tests and update health checks.
     sys.exit(main())
