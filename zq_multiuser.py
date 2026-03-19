@@ -255,6 +255,15 @@ ENTRY_GUARD_STEP4_MIN_CONF = 70
 ENTRY_GUARD_STEP4_MIN_CONF_EARLY = 68
 ENTRY_GUARD_STEP4_PAUSE_ROUNDS = 3
 ENTRY_GUARD_STEP4_ALLOWED_TAGS = {"DRAGON_CANDIDATE", "SINGLE_JUMP", "SYMMETRIC_WRAP"}
+UNSTABLE_PATTERN_TAGS = {"CHAOS_SWITCH", "SINGLE_JUMP", "SYMMETRIC_WRAP"}
+HIGH_PRESSURE_SKIP_MIN_STEP = 5
+HIGH_PRESSURE_SKIP_MIN_CONF = 78
+UNSTABLE_PATTERN_MIN_CONF_STEP3 = 72
+UNSTABLE_PATTERN_MIN_CONF_STEP5 = 78
+DRAGON_CANDIDATE_MIN_TAIL_STEP5 = 5
+NEUTRAL_LONG_TERM_GAP_LOW = 0.47
+NEUTRAL_LONG_TERM_GAP_HIGH = 0.53
+HIGH_PRESSURE_PATTERN_PAUSE_ROUNDS = 2
 
 # 高阶入场二次确认（第7手起，避免第5/6手过早双模型互卡）
 HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP = 7
@@ -1490,50 +1499,58 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         actual_model_id = current_model_id
         
         prompt = f"""[System Instruction]
-你是专门破解博弈陷阱的量化交易员。你可以在证据不足时输出 SKIP（-1），避免低质量交易。
+????????????????????????????????????????????????????????????????????? SKIP?-1??
+
+[Hard Risk Rules]
+???????????????????
+1. ? martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} ??????? < {HIGH_PRESSURE_SKIP_MIN_CONF}????? SKIP?
+2. ? pattern tag ?? CHAOS_SWITCH / SINGLE_JUMP / SYMMETRIC_WRAP ? martingale_step >= 3 ?????? SKIP?
+3. ????????????????????????????????
+4. DRAGON_CANDIDATE ????????????? martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} ????? < {DRAGON_CANDIDATE_MIN_TAIL_STEP5} ?????? SKIP?
+5. ? long_term_gap ?? [{NEUTRAL_LONG_TERM_GAP_LOW:.2f}, {NEUTRAL_LONG_TERM_GAP_HIGH:.2f}]?????????????????????
+6. ???????????????????? reason ????????? / ?????? / ???? / ????? / ?????????? SKIP?
+7. ?5??????????? LONG_DRAGON ???????????? SKIP?????????
 
 [Context Reasoning Flow]
-请按顺序执行以下深度推理步骤：
+???????????
+1. ??????????????????????????
+2. ???????????????????????????
+3. ??????? tag ????????????/????
+4. ???????????????????????????????????????????
 
-1. 趋势派模型（Trend Following）:
-检查当前是否有活跃长龙（Streak > 5）与短线惯性，评估顺行阻力与逆行阻力。
+[Evidence Grading]
+????????????
+- ??????LONG_DRAGON ????? >= 5???????????
+- ??????|gap| >= 8????????????20??????
 
-2. 数学均衡派模型（Mean Reversion）:
-分析过去100局分布，判断当前是否出现显著均值回归压力，但不要机械逆势。
-
-3. 形态锁定（Sequential Match）:
-在历史片段中寻找相似尾部结构，识别惯性延续或衰竭拐点。
-
-4. 长连顺势加权（新增软偏置）:
-- 当尾部连数 >= 4：提高顺势方案权重（更倾向顺着当前方向下注）。
-- 当尾部连数 >= 5：默认顺势，除非“强反转证据”至少满足2条才可逆势。
-- 强反转证据示例：
-  A) |gap| >= 8 且明确指向反向修复；
-  B) long_term_gap 极端（>=0.60 或 <=0.40）且短期20局同向过热（>=15/20）；
-  C) LONG_DRAGON 且尾部连数 >= 6，同时短期结构出现耗竭信号。
-- 若倍投压力第5手及以上，逆势需要更高把握；同等证据下优先顺势。
+????????
+- CHAOS_SWITCH
+- SINGLE_JUMP
+- SYMMETRIC_WRAP
+- DRAGON_CANDIDATE ?????
+- ????????
+- ???????? / ??????
+???????
 
 [Data Evidence]
-短期20局: {short_str}
-中期50局: {medium_str}
-长期100局大占比: {long_term_gap}
-当前形态: {pattern_tag} (尾部{tail_streak_len}连{'大' if tail_streak_char==1 else '小'})
-大数缺口: {gap:+d} (正=缺大, 负=缺小)
-倍投压力: 第{lose_count + 1}次 ({entropy_tag})
+??20?: {short_str}
+??50?: {medium_str}
+??100????: {long_term_gap:.2f}
+????: {pattern_tag} (??{tail_streak_len}?{'?' if tail_streak_char==1 else '?'})
+????: {gap:+d} (?=??, ?=??)
+????: ?{lose_count + 1}? ({entropy_tag})
 
-[Final Choice]
-当趋势与回归冲突时，不要“一刀切逆势”；请先比较证据强度：
-- 证据接近或不充分：顺势优先；
-- 证据明显支持反转：允许逆势，并在 reasoning 中说明触发了哪两条强证据。
-
-若当前证据冲突明显、置信度不足（尤其第5手及以上），允许输出 SKIP（-1）以规避高风险。
+[Output Policy]
+- ????????????????????????
+- ????????????????? SKIP?
+- reasoning ?????????????????????????????
+- ??????????????
 
 [Response Format]
-必须且只能输出如下 JSON：
-{{"logic": "50字内分析证据流", "reasoning": "顺势/逆势/观望的原因", "confidence": 1-100, "prediction": -1或0或1}}
+???????? JSON?
+{{"logic": "50????", "reasoning": "??????????", "confidence": 1-100, "prediction": -1?0?1}}
 
-记住：prediction 只能是 -1、0、1 之一。"""
-
+???prediction ??? -1?0?1 ???"""
         messages = [
             {'role': 'system', 'content': '你是专门破解博弈陷阱的量化交易员，只输出纯JSON。prediction 仅允许 -1/0/1。'},
             {'role': 'user', 'content': prompt}
@@ -1614,6 +1631,10 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         else:
             rt["last_predict_source"] = "model" if model_used else "fallback"
         rt["last_predict_reason"] = reason
+        rt["last_predict_gap"] = int(gap)
+        rt["last_predict_long_term_gap"] = float(long_term_gap)
+        rt["last_predict_tail_len"] = int(tail_streak_len)
+        rt["last_predict_tail_char"] = int(tail_streak_char)
         
         # 审计日志
         audit_log = {
@@ -2324,6 +2345,17 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
                 else:
                     await _apply_entry_gate_pause(client, user_ctx, global_config, quality_gate, next_sequence)
                     return
+        if deep_risk_enabled and (not force_unlock_active):
+            high_pressure_gate = _evaluate_high_pressure_pattern_gate(rt, risk_pause, next_sequence)
+            if high_pressure_gate.get("blocked", False):
+                pressure_guard = _record_hand_stall_block(rt, next_sequence, history_len, "gate")
+                if pressure_guard.get("force_unlock", False):
+                    prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, pressure_guard)
+                    force_unlock_active = True
+                else:
+                    await _apply_entry_gate_pause(client, user_ctx, global_config, high_pressure_gate, next_sequence)
+                    return
+
 
         # 高阶手位二次确认：第7手起，主副模型需同向且置信度达标。
         if deep_risk_enabled and (not force_unlock_active) and next_sequence >= HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP:
@@ -2912,6 +2944,78 @@ def _select_secondary_model_id(user_ctx: UserContext, primary_model_id: str) -> 
     except Exception:
         return ""
     return ""
+
+
+def _is_neutral_long_term_gap(value: float) -> bool:
+    try:
+        current = float(value)
+    except (TypeError, ValueError):
+        return False
+    return NEUTRAL_LONG_TERM_GAP_LOW <= current <= NEUTRAL_LONG_TERM_GAP_HIGH
+
+
+def _evaluate_high_pressure_pattern_gate(rt: dict, risk_pause: dict, next_sequence: int) -> dict:
+    """
+    深度风控开启时的高压位结构门控：
+    - 第3手起，不稳定形态需要更高置信度
+    - 第5手起，不稳定形态/候选长龙默认从严，优先 SKIP / 暂停
+    """
+    if next_sequence < 3:
+        return {"blocked": False}
+
+    source = str(rt.get("last_predict_source", "unknown")).lower().strip()
+    if source != "model":
+        return {"blocked": False}
+
+    tag = str(rt.get("last_predict_tag", "") or "UNKNOWN").strip().upper()
+    confidence = int(rt.get("last_predict_confidence", 0) or 0)
+    tail_len = int(rt.get("last_predict_tail_len", 0) or 0)
+    long_term_gap = float(rt.get("last_predict_long_term_gap", 0.5) or 0.5)
+    wins = int(risk_pause.get("wins", 0))
+    total = int(risk_pause.get("total", 0))
+    win_rate = (wins / total) if total > 0 else 0.0
+
+    reasons = []
+    pause_rounds = 1 if next_sequence < HIGH_PRESSURE_SKIP_MIN_STEP else HIGH_PRESSURE_PATTERN_PAUSE_ROUNDS
+    gate_name = "高压位结构门控"
+
+    if tag in UNSTABLE_PATTERN_TAGS:
+        conf_threshold = UNSTABLE_PATTERN_MIN_CONF_STEP3 if next_sequence < HIGH_PRESSURE_SKIP_MIN_STEP else UNSTABLE_PATTERN_MIN_CONF_STEP5
+        if confidence < conf_threshold:
+            reasons.append(f"不稳定形态 {tag} 置信度仅 {confidence}% < {conf_threshold}%")
+        if tail_len < 4:
+            reasons.append(f"尾部连数仅 {tail_len}，形态未成熟")
+        if _is_neutral_long_term_gap(long_term_gap):
+            reasons.append(f"长期100局占比 {long_term_gap:.2f} 接近均衡，不能作为下注证据")
+        if next_sequence >= HIGH_PRESSURE_SKIP_MIN_STEP:
+            reasons.append(f"第{HIGH_PRESSURE_SKIP_MIN_STEP}手及以上不接受 {tag} 直接下注")
+    elif tag == "DRAGON_CANDIDATE" and next_sequence >= HIGH_PRESSURE_SKIP_MIN_STEP:
+        if tail_len < DRAGON_CANDIDATE_MIN_TAIL_STEP5:
+            reasons.append(f"DRAGON_CANDIDATE 尾部连数仅 {tail_len} < {DRAGON_CANDIDATE_MIN_TAIL_STEP5}")
+        if confidence < HIGH_PRESSURE_SKIP_MIN_CONF:
+            reasons.append(f"候选长龙置信度仅 {confidence}% < {HIGH_PRESSURE_SKIP_MIN_CONF}%")
+        if _is_neutral_long_term_gap(long_term_gap):
+            reasons.append(f"长期100局占比 {long_term_gap:.2f} 接近均衡，长龙证据不足")
+    elif tag == "LONG_DRAGON" and next_sequence >= HIGH_PRESSURE_SKIP_MIN_STEP:
+        if tail_len < DRAGON_CANDIDATE_MIN_TAIL_STEP5:
+            reasons.append(f"LONG_DRAGON 尾部连数仅 {tail_len}，成熟度不足")
+        if confidence < HIGH_PRESSURE_SKIP_MIN_CONF:
+            reasons.append(f"LONG_DRAGON 置信度仅 {confidence}% < {HIGH_PRESSURE_SKIP_MIN_CONF}%")
+
+    if reasons:
+        return {
+            "blocked": True,
+            "gate_name": gate_name,
+            "pause_rounds": pause_rounds,
+            "reason_text": "；".join(reasons),
+            "source": source,
+            "tag": tag,
+            "confidence": confidence,
+            "wins": wins,
+            "total": total,
+            "win_rate": win_rate,
+        }
+    return {"blocked": False}
 
 
 async def _evaluate_high_step_double_confirm(
@@ -3597,7 +3701,15 @@ async def _trigger_deep_risk_pause_after_settle(
         model_eval,
         max_pause=deep_cap,
     )
-    pause_rounds = max(1, min(deep_cap, int(model_pause_rounds)))
+    initial_amount = int(rt.get("initial_amount", 500) or 500)
+    min_pause_rounds = 1
+    if deep_milestone >= 6:
+        min_pause_rounds = 2
+    if initial_amount >= 10000 and deep_milestone >= 3:
+        min_pause_rounds = max(min_pause_rounds, 2)
+    if initial_amount >= 20000 and deep_milestone >= 6:
+        min_pause_rounds = max(min_pause_rounds, 3)
+    pause_rounds = max(min_pause_rounds, min(deep_cap, int(model_pause_rounds)))
     _enter_pause(rt, pause_rounds, f"深度风控暂停（{deep_milestone}连输档）")
     rt["risk_pause_snapshot_count"] = settled_count
     rt["risk_pause_block_hits"] = int(rt.get("risk_pause_block_hits", 0)) + 1
@@ -3622,7 +3734,7 @@ async def _trigger_deep_risk_pause_after_settle(
         f"最近{total}笔胜率：{wins}/{total}（{win_rate:.1f}%）\n"
         f"触发点：第 {next_sequence} 手下注前\n"
         f"模型建议：{model_pause_rounds} 局（来源：{model_source}）\n"
-        f"本次暂停：{pause_rounds} 局（该层上限 {deep_cap}，不占基础预算）\n"
+        f"本次暂停：{pause_rounds} 局（该层上限 {deep_cap}，最低保护 {min_pause_rounds} 局，不占基础预算）\n"
         f"模型依据：{model_reason}\n"
         f"暂停期间：保留当前倍投进度，不会重置首注\n"
         f"{resume_hint}"

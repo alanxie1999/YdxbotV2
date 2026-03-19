@@ -3031,3 +3031,35 @@ def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, mon
     assert '"model_id": "model-2"' in rt["last_logic_audit"]
 
 
+def test_high_pressure_pattern_gate_blocks_unstable_tag_when_deep_risk_enabled():
+    rt = {
+        "last_predict_source": "model",
+        "last_predict_tag": "CHAOS_SWITCH",
+        "last_predict_confidence": 65,
+        "last_predict_tail_len": 2,
+        "last_predict_long_term_gap": 0.50,
+    }
+    risk_pause = {"wins": 18, "total": 40}
+
+    gate = zm._evaluate_high_pressure_pattern_gate(rt, risk_pause, next_sequence=5)
+
+    assert gate["blocked"] is True
+    assert gate["pause_rounds"] == zm.HIGH_PRESSURE_PATTERN_PAUSE_ROUNDS
+    assert "CHAOS_SWITCH" in gate["reason_text"]
+
+
+def test_high_pressure_pattern_gate_allows_mature_long_dragon_with_high_confidence():
+    rt = {
+        "last_predict_source": "model",
+        "last_predict_tag": "LONG_DRAGON",
+        "last_predict_confidence": 82,
+        "last_predict_tail_len": 6,
+        "last_predict_long_term_gap": 0.58,
+    }
+    risk_pause = {"wins": 18, "total": 40}
+
+    gate = zm._evaluate_high_pressure_pattern_gate(rt, risk_pause, next_sequence=5)
+
+    assert gate["blocked"] is False
+
+
