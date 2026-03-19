@@ -1689,7 +1689,7 @@ def test_process_settle_lose_warning_matches_master_style(tmp_path, monkeypatch)
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
     assert captured["type"] == "lose_streak"
-    assert "⚠️⚠️  1 连输告警 ⚠️⚠️" in captured["message"]
+    assert "⚠️ 1 连输告警 ⚠️" in captured["message"]
     assert "第 1 轮第 1 次" in captured["message"]
     assert "📋 预设名称：yc10" in captured["message"]
     assert "💰 账户余额：" in captured["message"]
@@ -1751,7 +1751,7 @@ def test_process_settle_lose_end_message_contains_balance_lines(tmp_path, monkey
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
     msg = captured["message"]
-    assert "✅✅  3 连输已终止！✅✅" in msg
+    assert "✅ 3 连输已终止！ ✅" in msg
     assert "🔢 " in msg and "第 1 轮第 5 次 至 第 9 次" in msg
     assert "📋 预设名称：yc10" in msg
     assert "😀 连续押注：4 次" in msg
@@ -2139,7 +2139,7 @@ def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, mon
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
     msg = captured["message"]
-    assert "⚠️⚠️  3 连输告警 ⚠️⚠️" in msg
+    assert "⚠️ 3 连输告警 ⚠️" in msg
     assert "😀 连续押注：3 次" in msg
     assert "💰 累计损失：2,420,500" in msg
     assert rt["bet_sequence_count"] == 3
@@ -2983,58 +2983,6 @@ def test_generate_mobile_bet_report_formats_bet_id():
 
     assert "3月18日第 3 轮第 58 次押注执行" in report
     assert "20260318_3_58押注执行" not in report
-
-
-def test_auto_zz_scheduler_reuses_single_task_and_cancels(tmp_path, monkeypatch):
-    user_dir = tmp_path / "users" / "zz_scheduler_user"
-    _write_json(
-        user_dir / "config.json",
-        {
-            "account": {"name": "自动转账用户"},
-            "telegram": {"user_id": 70115},
-            "groups": {"admin_chat": 70115},
-            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
-        },
-    )
-    ctx = UserContext(str(user_dir))
-
-    created_tasks = []
-
-    class DummyTask:
-        def __init__(self, coro):
-            self.coro = coro
-            self._done = False
-            self.cancelled = False
-
-        def done(self):
-            return self._done
-
-        def cancel(self):
-            self.cancelled = True
-            self._done = True
-            self.coro.close()
-
-    def fake_create_task(coro):
-        task = DummyTask(coro)
-        created_tasks.append(task)
-        return task
-
-    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
-
-    first_task = zm.ensure_auto_zz_scheduler(SimpleNamespace(), ctx)
-    second_task = zm.ensure_auto_zz_scheduler(SimpleNamespace(), ctx)
-
-    assert first_task is second_task
-    assert len(created_tasks) == 1
-    assert zm.cancel_auto_zz_scheduler(ctx) is True
-    assert created_tasks[0].cancelled is True
-    assert zm.cancel_auto_zz_scheduler(ctx) is False
-
-
-def test_zz_success_text_accepts_known_success_patterns():
-    assert zm._is_zz_success_text("转账成功", 11000) is True
-    assert zm._is_zz_success_text("已转账 11000 积分", 11000, require_amount=True) is True
-    assert zm._is_zz_success_text("转账失败：余额不足", 11000) is False
 
 
 def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, monkeypatch):

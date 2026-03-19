@@ -37,15 +37,6 @@ logger.propagate = False
 
 ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
 _ACCOUNT_NAME_REGISTRY: Dict[str, str] = {}
-_AUTO_ZZ_TASKS: Dict[str, asyncio.Task] = {}
-
-AUTO_ZZ_TRANSFER_AMOUNT = 100000
-AUTO_ZZ_INTERVAL_SECONDS = 7200
-AUTO_ZZ_TRIGGER_USER_ID = 5721909476
-AUTO_ZZ_TRIGGER_SCAN_LIMIT = 50
-AUTO_ZZ_SUCCESS_SCAN_LIMIT = 20
-AUTO_ZZ_SUCCESS_RETRY_COUNT = 12
-AUTO_ZZ_SUCCESS_RETRY_DELAY_SECONDS = 1.0
 
 
 def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
@@ -2044,7 +2035,7 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
             reason_text = "最近40笔胜率<=37.5%"
             resume_hint = _build_pause_resume_hint(rt)
             pause_msg = (
-                f"⛔⛔ 自动风控暂停 ⛔⛔\n\n"
+                f"⛔ 自动风控暂停 ⛔\n\n"
                 f"触发层级：基础风控\n"
                 f"触发原因：{reason_text}\n"
                 f"最近{total}笔胜率：{wins}/{total}（{win_rate:.1f}%）\n"
@@ -2434,7 +2425,7 @@ async def process_bet_on(client, event, user_ctx: UserContext, global_config: di
         if rt.get("pause_resume_pending", False):
             reason_text = str(rt.get("pause_resume_pending_reason", "自动暂停")).strip() or "自动暂停"
             resume_msg = (
-                f"✅✅ 恢复押注（已执行） ✅✅\n\n"
+                f"✅ 恢复押注（已执行） ✅\n\n"
                 f"恢复原因：{reason_text} 倒计时结束\n"
                 f"模型信号：{_format_predict_signal_brief(rt)}\n"
                 f"当前动作：已执行第 {rt.get('bet_sequence_count', 1)} 手，方向 {direction}，金额 {format_number(rt['bet_amount'])}\n"
@@ -2584,7 +2575,7 @@ async def process_red_packet(client, event, user_ctx: UserContext, global_config
                 return
 
             if any(flag in response_msg for flag in ("不能重复领取", "来晚了", "领过")):
-                mes = "🧧🧧 红包领取失败 🧧🧧\n\n原因：来晚了，红包已被领完"
+                mes = "🧧 红包领取失败 🧧\n\n原因：来晚了，红包已被领完"
                 log_event(
                     logging.INFO,
                     "red_packet",
@@ -3223,7 +3214,7 @@ async def _apply_entry_gate_pause(
         wr_text = "样本不足（N/A）"
 
     pause_msg = (
-        f"⛔⛔ 自动风控暂停 ⛔⛔\n\n"
+        f"⛔ 自动风控暂停 ⛔\n\n"
         f"触发点：第 {next_sequence} 手下注前\n"
         f"触发类型：{gate.get('gate_name', '高倍入场门控')}\n"
         f"当前信号：标签 {gate.get('tag', 'UNKNOWN')} | 置信度 {gate.get('confidence', 0)}% | 来源 {gate.get('source', 'unknown')}\n"
@@ -3548,7 +3539,7 @@ async def _refresh_pause_countdown_notice(
     progress_rounds = max(0, total_rounds - remaining_rounds)
     resume_hint = _build_pause_resume_hint(rt)
     countdown_msg = (
-        "⏸️⏸️ 暂停倒计时提醒（自动）⏸️⏸️\n\n"
+        "⏸️ 暂停倒计时提醒（自动） ⏸️\n\n"
         f"📌 暂停原因：{reason}\n"
         "🧱 当前状态：暂停中，本局不会下注\n"
         f"🔢 倒计时：{remaining_rounds} 局\n"
@@ -3625,7 +3616,7 @@ async def _trigger_deep_risk_pause_after_settle(
         reason_text = f"{reason_text}；{deep_cap_adjust_reason}"
     resume_hint = _build_pause_resume_hint(rt)
     pause_msg = (
-        f"⛔⛔ 自动风控暂停 ⛔⛔\n\n"
+        f"⛔ 自动风控暂停 ⛔\n\n"
         f"触发层级：{level_label}\n"
         f"触发原因：{reason_text}\n"
         f"最近{total}笔胜率：{wins}/{total}（{win_rate:.1f}%）\n"
@@ -3724,7 +3715,7 @@ async def _handle_goal_pause_after_settle(
 
     resume_hint = _build_pause_resume_hint(rt)
     pause_msg = (
-        f"⛔⛔ {'被炸保护暂停' if notify_type == 'explode' else '盈利达成暂停'} ⛔⛔\n\n"
+        f"⛔ {'被炸保护暂停' if notify_type == 'explode' else '盈利达成暂停'} ⛔\n\n"
         f"原因：{'被炸保护' if notify_type == 'explode' else '盈利达成'}\n"
         f"本次暂停：{configured_stop_rounds} 局\n"
         f"暂停期间：保留策略状态，等待倒计时结束\n"
@@ -3903,7 +3894,7 @@ def generate_mobile_bet_report(
     streak_len, streak_side = _get_current_streak(history)
     bet_label = format_bet_id(bet_id) if bet_id else "本次"
     return (
-        f"🎯🎯 **{bet_label}押注执行** 🎯🎯\n\n"
+        f"🎯 **{bet_label}押注执行** 🎯\n\n"
         f"😀 连续押注：{sequence_count} 次\n"
         f"⚡ 押注方向：{direction}\n"
         f"💵 押注本金：{format_number(amount)}\n"
@@ -3924,7 +3915,7 @@ def generate_mobile_pause_report(
     w40 = _format_recent_binary(history, 40)
 
     lines = [
-        "⛔⛔ 风控暂停简报 ⛔⛔",
+        "⛔ 风控暂停简报 ⛔",
         "",
         f"原因：{reason_text}",
     ]
@@ -4226,7 +4217,7 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                                 continuous_count = int(active_chain_summary.get("continuous_count", rt.get("bet_sequence_count", 0)))
                                 total_losses = int(active_chain_summary.get("total_losses", abs(profit)))
                                 warn_msg = (
-                                    f"⚠️⚠️  {lose_count} 连输告警 ⚠️⚠️\n\n"
+                                    f"⚠️ {lose_count} 连输告警 ⚠️\n\n"
                                     f"🔢 {date_str} 第 {settle_round} 轮第 {settle_seq} 次\n"
                                     f"📋 预设名称：{preset_name}\n"
                                     f"😀 连续押注：{continuous_count} 次\n"
@@ -4334,7 +4325,7 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                         recent_resolved_summary.get("continuous_count", rt.get("bet_sequence_count", 0))
                     )
                     
-                    mes = f"🔢🔢 **{bet_id}押注结果** 🔢🔢\n\n"
+                    mes = f"🔢 **{bet_id}押注结果** 🔢\n\n"
                     mes += f"😀 连续押注：{settle_sequence_count} 次\n"
                     mes += f"⚡ 押注方向：{direction}\n"
                     mes += f"💵 押注本金：{format_number(bet_amount)}\n"
@@ -4532,7 +4523,7 @@ async def process_settle(client, event, user_ctx: UserContext, global_config: di
                 range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_round} 轮第 {end_seq} 次"
 
             rec_msg = (
-                f"✅✅  {lose_count} 连输已终止！✅✅\n\n"
+                f"✅ {lose_count} 连输已终止！ ✅\n\n"
                 f"🔢 时间：{range_text}\n"
                 f"📋 预设名称：{rt.get('current_preset_name', 'none')}\n"
                 f"😀 连续押注：{lose_end_payload.get('continuous_count', lose_count)} 次\n"
@@ -4578,220 +4569,6 @@ async def delete_later(client, chat_id, message_id, delay=10):
         await client.delete_messages(chat_id, message_id)
     except Exception:
         pass
-
-
-def _get_auto_zz_task_key(user_ctx: UserContext) -> str:
-    return str(getattr(user_ctx, "user_id", 0) or 0)
-
-
-def _get_auto_zz_task(user_ctx: UserContext) -> Optional[asyncio.Task]:
-    key = _get_auto_zz_task_key(user_ctx)
-    task = _AUTO_ZZ_TASKS.get(key)
-    if task is not None and task.done():
-        _AUTO_ZZ_TASKS.pop(key, None)
-        return None
-    return task
-
-
-def _clear_auto_zz_task(user_ctx: UserContext, task: Optional[asyncio.Task] = None) -> None:
-    key = _get_auto_zz_task_key(user_ctx)
-    current = _AUTO_ZZ_TASKS.get(key)
-    if task is None or current is task:
-        _AUTO_ZZ_TASKS.pop(key, None)
-
-
-def _normalize_text_digits(text: str) -> str:
-    return "".join(ch for ch in str(text or "") if ch.isdigit())
-
-
-def _is_zz_success_text(text: str, amount: int, require_amount: bool = False) -> bool:
-    body = str(text or "").strip()
-    if not body:
-        return False
-    if any(token in body for token in ("失败", "不足", "错误", "未成功")):
-        return False
-    if not any(token in body for token in ("转账成功", "成功转账", "已转账", "转出成功", "转账已完成")):
-        return False
-    if not require_amount:
-        return True
-    amount_digits = _normalize_text_digits(amount)
-    text_digits = _normalize_text_digits(body)
-    return bool(amount_digits and amount_digits in text_digits)
-
-
-def _is_zz_failure_text(text: str) -> bool:
-    body = str(text or "").strip()
-    if not body:
-        return False
-    return any(token in body for token in ("转账失败", "积分不足", "余额不足", "未成功", "操作失败"))
-
-
-def cancel_auto_zz_scheduler(user_ctx: UserContext) -> bool:
-    task = _get_auto_zz_task(user_ctx)
-    if task is None:
-        return False
-    task.cancel()
-    _clear_auto_zz_task(user_ctx, task)
-    log_event(logging.DEBUG, 'zz', '自动转账调度器已取消', user_id=user_ctx.user_id)
-    return True
-
-
-def ensure_auto_zz_scheduler(client, user_ctx: UserContext) -> Optional[asyncio.Task]:
-    rt = user_ctx.state.runtime
-    if not rt.get("_auto_zz_enabled", True):
-        cancel_auto_zz_scheduler(user_ctx)
-        return None
-
-    task = _get_auto_zz_task(user_ctx)
-    if task is not None:
-        return task
-
-    task = asyncio.create_task(_auto_zz_loop(client, user_ctx))
-    _AUTO_ZZ_TASKS[_get_auto_zz_task_key(user_ctx)] = task
-    log_event(
-        logging.DEBUG,
-        'zz',
-        '自动转账调度器已启动',
-        user_id=user_ctx.user_id,
-        interval=AUTO_ZZ_INTERVAL_SECONDS,
-        amount=AUTO_ZZ_TRANSFER_AMOUNT,
-    )
-    return task
-
-
-async def _auto_zz_loop(client, user_ctx: UserContext) -> None:
-    rt = user_ctx.state.runtime
-    current_task = asyncio.current_task()
-    try:
-        while rt.get("_auto_zz_enabled", True):
-            await asyncio.sleep(AUTO_ZZ_INTERVAL_SECONDS)
-            if not rt.get("_auto_zz_enabled", True):
-                break
-            await _do_zz_transfer(client, AUTO_ZZ_TRANSFER_AMOUNT, user_ctx, rt)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        log_event(
-            logging.ERROR,
-            'zz',
-            '自动转账调度器异常退出',
-            user_id=user_ctx.user_id,
-            error=str(e),
-        )
-    finally:
-        _clear_auto_zz_task(user_ctx, current_task)
-
-
-async def _do_zz_transfer(client, amount, user_ctx: UserContext, rt: Dict[str, Any]) -> bool:
-    zq_groups = list(_iter_targets(user_ctx.config.groups.get("zq_group", [])))
-    zq_bot_targets = {str(item) for item in _iter_targets(user_ctx.config.groups.get("zq_bot"))}
-    if not zq_groups:
-        log_event(logging.WARNING, 'zz', '未配置 zq_group，无法执行转账', user_id=user_ctx.user_id)
-        return False
-
-    found_msg = None
-    found_group = None
-    for gid in zq_groups:
-        try:
-            async for msg in client.iter_messages(gid, limit=AUTO_ZZ_TRIGGER_SCAN_LIMIT):
-                if str(getattr(msg, "sender_id", "") or "") != str(AUTO_ZZ_TRIGGER_USER_ID):
-                    continue
-                found_msg = msg
-                found_group = gid
-                break
-        except Exception as e:
-            log_event(
-                logging.WARNING,
-                'zz',
-                '扫描转账触发消息失败',
-                user_id=user_ctx.user_id,
-                group=gid,
-                error=str(e),
-            )
-        if found_msg is not None:
-            break
-
-    if found_msg is None or found_group is None:
-        log_event(logging.WARNING, 'zz', '未找到转账触发消息', user_id=user_ctx.user_id)
-        return False
-
-    try:
-        sent_msg = await found_msg.reply(f"+{amount}")
-        await asyncio.sleep(0.2)
-        try:
-            await sent_msg.delete()
-        except Exception:
-            pass
-
-        success_msg = None
-        failure_text = ""
-        min_id = max(0, int(getattr(sent_msg, "id", 0) or 0) - 1)
-        for _ in range(AUTO_ZZ_SUCCESS_RETRY_COUNT):
-            async for msg in client.iter_messages(found_group, limit=AUTO_ZZ_SUCCESS_SCAN_LIMIT, min_id=min_id):
-                sender_id = str(getattr(msg, "sender_id", "") or "")
-                text = (getattr(msg, "raw_text", None) or getattr(msg, "text", None) or "").strip()
-                sender_matches = (not zq_bot_targets) or sender_id in zq_bot_targets
-                if sender_matches and _is_zz_success_text(text, amount, require_amount=False):
-                    success_msg = msg
-                    break
-                if (not sender_matches) and _is_zz_success_text(text, amount, require_amount=True):
-                    success_msg = msg
-                    break
-                if _is_zz_failure_text(text):
-                    failure_text = text[:120]
-            if success_msg is not None:
-                break
-            await asyncio.sleep(AUTO_ZZ_SUCCESS_RETRY_DELAY_SECONDS)
-
-        if success_msg is None:
-            log_event(
-                logging.WARNING,
-                'zz',
-                '转账后未确认成功消息',
-                user_id=user_ctx.user_id,
-                amount=amount,
-                group=found_group,
-                detail=failure_text,
-            )
-            return False
-
-        try:
-            await success_msg.click(text="删除当前消息")
-        except Exception:
-            pass
-
-        new_gambling_fund = max(0, int(rt.get("gambling_fund", 0) or 0) - amount)
-        rt["gambling_fund"] = new_gambling_fund
-        user_ctx.save_state()
-
-        tg_bot_cfg = user_ctx.config.notification.get("tg_bot", {})
-        if tg_bot_cfg.get("enable") and tg_bot_cfg.get("bot_token") and tg_bot_cfg.get("chat_id"):
-            account_name = user_ctx.config.name.strip()
-            account_balance = int(rt.get("account_balance", 0) or 0)
-            mes = f"【账号：{account_name}】\n✅ 积分转账\n转账金额：{amount}\n账户资金：{account_balance}\n博彩资金：{new_gambling_fund}"
-            url = f"https://api.telegram.org/bot{tg_bot_cfg['bot_token']}/sendMessage"
-            await _post_json_async(url, {"chat_id": tg_bot_cfg['chat_id'], "text": mes}, timeout=5)
-
-        log_event(
-            logging.INFO,
-            'zz',
-            '积分转账成功',
-            user_id=user_ctx.user_id,
-            amount=amount,
-            group=found_group,
-            gambling_fund=new_gambling_fund,
-        )
-        return True
-    except Exception as e:
-        log_event(
-            logging.ERROR,
-            'zz',
-            '积分转账失败',
-            user_id=user_ctx.user_id,
-            amount=amount,
-            error=str(e),
-        )
-        return False
 
 
 async def handle_model_command_multiuser(event, args, user_ctx: UserContext, global_config: dict):
@@ -5194,42 +4971,10 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
             return
 
-        # zz - 自动转账调度器状态
-        _auto_zz_task = _get_auto_zz_task(user_ctx)
-        
-
-        # zz - 
-        if cmd == "zz":
-            if len(my) < 2:
-                # 如果没有参数，显示状态或帮助（可选）
-                return
-            
-            if my[1] in ("on", "off"):
-                is_enable = (my[1] == "on")
-                rt["_auto_zz_enabled"] = is_enable
-                user_ctx.save_state()
-                if is_enable:
-                    ensure_auto_zz_scheduler(client, user_ctx)
-                else:
-                    cancel_auto_zz_scheduler(user_ctx)
-                return
-
-            try:
-                amount = int(my[1])
-                if amount <= 0: return
-            except ValueError:
-                return
-
-            # 执行手动转账
-            transfer_ok = await _do_zz_transfer(client, amount, user_ctx, rt)
-            if not transfer_ok:
-                await send_to_admin(client, f"⚠️ zz {amount} 未确认成功，请检查群内回执。", user_ctx, global_config)
-            return
-        
         # pause/resume - 暂停/恢复押注
         if cmd in ("pause", "暂停"):
             if rt.get("manual_pause", False):
-                await send_to_admin(client, "⏸️⏸️ 当前账号已是暂停状态 ⏸️⏸️", user_ctx, global_config)
+                await send_to_admin(client, "⏸️ 当前账号已是暂停状态 ⏸️", user_ctx, global_config)
                 return
             await _clear_pause_countdown_notice(client, user_ctx)
             rt["switch"] = True
@@ -5239,7 +4984,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             rt["manual_pause"] = True
             _clear_lose_recovery_tracking(rt)
             user_ctx.save_state()
-            mes = "⏸️⏸️ 已暂停当前账号押注 ⏸️⏸️"
+            mes = "⏸️ 已暂停当前账号押注 ⏸️"
             await send_to_admin(client, mes, user_ctx, global_config)
             log_event(logging.INFO, 'user_cmd', '暂停押注', user_id=user_ctx.user_id)
             return
@@ -5252,7 +4997,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             rt["mode_stop"] = True
             rt["manual_pause"] = False
             user_ctx.save_state()
-            mes = "▶️▶️ 已恢复当前账号押注 ▶️▶️"
+            mes = "▶️ 已恢复当前账号押注 ▶️"
             await send_to_admin(client, mes, user_ctx, global_config)
             log_event(logging.INFO, 'user_cmd', '恢复押注', user_id=user_ctx.user_id)
             return
@@ -5351,7 +5096,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 _clear_lose_recovery_tracking(rt)
                 user_ctx.save_state()
                 
-                mes = f"🎯🎯 预设启动成功: {preset_name} 🎯🎯\n\n策略参数：{preset[0]} {preset[1]} {preset[2]} {preset[3]} {preset[4]} {preset[5]} {preset[6]}"
+                mes = f"🎯 预设启动成功: {preset_name} 🎯\n\n策略参数：{preset[0]} {preset[1]} {preset[2]} {preset[3]} {preset[4]} {preset[5]} {preset[6]}"
                 log_event(logging.INFO, 'user_cmd', '启动预设', user_id=user_ctx.user_id, preset=preset_name)
                 message = await send_to_admin(client, mes, user_ctx, global_config)
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))

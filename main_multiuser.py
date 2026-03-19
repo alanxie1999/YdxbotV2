@@ -722,7 +722,6 @@ async def start_user(user_ctx: UserContext, global_config: dict):
         from zq_multiuser import (
             apply_account_risk_default_mode,
             build_startup_focus_reminder,
-            ensure_auto_zz_scheduler,
             heal_stale_pending_bets,
         )
         risk_mode = apply_account_risk_default_mode(user_ctx.state.runtime)
@@ -737,7 +736,6 @@ async def start_user(user_ctx: UserContext, global_config: dict):
         heal_result = heal_stale_pending_bets(user_ctx)
 
         user_ctx.save_state()
-        ensure_auto_zz_scheduler(client, user_ctx)
 
         healed_count = int(heal_result.get("count", 0) or 0)
         if healed_count > 0:
