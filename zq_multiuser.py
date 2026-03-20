@@ -1983,7 +1983,235 @@ Return JSON only:
 
 
 # 押注处理
+def _apply_round_pause_slim(rt: dict, pause_rounds: int, reason: str) -> int:
+    rounds = max(1, int(pause_rounds))
+    rt["stop_count"] = max(int(rt.get("stop_count", 0) or 0), rounds)
+    rt["pause_reason"] = str(reason or "").strip()
+    rt["bet"] = False
+    rt["bet_on"] = False
+    rt["mode_stop"] = True
+    return rounds
+
+
+async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_config: dict):
+    state = user_ctx.state
+    rt = state.runtime
+
+    timing_cfg = _read_timing_config(global_config)
+    prompt_wait_sec = timing_cfg["prompt_wait_sec"]
+    predict_timeout_sec = timing_cfg["predict_timeout_sec"]
+    click_interval_sec = timing_cfg["click_interval_sec"]
+    click_timeout_sec = timing_cfg["click_timeout_sec"]
+
+    if not getattr(event, "reply_markup", None) and prompt_wait_sec > 0:
+        await asyncio.sleep(prompt_wait_sec)
+
+    text = event.message.message
+
+    if not rt.get("switch", True):
+        if rt.get("bet", False):
+            rt["bet"] = False
+            user_ctx.save_state()
+        return
+
+    if rt.get("manual_pause", False):
+        if rt.get("bet", False):
+            rt["bet"] = False
+            user_ctx.save_state()
+        return
+
+    open_bet_entry = _get_latest_open_bet_entry(state)
+    if rt.get("bet", False) and open_bet_entry is not None:
+        return
+    if rt.get("bet", False) and open_bet_entry is None:
+        rt["bet"] = False
+        user_ctx.save_state()
+
+    healed_pending = heal_stale_pending_bets(user_ctx)
+    if healed_pending.get("count", 0) > 0:
+        summary = reconcile_bet_runtime_from_log(user_ctx)
+        user_ctx.save_state()
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            build_pending_bet_heal_notice(healed_pending, summary, rt),
+            ttl_seconds=180,
+            attr_name="pending_bet_heal_message",
+        )
+
+    stop_count = int(rt.get("stop_count", 0) or 0)
+    if stop_count > 0:
+        rt["stop_count"] = max(0, stop_count - 1)
+        rt["bet"] = False
+        if rt["stop_count"] == 0:
+            rt["bet_on"] = True
+            rt["mode_stop"] = True
+            rt["pause_reason"] = ""
+        user_ctx.save_state()
+        return
+
+    try:
+        history_match = re.search(r"\[0\s*小\s*1\s*大\]([\s\S]*)", text)
+        if history_match:
+            history_str = history_match.group(1)
+            new_history = [int(x) for x in re.findall(r"(?<!\d)[01](?!\d)", history_str)]
+            if new_history and len(new_history) >= len(state.history):
+                state.history = new_history[-2000:]
+    except Exception as e:
+        log_event(logging.WARNING, 'bet_on', '瑙ｆ瀽鍘嗗彶鏁版嵁澶辫触', user_id=user_ctx.user_id, data=str(e))
+
+    bet_amount = calculate_bet_amount(rt)
+    if bet_amount <= 0:
+        if not rt.get("limit_stop_notified", False):
+            lose_stop = int(rt.get("lose_stop", 13))
+            mes = (
+                "⚠️ 已达到预设连投上限，已自动暂停\n"
+                f"当前预设最多连投：{lose_stop} 手\n"
+                "可等待新轮次或切换预设后继续"
+            )
+            await send_to_admin(client, mes, user_ctx, global_config)
+            rt["limit_stop_notified"] = True
+        rt["bet"] = False
+        rt["bet_on"] = False
+        rt["mode_stop"] = True
+        _clear_lose_recovery_tracking(rt)
+        user_ctx.save_state()
+        return
+    rt["limit_stop_notified"] = False
+
+    if not is_fund_available(user_ctx, bet_amount):
+        if _sync_fund_from_account_when_insufficient(rt, bet_amount):
+            user_ctx.save_state()
+        if not is_fund_available(user_ctx, bet_amount):
+            if not rt.get("fund_pause_notified", False):
+                display_fund = max(0, rt.get("gambling_fund", 0))
+                mes = (
+                    f"**菠菜资金不足，已暂停押注**\n"
+                    f"当前剩余：{display_fund / 10000:.2f} 万\n"
+                    "请使用 `gf [金额]` 恢复"
+                )
+                await send_message_v2(
+                    client,
+                    "fund_pause",
+                    mes,
+                    user_ctx,
+                    global_config,
+                    title=f"博彩机器人 {user_ctx.config.name} 资金暂停",
+                    desp=mes,
+                )
+                rt["fund_pause_notified"] = True
+            rt["bet"] = False
+            rt["bet_on"] = False
+            rt["mode_stop"] = True
+            _clear_lose_recovery_tracking(rt)
+            user_ctx.save_state()
+            return
+    rt["fund_pause_notified"] = False
+
+    if not (rt.get("bet_on", False) or rt.get("mode_stop", True)):
+        return
+
+    if not event.reply_markup:
+        rt["bet"] = False
+        user_ctx.save_state()
+        return
+
+    try:
+        prediction = await asyncio.wait_for(
+            predict_next_bet_v10(user_ctx, global_config),
+            timeout=predict_timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        prediction = int(fallback_prediction(state.history))
+        rt["last_predict_info"] = f"预测超时，改用统计兜底（{'大' if prediction == 1 else '小'}）"
+        rt["last_predict_source"] = "timeout_fallback"
+        rt["last_predict_tag"] = "TIMEOUT_FALLBACK"
+        rt["last_predict_confidence"] = 0
+
+    if prediction not in (-1, 0, 1):
+        prediction = int(fallback_prediction(state.history))
+        rt["last_predict_info"] = f"预测无效，改用统计兜底（{'大' if prediction == 1 else '小'}）"
+        rt["last_predict_source"] = "invalid_fallback"
+        rt["last_predict_tag"] = "INVALID_FALLBACK"
+        rt["last_predict_confidence"] = 0
+
+    if prediction == -1:
+        rt["bet"] = False
+        rt["bet_on"] = True
+        rt["mode_stop"] = True
+        user_ctx.save_state()
+        return
+
+    if rt.get("ai_key_issue_active", False):
+        await send_to_admin(client, _build_ai_key_warning_message(rt), user_ctx, global_config)
+
+    rt["bet_amount"] = int(bet_amount)
+    direction = "澶?" if prediction == 1 else "灏?"
+    direction_en = "big" if prediction == 1 else "small"
+    buttons = constants.BIG_BUTTON if prediction == 1 else constants.SMALL_BUTTON
+    combination = constants.find_combination(rt["bet_amount"], buttons)
+
+    if not combination:
+        rt["bet"] = False
+        user_ctx.save_state()
+        return
+
+    try:
+        for amount in combination:
+            button_data = buttons.get(amount)
+            if button_data is not None:
+                await asyncio.wait_for(
+                    _click_bet_button_with_recover(client, event, user_ctx, button_data),
+                    timeout=click_timeout_sec,
+                )
+                await asyncio.sleep(click_interval_sec)
+    except Exception as e:
+        if _is_invalid_callback_message_error(e):
+            await send_to_admin(client, "本轮下注窗口已失效，已自动跳过。", user_ctx, global_config)
+        else:
+            await send_to_admin(client, f"押注出错: {e}", user_ctx, global_config)
+        return
+
+    rt["bet"] = True
+    rt["total"] = rt.get("total", 0) + 1
+    rt["bet_sequence_count"] = rt.get("bet_sequence_count", 0) + 1
+    rt["bet_type"] = 1 if prediction == 1 else 0
+    rt["bet_on"] = True
+    rt["fund_pause_notified"] = False
+    rt["limit_stop_notified"] = False
+
+    bet_id = generate_bet_id(user_ctx)
+    state.bet_sequence_log.append({
+        "bet_id": bet_id,
+        "sequence": rt.get("bet_sequence_count", 0),
+        "direction": direction_en,
+        "amount": rt["bet_amount"],
+        "result": None,
+        "profit": 0,
+        "lose_stop": rt.get("lose_stop", 13),
+        "profit_target": rt.get("profit", 1000000)
+    })
+    state.bet_sequence_log = state.bet_sequence_log[-5000:]
+
+    bet_report = generate_mobile_bet_report(
+        state.history,
+        direction,
+        rt["bet_amount"],
+        rt.get("bet_sequence_count", 1),
+        bet_id
+    )
+    message = await send_to_admin(client, bet_report, user_ctx, global_config)
+    asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
+    if message:
+        asyncio.create_task(delete_later(client, message.chat_id, message.id, 100))
+
+    rt["current_bet_seq"] = int(rt.get("current_bet_seq", 1)) + 1
+    user_ctx.save_state()
+
+
 async def process_bet_on(client, event, user_ctx: UserContext, global_config: dict):
+    return await _process_bet_on_slim(client, event, user_ctx, global_config)
     state = user_ctx.state
     rt = state.runtime
 
@@ -4345,7 +4573,314 @@ def generate_mobile_pause_report(
     return "\n".join(lines)
 
 
+async def _process_settle_slim(client, event, user_ctx: UserContext, global_config: dict):
+    state = user_ctx.state
+    rt = state.runtime
+    text = event.message.message
+
+    try:
+        match = re.search(r"已结算[^0-9]*(?:结果[为中])?[^0-9]*(\d+)\s*(大|小)", text)
+        if not match:
+            return
+
+        settle_msg_id = int(getattr(event, "id", 0) or 0)
+        last_settle_msg_id = int(rt.get("last_settle_message_id", 0) or 0)
+        if settle_msg_id > 0 and settle_msg_id == last_settle_msg_id:
+            return
+        if settle_msg_id > 0:
+            rt["last_settle_message_id"] = settle_msg_id
+
+        result_type = match.group(2)
+        is_big = result_type == "大"
+        result = 1 if is_big else 0
+
+        try:
+            rt["account_balance"] = await fetch_balance(user_ctx)
+            rt["balance_status"] = "success"
+        except Exception as e:
+            log_event(logging.WARNING, 'settle', '鑾峰彇璐︽埛浣欓澶辫触锛屼娇鐢ㄩ粯璁ゅ€?', user_id=user_ctx.user_id, data=str(e))
+            rt["balance_status"] = "network_error"
+
+        state.history.append(result)
+        state.history = state.history[-2000:]
+        lose_end_payload = None
+
+        async def _apply_settle_fund_safety_guard() -> None:
+            next_bet_amount = calculate_bet_amount(rt)
+            if next_bet_amount <= 0:
+                rt["fund_pause_notified"] = False
+                return
+            if not is_fund_available(user_ctx, next_bet_amount):
+                if _sync_fund_from_account_when_insufficient(rt, next_bet_amount):
+                    user_ctx.save_state()
+                if not is_fund_available(user_ctx, next_bet_amount):
+                    if not rt.get("fund_pause_notified", False):
+                        display_fund = max(0, rt.get("gambling_fund", 0))
+                        mes = (
+                            f"**菠菜资金不足，已暂停押注**\n"
+                            f"当前剩余：{display_fund / 10000:.2f} 万\n"
+                            "请使用 `gf [金额]` 恢复"
+                        )
+                        await send_message_v2(
+                            client,
+                            "fund_pause",
+                            mes,
+                            user_ctx,
+                            global_config,
+                            title=f"博彩机器人 {user_ctx.config.name} 资金暂停",
+                            desp=mes,
+                        )
+                        rt["fund_pause_notified"] = True
+                    rt["bet"] = False
+                    rt["bet_on"] = False
+                    rt["mode_stop"] = True
+                else:
+                    rt["fund_pause_notified"] = False
+            else:
+                rt["fund_pause_notified"] = False
+
+        if rt.get("bet", False):
+            settled_entry = _get_latest_open_bet_entry(state)
+            if settled_entry is None:
+                rt["bet"] = False
+                user_ctx.save_state()
+                return
+
+            prediction = int(rt.get("bet_type", -1))
+            win = (is_big and prediction == 1) or (not is_big and prediction == 0)
+            bet_amount = int(rt.get("bet_amount", 500))
+            profit = int(bet_amount * 0.99) if win else -bet_amount
+            settle_round, settle_seq = get_settle_position(state, rt)
+            old_lose_count = int(rt.get("lose_count", 0))
+            direction = "大" if prediction == 1 else "小"
+            result_text = "赢" if win else "输"
+
+            rt["bet"] = False
+            state.bet_type_history.append(prediction)
+            rt["gambling_fund"] = rt.get("gambling_fund", 0) + profit
+            rt["earnings"] = rt.get("earnings", 0) + profit
+            rt["period_profit"] = rt.get("period_profit", 0) + profit
+            rt["win_total"] = rt.get("win_total", 0) + (1 if win else 0)
+            rt["win_count"] = rt.get("win_count", 0) + 1 if win else 0
+            rt["lose_count"] = rt.get("lose_count", 0) + 1 if not win else 0
+            rt["status"] = 1 if win else 0
+
+            settled_entry["result"] = result_text
+            settled_entry["profit"] = profit
+            settled_entry["settled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            active_chain_summary = _summarize_effective_bet_chain(state)
+            recent_resolved_summary = _summarize_recent_resolved_chain(state)
+            if not win:
+                rt["bet_sequence_count"] = max(
+                    int(active_chain_summary.get("continuous_count", 0)),
+                    int(old_lose_count) + 1,
+                )
+                rt["lose_count"] = max(
+                    int(active_chain_summary.get("lose_count", 0)),
+                    int(old_lose_count) + 1,
+                )
+                rt["bet_amount"] = int(active_chain_summary.get("last_amount", bet_amount) or bet_amount)
+
+            if not win:
+                if rt.get("lose_count", 0) == 1:
+                    _clear_lose_recovery_tracking(rt)
+                    rt["lose_start_info"] = {
+                        "round": settle_round,
+                        "seq": settle_seq,
+                        "fund": rt.get("gambling_fund", 0) + bet_amount
+                    }
+                warning_lose_count = rt.get("warning_lose_count", 3)
+                if rt.get("lose_count", 0) >= warning_lose_count:
+                    rt["lose_notify_pending"] = True
+                    total_losses = int(active_chain_summary.get("total_losses", abs(profit)))
+                    warn_msg = (
+                        f"⚠️ {int(rt.get('lose_count', 0))} 连输告警 ⚠️\n\n"
+                        f"🔢 {datetime.now().strftime('%m月%d日')} 第 {settle_round} 轮第 {settle_seq} 次\n"
+                        f"📋 预设名称：{rt.get('current_preset_name', 'none')}\n"
+                        f"😀 连续押注：{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次\n"
+                        f"⚡ 押注方向：{direction}\n"
+                        f"💵 押注本金：{format_number(bet_amount)}\n"
+                        f"💰 累计损失：{format_number(total_losses)}\n"
+                        f"💰 账户余额：{rt.get('account_balance', 0) / 10000:.2f} 万\n"
+                        f"💰 菠菜余额：{rt.get('gambling_fund', 0) / 10000:.2f} 万"
+                    )
+                    if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
+                        await cleanup_message(client, user_ctx.lose_streak_message)
+                    user_ctx.lose_streak_message = await send_message_v2(
+                        client,
+                        "lose_streak",
+                        warn_msg,
+                        user_ctx,
+                        global_config,
+                        title=f"博彩机器人 {user_ctx.config.name} 连输告警",
+                        desp=warn_msg
+                    )
+
+            if win and rt.get("lose_notify_pending", False):
+                warning_lose_count = int(rt.get("warning_lose_count", 3))
+                lose_start_info = rt.get("lose_start_info", {})
+                start_round = lose_start_info.get("round", "?")
+                start_seq = lose_start_info.get("seq", "?")
+                end_round = settle_round
+                end_seq = settle_seq
+                total_profit = rt.get("gambling_fund", 0) - lose_start_info.get("fund", rt.get("gambling_fund", 0))
+                total_loss = int(recent_resolved_summary.get("total_losses", 0))
+                current_balance = int(rt.get("account_balance", 0) or 0)
+                current_fund = int(rt.get("gambling_fund", 0) or 0)
+                if int(old_lose_count) >= warning_lose_count and _is_valid_lose_range(start_round, start_seq, end_round, end_seq):
+                    continuous_count = max(
+                        int(recent_resolved_summary.get("continuous_count", 0)),
+                        int(old_lose_count) + 1,
+                    )
+                    lose_end_payload = {
+                        "start_round": start_round,
+                        "start_seq": start_seq,
+                        "end_round": end_round,
+                        "end_seq": end_seq,
+                        "lose_count": old_lose_count,
+                        "continuous_count": continuous_count,
+                        "total_loss": total_loss,
+                        "total_profit": total_profit,
+                        "account_balance": current_balance,
+                        "gambling_fund": current_fund,
+                    }
+                _clear_lose_recovery_tracking(rt)
+            elif win:
+                _clear_lose_recovery_tracking(rt)
+
+            user_ctx.save_state()
+
+            result_amount = format_number(int(bet_amount * 0.99) if win else bet_amount)
+            last_bet_id = settled_entry.get("bet_id", "") if isinstance(settled_entry, dict) else ""
+            bet_id = format_bet_id(last_bet_id) if last_bet_id else f"{datetime.now().strftime('%m月%d日')}第 {rt.get('current_round', 1)} 轮第 {rt.get('current_bet_seq', 1)} 次"
+            settle_sequence_count = int(recent_resolved_summary.get("continuous_count", rt.get("bet_sequence_count", 0)))
+
+            mes = f"🔢 {bet_id}押注结果 🔢\n\n"
+            mes += f"😀 连续押注：{settle_sequence_count} 次\n"
+            mes += f"⚡ 押注方向：{direction}\n"
+            mes += f"💵 押注本金：{format_number(bet_amount)}\n"
+            mes += f"📉 输赢结果：{result_text} {result_amount}\n"
+            mes += f"🎲 开奖结果：{result_type}\n"
+            mes += f"🤖 预测依据：{rt.get('last_predict_info', 'N/A')}"
+            await send_to_admin(client, mes, user_ctx, global_config)
+
+            if win or rt.get("lose_count", 0) >= rt.get("lose_stop", 13):
+                rt["bet_sequence_count"] = 0
+                rt["bet_amount"] = int(rt.get("initial_amount", 500))
+
+        await _apply_settle_fund_safety_guard()
+
+        if len(state.history) % 5 == 0:
+            user_ctx.save_state()
+
+        if int(rt.get("explode_count", 0)) >= int(rt.get("explode", 5)) or int(rt.get("period_profit", 0)) >= int(rt.get("profit", 1000000)):
+            is_explode_pause = int(rt.get("explode_count", 0)) >= int(rt.get("explode", 5))
+            pause_rounds = int(rt.get("stop", 3) if is_explode_pause else rt.get("profit_stop", 5))
+            pause_reason = "炸号保护暂停" if is_explode_pause else "盈利达成暂停"
+            _apply_round_pause_slim(rt, pause_rounds, pause_reason)
+            await send_message_v2(
+                client,
+                "goal_pause",
+                f"原因：{pause_reason}\n本次暂停：{pause_rounds} 局",
+                user_ctx,
+                global_config,
+                title=f"博彩机器人 {user_ctx.config.name} {'炸号' if is_explode_pause else '盈利'}暂停",
+                desp=f"原因：{pause_reason}\n本次暂停：{pause_rounds} 局",
+            )
+            if not is_explode_pause:
+                rt["current_round"] = int(rt.get("current_round", 1)) + 1
+                rt["current_bet_seq"] = 1
+            rt["bet_sequence_count"] = 0
+            rt["explode_count"] = 0
+            rt["period_profit"] = 0
+            rt["lose_count"] = 0
+            rt["win_count"] = 0
+            rt["bet_amount"] = int(rt.get("initial_amount", 500))
+            _clear_lose_recovery_tracking(rt)
+            user_ctx.save_state()
+
+        if hasattr(user_ctx, 'dashboard_message') and user_ctx.dashboard_message:
+            await cleanup_message(client, user_ctx.dashboard_message)
+
+        current_total = int(rt.get("total", 0))
+        last_stats_total = int(rt.get("stats_last_report_total", 0))
+        if (
+            len(state.history) > 5
+            and current_total > 0
+            and current_total % AUTO_STATS_INTERVAL_ROUNDS == 0
+            and current_total != last_stats_total
+        ):
+            windows = [1000, 500, 200, 100]
+            stats = {"连大": [], "连小": [], "连输": []}
+            all_ns = set()
+
+            for window in windows:
+                history_window = state.history[-window:]
+                result_counts = count_consecutive(history_window)
+                bet_sequence_log = state.bet_sequence_log[-window:]
+                lose_streaks = count_lose_streaks(bet_sequence_log)
+                stats["连大"].append(result_counts["大"])
+                stats["连小"].append(result_counts["小"])
+                stats["连输"].append(lose_streaks)
+                all_ns.update(result_counts["大"].keys())
+                all_ns.update(result_counts["小"].keys())
+                all_ns.update(lose_streaks.keys())
+
+            mes_lines = ["```", "最近局数“连大、连小、连输”统计", ""]
+            for category in ["连大", "连小", "连输"]:
+                mes_lines.append(category)
+                mes_lines.append("================================")
+                mes_lines.append("类别 | 1000|  500  |200 | 100|")
+                mes_lines.append("--------------------------------")
+                for n in sorted(all_ns, reverse=True):
+                    if any(n in stats[category][i] for i in range(len(windows))):
+                        row = f" {str(n).center(2)}  |"
+                        for i in range(len(windows)):
+                            count = stats[category][i].get(n, 0)
+                            value = str(count) if count > 0 else "-"
+                            row += f" {value.center(3)} |"
+                        mes_lines.append(row)
+                mes_lines.append("")
+            mes_lines.append("```")
+            mes = "\n".join(mes_lines)
+            stats_message = await send_to_admin(client, mes, user_ctx, global_config)
+            user_ctx.stats_message = stats_message
+            rt["stats_last_report_total"] = current_total
+            if stats_message:
+                asyncio.create_task(delete_later(client, stats_message.chat_id, stats_message.id, AUTO_STATS_DELETE_DELAY_SECONDS))
+
+        if lose_end_payload:
+            date_str = datetime.now().strftime("%m月%d日")
+            start_round = lose_end_payload.get("start_round", "?")
+            start_seq = lose_end_payload.get("start_seq", "?")
+            end_round = lose_end_payload.get("end_round", "?")
+            end_seq = lose_end_payload.get("end_seq", "?")
+            lose_count = int(lose_end_payload.get("lose_count", 0))
+            if str(start_round) == str(end_round):
+                range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_seq} 次"
+            else:
+                range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_round} 轮第 {end_seq} 次"
+            rec_msg = (
+                f"✅ {lose_count} 连输已终止！ ✅\n\n"
+                f"🔢 时间：{range_text}\n"
+                f"📋 预设名称：{rt.get('current_preset_name', 'none')}\n"
+                f"😀 连续押注：{lose_end_payload.get('continuous_count', lose_count)} 次\n"
+                f"⚠️本局连输： {lose_count} 次\n"
+                f"💰 本局盈利： {format_number(lose_end_payload.get('total_profit', 0))}\n"
+                f"💰 账户余额：{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万\n"
+                f"💰 菠菜资金剩余：{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"
+            )
+            if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
+                await cleanup_message(client, user_ctx.lose_streak_message)
+                user_ctx.lose_streak_message = None
+            await send_message_v2(client, "lose_end", rec_msg, user_ctx, global_config)
+    except Exception as e:
+        log_event(logging.ERROR, 'settle', '结算失败', user_id=user_ctx.user_id, data=str(e))
+        await send_to_admin(client, f"结算出错: {e}", user_ctx, global_config)
+
+
 async def process_settle(client, event, user_ctx: UserContext, global_config: dict):
+    return await _process_settle_slim(client, event, user_ctx, global_config)
     """处理押注结算 - 与master版本zq_settle完全一致，包括连输告警、回补播报、资金安全等"""
     state = user_ctx.state
     rt = state.runtime
