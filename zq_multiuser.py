@@ -1993,6 +1993,14 @@ def _apply_round_pause_slim(rt: dict, pause_rounds: int, reason: str) -> int:
     return rounds
 
 
+async def _refresh_dashboard_message_slim(client, user_ctx: UserContext, global_config: dict):
+    dashboard = format_dashboard(user_ctx)
+    if hasattr(user_ctx, "dashboard_message") and user_ctx.dashboard_message:
+        await cleanup_message(client, user_ctx.dashboard_message)
+    user_ctx.dashboard_message = await send_to_admin(client, dashboard, user_ctx, global_config)
+    return user_ctx.dashboard_message
+
+
 async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_config: dict):
     state = user_ctx.state
     rt = state.runtime
@@ -2205,6 +2213,8 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
     if message:
         asyncio.create_task(delete_later(client, message.chat_id, message.id, 100))
+
+    await _refresh_dashboard_message_slim(client, user_ctx, global_config)
 
     rt["current_bet_seq"] = int(rt.get("current_bet_seq", 1)) + 1
     user_ctx.save_state()
@@ -4787,6 +4797,12 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 title=f"博彩机器人 {user_ctx.config.name} {'炸号' if is_explode_pause else '盈利'}暂停",
                 desp=f"原因：{pause_reason}\n本次暂停：{pause_rounds} 局",
             )
+            await send_to_admin(
+                client,
+                f"⏸️ 暂停倒计时提醒\n原因：{pause_reason}\n倒计时：{pause_rounds} 局",
+                user_ctx,
+                global_config,
+            )
             if not is_explode_pause:
                 rt["current_round"] = int(rt.get("current_round", 1)) + 1
                 rt["current_bet_seq"] = 1
@@ -4801,6 +4817,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
 
         if hasattr(user_ctx, 'dashboard_message') and user_ctx.dashboard_message:
             await cleanup_message(client, user_ctx.dashboard_message)
+        await _refresh_dashboard_message_slim(client, user_ctx, global_config)
 
         current_total = int(rt.get("total", 0))
         last_stats_total = int(rt.get("stats_last_report_total", 0))
