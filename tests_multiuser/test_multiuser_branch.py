@@ -3031,6 +3031,80 @@ def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, mon
     assert '"model_id": "model-2"' in rt["last_logic_audit"]
 
 
+def test_res_bet_resets_current_chain_reconciliation(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "res_bet_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "重置押注用户"},
+            "telegram": {"user_id": 70131},
+            "groups": {"admin_chat": 70131},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_sequence_count"] = 4
+    rt["lose_count"] = 4
+    rt["bet_amount"] = 146_500
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260320_1_1", "amount": 10_000, "result": "输", "profit": -10_000},
+        {"bet_id": "20260320_1_2", "amount": 28_500, "result": "输", "profit": -28_500},
+        {"bet_id": "20260320_1_3", "amount": 66_000, "result": "输", "profit": -66_000},
+        {"bet_id": "20260320_1_4", "amount": 146_500, "result": "输", "profit": -146_500},
+    ]
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        return SimpleNamespace(chat_id=70131, id=1)
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    cmd_event = SimpleNamespace(raw_text="res bet", chat_id=70131, id=1)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), cmd_event, ctx, {}))
+
+    summary = zm.reconcile_bet_runtime_from_log(ctx)
+
+    assert rt["bet_sequence_count"] == 0
+    assert rt["lose_count"] == 0
+    assert rt["bet_amount"] == rt["initial_amount"]
+    assert rt["bet_reset_log_index"] == 4
+    assert summary["continuous_count"] == 0
+    assert summary["lose_count"] == 0
+
+
+def test_res_bet_allows_new_chain_after_reset(tmp_path):
+    user_dir = tmp_path / "users" / "res_bet_new_chain_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "重置后新链用户"},
+            "telegram": {"user_id": 70132},
+            "groups": {"admin_chat": 70132},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_reset_log_index"] = 2
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260320_1_1", "amount": 10_000, "result": "输", "profit": -10_000},
+        {"bet_id": "20260320_1_2", "amount": 28_500, "result": "输", "profit": -28_500},
+        {"bet_id": "20260320_1_3", "amount": 10_000, "result": "输", "profit": -10_000},
+    ]
+
+    summary = zm.reconcile_bet_runtime_from_log(ctx)
+
+    assert summary["continuous_count"] == 1
+    assert summary["lose_count"] == 1
+    assert rt["bet_sequence_count"] == 1
+    assert rt["lose_count"] == 1
+
+
 def test_extract_pattern_features_treats_4_streak_as_long_dragon():
     result = zm.extract_pattern_features([0, 1, 1, 1, 1])
 

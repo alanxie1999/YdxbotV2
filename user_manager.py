@@ -323,6 +323,7 @@ def get_default_runtime() -> Dict[str, Any]:
         "initial_amount": 500,
         "bet_amount": 0,
         "bet_sequence_count": 0,
+        "bet_reset_log_index": 0,
         "lose_stop": 20,
         "warning_lose_count": 3,
         "lose_notify_pending": False,

@@ -385,9 +385,24 @@ def heal_stale_pending_bets(user_ctx: UserContext) -> Dict[str, Any]:
     return {"count": healed_count, "items": healed_items}
 
 
+def _get_strategy_bet_sequence_log(state: UserState) -> List[Dict[str, Any]]:
+    """Return the bet log slice that belongs to the current betting strategy chain."""
+    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    rt = state.runtime if isinstance(getattr(state, "runtime", None), dict) else {}
+    try:
+        reset_index = int(rt.get("bet_reset_log_index", 0) or 0)
+    except (TypeError, ValueError):
+        reset_index = 0
+    if reset_index <= 0:
+        return logs
+    if reset_index >= len(logs):
+        return []
+    return logs[reset_index:]
+
+
 def _get_latest_open_bet_entry(state: UserState) -> Optional[Dict[str, Any]]:
     """返回最新一条未结算押注，供重复下注保护和结算对位使用。"""
-    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    logs = _get_strategy_bet_sequence_log(state)
     for item in reversed(logs):
         if isinstance(item, dict) and item.get("result") is None:
             return item
@@ -400,7 +415,7 @@ def _collect_effective_bet_chain(state: UserState, include_open: bool = False) -
     - 忽略“异常未结算”等脏记录
     - 可选把最后一条未结算押注也算进当前链路
     """
-    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    logs = _get_strategy_bet_sequence_log(state)
     effective_logs: List[Dict[str, Any]] = []
     open_included = False
 
@@ -483,7 +498,7 @@ def _summarize_recent_resolved_chain(state: UserState) -> Dict[str, Any]:
     返回“以最近一次真实结算为结尾”的链路。
     例如：输输输赢 -> 返回 4 手；输输输 -> 返回 3 手。
     """
-    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    logs = _get_strategy_bet_sequence_log(state)
     effective_logs: List[Dict[str, Any]] = []
     for item in logs:
         if not isinstance(item, dict):
@@ -3466,7 +3481,7 @@ def _get_recent_settled_outcomes(state, window: int = RISK_WINDOW_BETS) -> list:
     if window <= 0:
         return []
     outcomes = []
-    for entry in reversed(state.bet_sequence_log):
+    for entry in reversed(_get_strategy_bet_sequence_log(state)):
         result = entry.get("result")
         if result == "赢":
             outcomes.append(1)
@@ -3481,7 +3496,7 @@ def _get_recent_settled_outcomes(state, window: int = RISK_WINDOW_BETS) -> list:
 def _count_settled_bets(state) -> int:
     """统计已结算押注笔数（赢/输）。"""
     count = 0
-    for entry in state.bet_sequence_log:
+    for entry in _get_strategy_bet_sequence_log(state):
         result = entry.get("result")
         if result in ("赢", "输"):
             count += 1
@@ -5711,6 +5726,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     rt["win_count"] = 0
                     rt["lose_count"] = 0
                     rt["bet_sequence_count"] = 0
+                    rt["bet_reset_log_index"] = len(state.bet_sequence_log)
                     rt["explode_count"] = 0
                     rt["bet_amount"] = int(rt.get("initial_amount", 500))
                     rt["bet"] = False
