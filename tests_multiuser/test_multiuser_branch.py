@@ -3083,6 +3083,73 @@ def test_analyze_double_streak_followups_produces_directional_preference():
     assert result["current_continue_rate"] > result["current_reverse_rate"]
 
 
+def test_analyze_rhythm_context_prefers_alternation_for_pure_single_jump():
+    history = [0, 1] * 6
+
+    result = zm.analyze_rhythm_context(history)
+
+    assert result["rhythm_tag"] == "ALTERNATION_RHYTHM"
+    assert result["alternation_score"] > result["pair_score"]
+    assert result["alternation_next"] == 0
+
+
+def test_analyze_rhythm_context_prefers_pair_for_pair_formation_sequence():
+    history = [1, 0, 1, 1, 0, 1, 1, 0, 1]
+
+    result = zm.analyze_rhythm_context(history)
+
+    assert result["rhythm_tag"] == "PAIR_FORMATION"
+    assert result["pair_score"] > result["alternation_score"]
+    assert result["pair_next"] == 1
+    assert result["pair_would_form_double"] is True
+
+
+def test_predict_next_bet_v10_prompt_contains_rhythm_layer(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "rhythm_model_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "节奏提示词用户"},
+            "telegram": {"user_id": 70141},
+            "groups": {"admin_chat": 70141},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {
+                "enabled": True,
+                "api_keys": ["k1"],
+                "models": {"1": {"model_id": "model-1", "enabled": True}},
+                "fallback_chain": ["1"],
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.state.history = [1, 0, 1, 1, 0, 1, 1, 0, 1]
+    ctx.state.runtime["current_model_id"] = "model-1"
+    captured = {}
+
+    class FakeModelManager:
+        async def call_model(self, model_id, messages, **kwargs):
+            captured["prompt"] = messages[1]["content"]
+            return {
+                "success": True,
+                "error": "",
+                "content": '{"prediction": 1, "confidence": 83, "reason": "pair rhythm"}',
+                "model_id": "model-1",
+                "requested_model_id": "model-1",
+                "fallback_used": False,
+            }
+
+    monkeypatch.setattr(ctx, "get_model_manager", lambda: FakeModelManager())
+
+    prediction = asyncio.run(zm.predict_next_bet_v10(ctx, {}))
+
+    assert prediction == 1
+    assert "rhythm_tag" in captured["prompt"]
+    assert "alternation_score" in captured["prompt"]
+    assert "pair_score" in captured["prompt"]
+    assert "pair_would_form_double" in captured["prompt"]
+    assert "PAIR_FORMATION" in captured["prompt"]
+
+
 def test_high_pressure_pattern_gate_blocks_unstable_tag_when_deep_risk_enabled():
     rt = {
         "last_predict_source": "model",

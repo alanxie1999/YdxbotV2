@@ -1435,6 +1435,133 @@ def analyze_double_streak_followups(history, lookback_events: int = 200):
     }
 
 
+def _best_repeating_pattern_match(seq_str: str, patterns: List[str]) -> Dict[str, Any]:
+    """在候选重复节奏里找出最匹配的模板，并推导下一手期望值。"""
+    if not seq_str:
+        return {"pattern": "", "score": 0.0, "next_char": None}
+
+    best_pattern = ""
+    best_score = -1.0
+    best_next_char = None
+    for pattern in patterns:
+        expanded = (pattern * ((len(seq_str) // len(pattern)) + 2))[:len(seq_str)]
+        score = sum(1 for current, expected in zip(seq_str, expanded) if current == expected) / len(seq_str)
+        if score > best_score:
+            best_score = score
+            best_pattern = pattern
+            best_next_char = pattern[len(seq_str) % len(pattern)]
+
+    return {
+        "pattern": best_pattern,
+        "score": round(best_score, 3),
+        "next_char": int(best_next_char) if best_next_char is not None else None,
+    }
+
+
+def analyze_rhythm_context(history, recent_window: int = 9, lookback_events: int = 200):
+    """
+    识别当前更像交替节奏、配对节奏、长龙还是混沌，并结合历史窗口统计命中率。
+    配对节奏不是简单看 2 连，而是看最近序列更像 101/110/001/010 这类“补成二连”的重复节奏。
+    """
+    if not history or len(history) < 4:
+        return {
+            "recent_seq": "",
+            "rhythm_tag": "CHAOS_NOISE",
+            "alternation_score": 0.0,
+            "alternation_pattern": "",
+            "alternation_next": None,
+            "alternation_hit_rate": 0.0,
+            "alternation_samples": 0,
+            "pair_score": 0.0,
+            "pair_pattern": "",
+            "pair_next": None,
+            "pair_hit_rate": 0.0,
+            "pair_samples": 0,
+            "dragon_score": 0.0,
+            "chaos_score": 1.0,
+            "pair_would_form_double": False,
+            "pair_would_chase_triple": False,
+        }
+
+    recent_len = min(max(4, int(recent_window)), len(history))
+    recent_seq = "".join("1" if x == 1 else "0" for x in history[-recent_len:])
+
+    alternation_patterns = ["01", "10"]
+    pair_patterns = ["001", "010", "100", "110", "101", "011"]
+    alternation_match = _best_repeating_pattern_match(recent_seq, alternation_patterns)
+    pair_match = _best_repeating_pattern_match(recent_seq, pair_patterns)
+
+    tail_streak_len = 1
+    tail_value = history[-1]
+    for value in reversed(history[:-1]):
+        if value == tail_value:
+            tail_streak_len += 1
+        else:
+            break
+
+    dragon_score = round(min(tail_streak_len / 4.0, 1.0), 3) if tail_streak_len >= 2 else 0.0
+    pair_would_form_double = tail_streak_len == 1 and pair_match["next_char"] == tail_value
+    pair_would_chase_triple = tail_streak_len >= 2 and pair_match["next_char"] == tail_value
+
+    alternation_samples = 0
+    alternation_hits = 0
+    pair_samples = 0
+    pair_hits = 0
+    start_idx = max(recent_len, len(history) - max(int(lookback_events), recent_len))
+    for idx in range(start_idx, len(history)):
+        prior = history[idx - recent_len:idx]
+        if len(prior) < recent_len:
+            continue
+        prior_seq = "".join("1" if x == 1 else "0" for x in prior)
+        actual_next = int(history[idx])
+        prior_alt = _best_repeating_pattern_match(prior_seq, alternation_patterns)
+        prior_pair = _best_repeating_pattern_match(prior_seq, pair_patterns)
+
+        if prior_alt["score"] >= 0.75:
+            alternation_samples += 1
+            if prior_alt["next_char"] == actual_next:
+                alternation_hits += 1
+        if prior_pair["score"] >= 0.67:
+            pair_samples += 1
+            if prior_pair["next_char"] == actual_next:
+                pair_hits += 1
+
+    alternation_hit_rate = round(alternation_hits / alternation_samples, 3) if alternation_samples else 0.0
+    pair_hit_rate = round(pair_hits / pair_samples, 3) if pair_samples else 0.0
+
+    alternation_edge = alternation_match["score"] * max(alternation_hit_rate, 0.45)
+    pair_edge = pair_match["score"] * max(pair_hit_rate, 0.45)
+    if dragon_score >= 1.0 and dragon_score > alternation_match["score"] + 0.08 and dragon_score > pair_match["score"] + 0.08:
+        rhythm_tag = "DRAGON_TREND"
+    elif alternation_match["score"] >= 0.78 and alternation_edge > pair_edge + 0.06:
+        rhythm_tag = "ALTERNATION_RHYTHM"
+    elif pair_match["score"] >= 0.67 and pair_edge > alternation_edge + 0.04:
+        rhythm_tag = "PAIR_FORMATION"
+    else:
+        rhythm_tag = "CHAOS_NOISE"
+
+    chaos_score = round(max(0.0, 1.0 - max(alternation_match["score"], pair_match["score"], dragon_score)), 3)
+
+    return {
+        "recent_seq": recent_seq,
+        "rhythm_tag": rhythm_tag,
+        "alternation_score": alternation_match["score"],
+        "alternation_pattern": alternation_match["pattern"],
+        "alternation_next": alternation_match["next_char"],
+        "alternation_hit_rate": alternation_hit_rate,
+        "alternation_samples": alternation_samples,
+        "pair_score": pair_match["score"],
+        "pair_pattern": pair_match["pattern"],
+        "pair_next": pair_match["next_char"],
+        "pair_hit_rate": pair_hit_rate,
+        "pair_samples": pair_samples,
+        "dragon_score": dragon_score,
+        "chaos_score": chaos_score,
+        "pair_would_form_double": pair_would_form_double,
+        "pair_would_chase_triple": pair_would_chase_triple,
+    }
+
+
 def fallback_prediction(history):
     """
     天眼兜底机制：如果AI异常，强行维持50:50概率
@@ -1544,6 +1671,7 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         tail_streak_len = pattern_features['tail_streak_len']
         tail_streak_char = pattern_features['tail_streak_char']
         double_streak_stats = analyze_double_streak_followups(history)
+        rhythm_context = analyze_rhythm_context(history)
         
         # 1.6 模式标记
         lose_count = rt.get('lose_count', 0)
@@ -1578,6 +1706,24 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
                 "continue_rate": double_streak_stats["current_continue_rate"],
                 "reverse_rate": double_streak_stats["current_reverse_rate"],
                 "preference": double_streak_stats["current_preference"],
+            },
+            "rhythm_analysis": {
+                "tag": rhythm_context["rhythm_tag"],
+                "recent_seq": rhythm_context["recent_seq"],
+                "alternation_score": rhythm_context["alternation_score"],
+                "alternation_pattern": rhythm_context["alternation_pattern"],
+                "alternation_next": rhythm_context["alternation_next"],
+                "alternation_hit_rate": rhythm_context["alternation_hit_rate"],
+                "alternation_samples": rhythm_context["alternation_samples"],
+                "pair_score": rhythm_context["pair_score"],
+                "pair_pattern": rhythm_context["pair_pattern"],
+                "pair_next": rhythm_context["pair_next"],
+                "pair_hit_rate": rhythm_context["pair_hit_rate"],
+                "pair_samples": rhythm_context["pair_samples"],
+                "dragon_score": rhythm_context["dragon_score"],
+                "chaos_score": rhythm_context["chaos_score"],
+                "pair_would_form_double": rhythm_context["pair_would_form_double"],
+                "pair_would_chase_triple": rhythm_context["pair_would_chase_triple"],
             }
         }
         
@@ -1640,13 +1786,37 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
 
 ???prediction ??? -1?0?1 ???"""
         prompt = f"""[System Instruction]
-You are a quantitative trading analyst for a binary big/small game. Your first duty is to avoid low-quality bets. If evidence is weak or conflicting, output SKIP (-1).
+You are a quantitative trading analyst for a binary big/small game. First identify the dominant rhythm of the board, then decide whether it deserves a bet. If evidence is weak or conflicting, output SKIP (-1).
 
 [Pattern Priority]
 1. LONG_DRAGON: tail streak >= 4. This is now a mature dragon pattern.
 2. DRAGON_CANDIDATE: tail streak == 3.
-3. DOUBLE_STREAK: tail streak == 2. This is a mid-weight structure and must be evaluated using conditional follow-up stats.
-4. SINGLE_JUMP / SYMMETRIC_WRAP / CHAOS_SWITCH are weaker transition structures.
+3. DOUBLE_STREAK: tail streak == 2. This is useful, but it is not enough by itself.
+4. Rhythm layer: alternation rhythm vs pair formation rhythm.
+5. SINGLE_JUMP / SYMMETRIC_WRAP / CHAOS_SWITCH are weaker transition structures.
+
+[Rhythm Layer]
+- rhythm_tag: {rhythm_context['rhythm_tag']}
+- recent_seq: {rhythm_context['recent_seq']}
+- alternation_score: {rhythm_context['alternation_score']:.3f}
+- alternation_pattern: {rhythm_context['alternation_pattern']}
+- alternation_expected_next: {rhythm_context['alternation_next']}
+- alternation_hit_rate: {rhythm_context['alternation_hit_rate']:.3f} (samples={rhythm_context['alternation_samples']})
+- pair_score: {rhythm_context['pair_score']:.3f}
+- pair_pattern: {rhythm_context['pair_pattern']}
+- pair_expected_next: {rhythm_context['pair_next']}
+- pair_hit_rate: {rhythm_context['pair_hit_rate']:.3f} (samples={rhythm_context['pair_samples']})
+- pair_would_form_double: {str(rhythm_context['pair_would_form_double']).lower()}
+- pair_would_chase_triple: {str(rhythm_context['pair_would_chase_triple']).lower()}
+- dragon_score: {rhythm_context['dragon_score']:.3f}
+- chaos_score: {rhythm_context['chaos_score']:.3f}
+
+[Rhythm Rules]
+1. If alternation_score is clearly stronger than pair_score and the history hit rate also supports it, treat the board as ALTERNATION_RHYTHM. Follow alternation_expected_next instead of guessing that alternation will suddenly break.
+2. If pair_score is clearly stronger than alternation_score and the history hit rate supports it, treat the board as PAIR_FORMATION. Favor pair_expected_next only when it is trying to form the next double.
+3. If pair_would_chase_triple is true, reduce confidence sharply. Pair logic is mainly for forming the next 2-streak, not for aggressively chasing 3-streak.
+4. If recent_seq is a long pure alternation chain and no real double has appeared yet, be very cautious about betting against alternation. Pair bets need clearly better evidence.
+5. If alternation_score and pair_score are close, or rhythm_tag is CHAOS_NOISE, prefer SKIP.
 
 [Double Streak Rule]
 - side: {double_streak_stats['current_side']}
@@ -1657,9 +1827,9 @@ You are a quantitative trading analyst for a binary big/small game. Your first d
 - reverse_rate: {double_streak_stats['current_reverse_rate']:.3f}
 - preference: {double_streak_stats['current_preference']}
 Interpretation:
-- if preference=continue, increase the weight of continuation
-- if preference=reverse, increase the weight of reversal
-- if preference=neutral or sample_count < 8, DOUBLE_STREAK cannot be used as a decisive signal
+- DOUBLE_STREAK is a supporting clue, not the only clue.
+- If pair rhythm is strong and the next hand would form a fresh double, DOUBLE_STREAK can be weighted higher.
+- If DOUBLE_STREAK already exists and the next hand would directly chase a triple, lower its weight.
 
 [Hard Risk Rules]
 1. If martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} and confidence < {HIGH_PRESSURE_SKIP_MIN_CONF}, output SKIP.
@@ -1680,9 +1850,10 @@ martingale_step: {lose_count + 1}
 entropy_tag: {entropy_tag}
 
 [Output Policy]
-- Decide whether the setup deserves a bet before choosing direction.
-- DOUBLE_STREAK should receive more attention than before, but it is still not an auto-bet signal.
-- If DOUBLE_STREAK stats are neutral, weak, or conflicting with other evidence, output SKIP.
+- Decide the dominant board rhythm first: dragon / alternation / pair / chaos.
+- If alternation rhythm dominates, prefer the alternation continuation side.
+- If pair rhythm dominates, prefer the side that forms the next double.
+- If neither rhythm is clearly dominant, or if the dominant rhythm is unsupported by history hit rate, output SKIP.
 
 [Response Format]
 Return JSON only:
@@ -1758,7 +1929,7 @@ Return JSON only:
         
         # 构建预测信息
         rt["last_predict_info"] = (
-            f"M-SMP/{pattern_tag} | {reason} | 信:{confidence}% | "
+            f"M-SMP/{pattern_tag}/{rhythm_context['rhythm_tag']} | {reason} | 信:{confidence}% | "
             f"缺口:{gap:+d} | 回归:{trend_gap['regression_target']}"
         )
         rt["last_predict_tag"] = pattern_tag
