@@ -3031,6 +3031,27 @@ def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, mon
     assert '"model_id": "model-2"' in rt["last_logic_audit"]
 
 
+def test_extract_pattern_features_treats_4_streak_as_long_dragon():
+    result = zm.extract_pattern_features([0, 1, 1, 1, 1])
+
+    assert result["pattern_tag"] == "LONG_DRAGON"
+    assert result["tail_streak_len"] == 4
+
+
+def test_analyze_double_streak_followups_produces_directional_preference():
+    history = []
+    for _ in range(8):
+        history.extend([0, 1, 1, 1, 0])
+    history.extend([1, 1])
+
+    result = zm.analyze_double_streak_followups(history)
+
+    assert result["current_side"] == "big"
+    assert result["current_side_total"] >= 8
+    assert result["current_preference"] == "continue"
+    assert result["current_continue_rate"] > result["current_reverse_rate"]
+
+
 def test_high_pressure_pattern_gate_blocks_unstable_tag_when_deep_risk_enabled():
     rt = {
         "last_predict_source": "model",

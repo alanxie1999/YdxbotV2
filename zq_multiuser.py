@@ -260,7 +260,7 @@ HIGH_PRESSURE_SKIP_MIN_STEP = 5
 HIGH_PRESSURE_SKIP_MIN_CONF = 78
 UNSTABLE_PATTERN_MIN_CONF_STEP3 = 72
 UNSTABLE_PATTERN_MIN_CONF_STEP5 = 78
-DRAGON_CANDIDATE_MIN_TAIL_STEP5 = 5
+DRAGON_CANDIDATE_MIN_TAIL_STEP5 = 4
 NEUTRAL_LONG_TERM_GAP_LOW = 0.47
 NEUTRAL_LONG_TERM_GAP_HIGH = 0.53
 HIGH_PRESSURE_PATTERN_PAUSE_ROUNDS = 2
@@ -1337,10 +1337,12 @@ def extract_pattern_features(history):
         if recent_5 == recent_5[::-1]:
             is_symmetric = True
     
-    if tail_streak_len >= 5:
+    if tail_streak_len >= 4:
         pattern_tag = 'LONG_DRAGON'
     elif tail_streak_len >= 3:
         pattern_tag = 'DRAGON_CANDIDATE'
+    elif tail_streak_len == 2:
+        pattern_tag = 'DOUBLE_STREAK'
     elif is_alternating:
         pattern_tag = 'SINGLE_JUMP'
     elif is_symmetric:
@@ -1354,6 +1356,67 @@ def extract_pattern_features(history):
         'tail_streak_char': int(tail_char),
         'is_alternating': is_alternating,
         'is_symmetric': is_symmetric
+    }
+
+
+def analyze_double_streak_followups(history, lookback_events: int = 200):
+    """
+    统计“刚形成2连之后，下一手是继续还是反转”的条件概率。
+    只在 streak 首次达到 2 的那个时点计一次，避免把长连拆成多次重复样本。
+    """
+    if not history or len(history) < 3:
+        return {
+            "current_side": "",
+            "current_side_total": 0,
+            "current_continue": 0,
+            "current_reverse": 0,
+            "current_continue_rate": 0.0,
+            "current_reverse_rate": 0.0,
+            "current_preference": "neutral",
+        }
+
+    events = []
+    streak_len = 1
+    for i in range(1, len(history) - 1):
+        if history[i] == history[i - 1]:
+            streak_len += 1
+        else:
+            streak_len = 1
+        if streak_len == 2:
+            side = int(history[i])
+            next_value = int(history[i + 1])
+            events.append({
+                "side": side,
+                "continue": next_value == side,
+            })
+
+    if lookback_events > 0:
+        events = events[-lookback_events:]
+
+    tail_side = int(history[-1])
+    current_side_text = "big" if tail_side == 1 else "small"
+    side_events = [event for event in events if event["side"] == tail_side]
+    total = len(side_events)
+    continue_count = sum(1 for event in side_events if event["continue"])
+    reverse_count = total - continue_count
+    continue_rate = round((continue_count / total), 3) if total > 0 else 0.0
+    reverse_rate = round((reverse_count / total), 3) if total > 0 else 0.0
+
+    preference = "neutral"
+    if total >= 8:
+        if continue_rate - reverse_rate >= 0.08:
+            preference = "continue"
+        elif reverse_rate - continue_rate >= 0.08:
+            preference = "reverse"
+
+    return {
+        "current_side": current_side_text,
+        "current_side_total": total,
+        "current_continue": continue_count,
+        "current_reverse": reverse_count,
+        "current_continue_rate": continue_rate,
+        "current_reverse_rate": reverse_rate,
+        "current_preference": preference,
     }
 
 
@@ -1465,6 +1528,7 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         pattern_tag = pattern_features['pattern_tag']
         tail_streak_len = pattern_features['tail_streak_len']
         tail_streak_char = pattern_features['tail_streak_char']
+        double_streak_stats = analyze_double_streak_followups(history)
         
         # 1.6 模式标记
         lose_count = rt.get('lose_count', 0)
@@ -1490,6 +1554,15 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
                 "tail_streak_len": tail_streak_len,
                 "tail_streak_char": tail_streak_char,
                 "gap": f"{gap:+d}"
+            },
+            "double_streak_analysis": {
+                "current_side": double_streak_stats["current_side"],
+                "sample_count": double_streak_stats["current_side_total"],
+                "continue_count": double_streak_stats["current_continue"],
+                "reverse_count": double_streak_stats["current_reverse"],
+                "continue_rate": double_streak_stats["current_continue_rate"],
+                "reverse_rate": double_streak_stats["current_reverse_rate"],
+                "preference": double_streak_stats["current_preference"],
             }
         }
         
@@ -1551,6 +1624,55 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
 {{"logic": "50????", "reasoning": "??????????", "confidence": 1-100, "prediction": -1?0?1}}
 
 ???prediction ??? -1?0?1 ???"""
+        prompt = f"""[System Instruction]
+You are a quantitative trading analyst for a binary big/small game. Your first duty is to avoid low-quality bets. If evidence is weak or conflicting, output SKIP (-1).
+
+[Pattern Priority]
+1. LONG_DRAGON: tail streak >= 4. This is now a mature dragon pattern.
+2. DRAGON_CANDIDATE: tail streak == 3.
+3. DOUBLE_STREAK: tail streak == 2. This is a mid-weight structure and must be evaluated using conditional follow-up stats.
+4. SINGLE_JUMP / SYMMETRIC_WRAP / CHAOS_SWITCH are weaker transition structures.
+
+[Double Streak Rule]
+- side: {double_streak_stats['current_side']}
+- sample_count: {double_streak_stats['current_side_total']}
+- continue_count: {double_streak_stats['current_continue']}
+- reverse_count: {double_streak_stats['current_reverse']}
+- continue_rate: {double_streak_stats['current_continue_rate']:.3f}
+- reverse_rate: {double_streak_stats['current_reverse_rate']:.3f}
+- preference: {double_streak_stats['current_preference']}
+Interpretation:
+- if preference=continue, increase the weight of continuation
+- if preference=reverse, increase the weight of reversal
+- if preference=neutral or sample_count < 8, DOUBLE_STREAK cannot be used as a decisive signal
+
+[Hard Risk Rules]
+1. If martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} and confidence < {HIGH_PRESSURE_SKIP_MIN_CONF}, output SKIP.
+2. If pattern tag is CHAOS_SWITCH / SINGLE_JUMP / SYMMETRIC_WRAP and martingale_step >= 3, default to SKIP.
+3. DRAGON_CANDIDATE is not enough by itself in high-pressure hands.
+4. If long_term_gap is near neutral [{NEUTRAL_LONG_TERM_GAP_LOW:.2f}, {NEUTRAL_LONG_TERM_GAP_HIGH:.2f}], do not use long-term distribution as a strong betting reason.
+5. If trend evidence and reversal evidence conflict, output SKIP.
+
+[Data Evidence]
+short_term_20: {short_str}
+medium_term_50: {medium_str}
+long_term_big_ratio: {long_term_gap:.2f}
+pattern_tag: {pattern_tag}
+tail_streak_len: {tail_streak_len}
+tail_side: {'big' if tail_streak_char == 1 else 'small'}
+gap: {gap:+d}
+martingale_step: {lose_count + 1}
+entropy_tag: {entropy_tag}
+
+[Output Policy]
+- Decide whether the setup deserves a bet before choosing direction.
+- DOUBLE_STREAK should receive more attention than before, but it is still not an auto-bet signal.
+- If DOUBLE_STREAK stats are neutral, weak, or conflicting with other evidence, output SKIP.
+
+[Response Format]
+Return JSON only:
+{{"logic": "short summary", "reasoning": "why bet or skip", "confidence": 1-100, "prediction": -1 or 0 or 1}}"""
+
         messages = [
             {'role': 'system', 'content': '你是专门破解博弈陷阱的量化交易员，只输出纯JSON。prediction 仅允许 -1/0/1。'},
             {'role': 'user', 'content': prompt}
