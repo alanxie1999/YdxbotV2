@@ -9,13 +9,9 @@ import logging
 import asyncio
 import json
 import os
-import random
 import re
 import requests
 import aiohttp
-import time
-import math
-from collections import Counter
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
 from user_manager import UserContext, UserState

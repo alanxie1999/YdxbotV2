@@ -8,7 +8,6 @@ main_multiuser.py - 多用户版本主程序
 import logging
 import asyncio
 import os
-import time
 import sys
 import errno
 try:
