@@ -1516,49 +1516,6 @@ def test_pause_command_sets_manual_pause_and_blocks_bet_on(tmp_path, monkeypatch
     asyncio.run(zm.process_bet_on(SimpleNamespace(), DummyEvent(), ctx, {}))
 
 
-def test_risk_command_can_toggle_base_and_deep_switches(tmp_path, monkeypatch):
-    user_dir = tmp_path / "users" / "5030"
-    _write_json(
-        user_dir / "config.json",
-        {
-            "account": {"name": "风控开关用户"},
-            "telegram": {"user_id": 5030},
-            "groups": {"admin_chat": 5030},
-            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
-        },
-    )
-    ctx = UserContext(str(user_dir))
-    rt = ctx.state.runtime
-    sent_messages = []
-
-    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
-        sent_messages.append(message)
-        return SimpleNamespace(chat_id=5030, id=len(sent_messages))
-
-    def fake_create_task(coro):
-        coro.close()
-        return None
-
-    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
-    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
-
-    asyncio.run(zm.process_user_command(SimpleNamespace(), SimpleNamespace(raw_text="risk deep off", chat_id=5030, id=1), ctx, {}))
-    assert rt["risk_deep_enabled"] is False
-    assert rt["risk_deep_default_enabled"] is False
-    assert rt["risk_base_enabled"] is True
-
-    asyncio.run(zm.process_user_command(SimpleNamespace(), SimpleNamespace(raw_text="risk base off", chat_id=5030, id=2), ctx, {}))
-    assert rt["risk_base_enabled"] is False
-    assert rt["risk_base_default_enabled"] is False
-
-    asyncio.run(zm.process_user_command(SimpleNamespace(), SimpleNamespace(raw_text="risk all on", chat_id=5030, id=3), ctx, {}))
-    assert rt["risk_base_enabled"] is True
-    assert rt["risk_deep_enabled"] is True
-    assert rt["risk_base_default_enabled"] is True
-    assert rt["risk_deep_default_enabled"] is True
-    assert any("当前风控开关" in msg for msg in sent_messages)
-
-
 def test_apply_account_risk_default_mode_resets_current_switches():
     rt = {
         "risk_base_enabled": True,

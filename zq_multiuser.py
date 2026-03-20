@@ -1786,16 +1786,6 @@ Return JSON only:
         }
         rt["last_logic_audit"] = json.dumps(audit_log, ensure_ascii=False, indent=2)
         
-        # 写入用户目录下的decisions.log
-        user_dir = user_ctx.user_dir
-        decisions_log_path = os.path.join(user_dir, "decisions.log")
-        try:
-            with open(decisions_log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(audit_log, ensure_ascii=False) + "\n")
-        except Exception as e:
-            log_event(logging.WARNING, 'predict_v10', '写入decisions.log失败', 
-                      user_id=user_ctx.user_id, data=str(e))
-        
         # 记录预测
         state.predictions.append(prediction)
         
@@ -5101,13 +5091,6 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
 - `resume` : 恢复当前账号押注
 - `open/off` : 兼容旧命令（分别等同 `resume/pause`）
 
-**风控说明（重点）**
-- `risk` : 查看当前风控状态与账号默认模式
-- `risk base on|off` : 切换基础风控（并写入当前账号默认）
-- `risk deep on|off` : 切换深度风控（并写入当前账号默认）
-- `risk all on|off` : 同步切换基础/深度风控（并写入当前账号默认）
-- 说明：风控会直接影响暂停与入场门槛，进而影响押注收益；脚本重启后按账号默认模式自动生效
-
 **参数设置**
 - `gf [金额]` : 设置本金 (例: `gf 1000000`)
 - `set [炸] [赢] [停] [盈停]` : 设置风控参数
@@ -5128,7 +5111,6 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
 - `res tj` : 重置统计数据
 - `res state` : 清空历史与状态
 - `res bet` : 重置押注策略
-- `explain` : 查看AI决策解释
 - `stats` : 查看连大、连小、连输统计
 - `balance` : 查询账户余额
 - `xx` : 清理配置群中“我发送的消息”
@@ -5252,73 +5234,6 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             return
 
         # risk - 基础/深度风控开关
-        if cmd == "risk":
-            _normalize_risk_switches(rt, apply_default=False)
-
-            if len(my) == 1:
-                message = await send_to_admin(client, _build_risk_state_text(rt), user_ctx, global_config)
-                asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-                if message:
-                    asyncio.create_task(delete_later(client, message.chat_id, message.id, 60))
-                return
-
-            if len(my) != 3:
-                await send_to_admin(
-                    client,
-                    "❌ 参数格式错误\n用法：`risk base on|off` / `risk deep on|off` / `risk all on|off`",
-                    user_ctx,
-                    global_config,
-                )
-                return
-
-            target = str(my[1]).strip().lower()
-            action = str(my[2]).strip().lower()
-            if target not in {"base", "deep", "all"} or action not in {"on", "off"}:
-                await send_to_admin(
-                    client,
-                    "❌ 参数无效\n用法：`risk base on|off` / `risk deep on|off` / `risk all on|off`",
-                    user_ctx,
-                    global_config,
-                )
-                return
-
-            enabled = action == "on"
-            if target in {"base", "all"}:
-                rt["risk_base_enabled"] = enabled
-                rt["risk_base_default_enabled"] = enabled
-                if not enabled:
-                    # 关闭基础风控时顺便清理其周期计数，避免再次开启时吃到旧状态。
-                    rt["risk_pause_cycle_active"] = False
-                    rt["risk_pause_acc_rounds"] = 0
-                    rt["risk_pause_recovery_passes"] = 0
-                    rt["risk_base_hit_streak"] = 0
-                    rt["risk_pause_snapshot_count"] = -1
-                    rt["risk_pause_priority_notified"] = False
-            if target in {"deep", "all"}:
-                rt["risk_deep_enabled"] = enabled
-                rt["risk_deep_default_enabled"] = enabled
-                if not enabled:
-                    rt["risk_deep_triggered_milestones"] = []
-
-            _normalize_risk_switches(rt, apply_default=False)
-            user_ctx.save_state()
-            scope_text = {"base": "基础风控", "deep": "深度风控", "all": "基础+深度风控"}[target]
-            status_text = "开启" if enabled else "关闭"
-            mes = f"✅ 已{status_text}{scope_text}（已写入账号默认模式）\n\n{_build_risk_state_text(rt)}"
-            message = await send_to_admin(client, mes, user_ctx, global_config)
-            asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-            if message:
-                asyncio.create_task(delete_later(client, message.chat_id, message.id, 60))
-            log_event(
-                logging.INFO,
-                'user_cmd',
-                '切换风控开关',
-                user_id=user_ctx.user_id,
-                target=target,
-                enabled=enabled,
-            )
-            return
-        
         # st - 启动预设 - 与master一致
         if cmd == "st" and len(my) > 1:
             preset_name = my[1]
@@ -5761,17 +5676,6 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             return
         
         # explain - 查看AI决策解释 - 与master一致
-        if cmd == "explain":
-            last_logic_audit = rt.get("last_logic_audit", "")
-            if last_logic_audit:
-                log_event(logging.INFO, 'user_cmd', '查看决策解释', user_id=user_ctx.user_id)
-                mes = f"🧠 **AI 深度思考归档：**\n```json\n{last_logic_audit}\n```"
-                await send_to_admin(client, mes, user_ctx, global_config)
-            else:
-                await send_to_admin(client, "⚠️ 暂无 AI 决策记录 (需等待 V10 运行至少一次)", user_ctx, global_config)
-            asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-            return
-        
         # balance - 查询余额 - 与master一致
         if cmd == "balance":
             try:

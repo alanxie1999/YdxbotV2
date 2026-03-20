@@ -718,21 +718,8 @@ async def start_user(user_ctx: UserContext, global_config: dict):
             gambling_fund=gambling_fund,
         )
 
-        # 启动恢复：按账号默认风控模式生效，并清理历史遗留挂单。
-        from zq_multiuser import (
-            apply_account_risk_default_mode,
-            build_startup_focus_reminder,
-            heal_stale_pending_bets,
-        )
-        risk_mode = apply_account_risk_default_mode(user_ctx.state.runtime)
-        log_event(
-            logging.INFO,
-            'start',
-            '应用账号默认风控模式',
-            user_id=user_ctx.user_id,
-            base=risk_mode.get("base_enabled"),
-            deep=risk_mode.get("deep_enabled"),
-        )
+        # 启动恢复时只保留挂单自愈。
+        from zq_multiuser import heal_stale_pending_bets
         heal_result = heal_stale_pending_bets(user_ctx)
 
         user_ctx.save_state()
