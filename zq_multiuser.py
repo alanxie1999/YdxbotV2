@@ -675,8 +675,10 @@ def format_dashboard(user_ctx: UserContext) -> str:
     state = user_ctx.state
     rt = state.runtime
     
+    mes = _build_dashboard_summary(user_ctx)
+
     reversed_data = ["✅" if x == 1 else "❌" for x in state.history[-40:][::-1]]
-    mes = f"""📊 **近期 40 次结果**（由近及远）
+    mes += f"""📊 **近期 40 次结果**（由近及远）
 ✅：大（1）  ❌：小（0）
 {os.linesep.join(
         " ".join(map(str, reversed_data[i:i + 10])) 
@@ -765,6 +767,34 @@ def get_bet_status_text(rt: Dict[str, Any]) -> str:
     if rt.get("bet_on", False):
         return "运行中"
     return "已暂停"
+
+
+def _build_dashboard_summary(user_ctx: UserContext) -> str:
+    rt = user_ctx.state.runtime
+    status_text = get_bet_status_text(rt)
+    preset_name = str(rt.get("current_preset_name", "") or "").strip() or "未设置"
+    next_amount = int(calculate_bet_amount(rt) or 0)
+    balance_status = rt.get("balance_status", "unknown")
+    account_balance = int(rt.get("account_balance", 0) or 0)
+
+    if balance_status == "auth_failed":
+        balance_text = "Cookie 失效"
+    elif balance_status == "network_error":
+        balance_text = "网络异常"
+    elif account_balance <= 0 and balance_status == "unknown":
+        balance_text = "获取中"
+    else:
+        balance_text = f"{account_balance / 10000:.2f} 万"
+
+    summary_lines = [
+        "📍 当前概览",
+        f"状态：{status_text}",
+        f"预设：{preset_name}",
+        f"下一手预计下注：{format_number(next_amount) if next_amount > 0 else '已停止'}",
+        f"账户余额：{balance_text}",
+        "",
+    ]
+    return "\n".join(summary_lines)
 
 
 def _to_bool_switch(value: Any, default: bool = True) -> bool:
@@ -3807,6 +3837,73 @@ def _build_fund_pause_message(current_fund: int) -> str:
     )
 
 
+def _build_version_catalog_message(result: Dict[str, Any]) -> str:
+    current = result.get("current", {})
+    current_short = current.get("short_commit", "unknown") or "unknown"
+    current_tag_exact = current.get("current_tag", "") or ""
+    nearest_tag = current.get("nearest_tag", "") or ""
+    if current_tag_exact:
+        current_tag_display = current_tag_exact.upper()
+    elif nearest_tag:
+        current_tag_display = f"无（最近: {nearest_tag}）"
+    else:
+        current_tag_display = "无"
+
+    remote_head = result.get("remote_head", {}) or {}
+    remote_head_short = remote_head.get("short_commit", "-") or "-"
+    remote_head_tag = result.get("remote_head_tag", "") or ""
+    pending_tags = result.get("pending_tags", [])
+    recent_tags = result.get("recent_tags", []) or []
+    recent_commits = result.get("recent_commits", []) or []
+
+    latest_tag_target = pending_tags[0] if pending_tags else ""
+    if latest_tag_target:
+        latest_tag_line = f"{latest_tag_target}（可执行 `update {latest_tag_target}`）"
+    else:
+        latest_tag_line = "无（已是最新）"
+
+    latest_commit_target = ""
+    if remote_head_short not in {"", "-", "unknown"} and remote_head_short != current_short:
+        latest_commit_target = remote_head_short
+
+    if latest_commit_target:
+        extra_tag_note = f" | Tag:{remote_head_tag}" if remote_head_tag else " | 未打Tag"
+        latest_commit_line = f"{latest_commit_target}{extra_tag_note}（可执行 `update {latest_commit_target}`）"
+    else:
+        latest_commit_line = "无（已是最新）"
+
+    highlights = []
+    if recent_tags:
+        highlights.append("最近版本：")
+        for idx, item in enumerate(recent_tags[:3], 1):
+            tag = item.get("tag", "") or "-"
+            date = item.get("date", "") or "-"
+            summary = item.get("summary", "") or "-"
+            highlights.append(f"{idx}. {tag} | {date} | {summary}")
+    if recent_commits:
+        highlights.append("")
+        highlights.append("最近提交：")
+        for idx, item in enumerate(recent_commits[:3], 1):
+            short_commit = item.get("short_commit", "") or "-"
+            date = item.get("date", "") or "-"
+            summary = item.get("summary", "") or "-"
+            suffix = "（当前）" if short_commit == current_short else ""
+            highlights.append(f"{idx}. {short_commit} | {date} | {summary}{suffix}")
+
+    return _build_ops_card(
+        "📦 版本信息概览",
+        summary="当前版本状态与可更新目标如下。",
+        fields=[
+            ("当前 Tag", current_tag_display),
+            ("当前 Commit", current_short),
+            ("最新 Tag", latest_tag_line),
+            ("最新 Commit", latest_commit_line),
+        ],
+        action="需要升级可执行 `update <版本或提交>`；完成后记得执行 `restart`。",
+        note="\n".join(highlights).strip(),
+    )
+
+
 async def _process_settle_slim(client, event, user_ctx: UserContext, global_config: dict):
     state = user_ctx.state
     rt = state.runtime
@@ -4729,77 +4826,14 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         if cmd in ("ver", "version"):
             result = await asyncio.to_thread(list_version_catalog, None, 3)
             if not result.get("success"):
-                mes = f"❌ 版本查询失败：{result.get('error', 'unknown')}"
+                mes = _build_ops_card(
+                    "❌ 版本查询失败",
+                    summary="当前无法读取版本信息。",
+                    fields=[("错误", result.get('error', 'unknown'))],
+                    action="建议稍后重试；若持续失败，可先检查仓库状态或网络。",
+                )
             else:
-                current = result.get("current", {})
-                current_short = current.get("short_commit", "unknown") or "unknown"
-                current_tag_exact = current.get("current_tag", "") or ""
-                nearest_tag = current.get("nearest_tag", "") or ""
-                if current_tag_exact:
-                    current_tag_display = current_tag_exact.upper()
-                elif nearest_tag:
-                    current_tag_display = f"无（最近: {nearest_tag}）"
-                else:
-                    current_tag_display = "无"
-
-                remote_head = result.get("remote_head", {}) or {}
-                remote_head_short = remote_head.get("short_commit", "-") or "-"
-                remote_head_tag = result.get("remote_head_tag", "") or ""
-                pending_tags = result.get("pending_tags", [])
-                recent_tags = result.get("recent_tags", []) or []
-                recent_commits = result.get("recent_commits", []) or []
-
-                latest_tag_target = pending_tags[0] if pending_tags else ""
-                if latest_tag_target:
-                    latest_tag_line = f"{latest_tag_target}（复制 `update {latest_tag_target}`）"
-                else:
-                    latest_tag_line = "无（已是最新）"
-
-                latest_commit_target = ""
-                if remote_head_short not in {"", "-", "unknown"} and remote_head_short != current_short:
-                    latest_commit_target = remote_head_short
-
-                if latest_commit_target:
-                    extra_tag_note = f" | Tag:{remote_head_tag}" if remote_head_tag else " | 未打Tag"
-                    latest_commit_line = f"{latest_commit_target}{extra_tag_note}（复制 `update {latest_commit_target}`）"
-                else:
-                    latest_commit_line = "无（已是最新）"
-
-                lines = [
-                    "📦 版本信息概览",
-                    f"当前 Tag：{current_tag_display}",
-                    f"当前Commit：{current_short}",
-                    f"最新 Tag：{latest_tag_line}",
-                    f"最新Commit：{latest_commit_line}",
-                    "",
-                    "⚠️  操作提示：",
-                    "- update <Tag版本号|Commit哈希>：更新到指定版本/提交",
-                    "- reback <Tag版本号|Commit哈希>：回滚到指定版本/提交",
-                    "- restart：重启应用",
-                    "",
-                    "🔖 最近 3 个正式版本（Tag，新→旧）",
-                ]
-
-                if recent_tags:
-                    for idx, item in enumerate(recent_tags[:3], 1):
-                        tag = item.get("tag", "")
-                        date = item.get("date", "") or "-"
-                        summary = item.get("summary", "") or "-"
-                        lines.append(f"{idx}. {tag} | {date} | {summary}")
-                else:
-                    lines.append("1. 无")
-
-                lines.extend(["", "💻 最近 3 个开发提交（Commit，新→旧）"])
-                if recent_commits:
-                    for idx, item in enumerate(recent_commits[:3], 1):
-                        short_commit = item.get("short_commit", "") or "-"
-                        date = item.get("date", "") or "-"
-                        summary = item.get("summary", "") or "-"
-                        suffix = "（当前提交）" if short_commit == current_short else ""
-                        lines.append(f"{idx}. {short_commit} | {date} | {summary}{suffix}")
-                else:
-                    lines.append("1. 无")
-                mes = "\n".join(lines)
+                mes = _build_version_catalog_message(result)
 
             message = await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -4809,31 +4843,62 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
 
         if cmd in ("update", "up", "upnow", "upref", "upcommit"):
             target_ref = my[1].strip() if len(my) > 1 else ""
-            await send_to_admin(client, f"🔄 开始更新：{target_ref or 'latest'}", user_ctx, global_config)
+            await send_to_admin(
+                client,
+                _build_ops_card(
+                    "🔄 开始更新",
+                    summary="系统已经开始拉取并切换到目标版本。",
+                    fields=[("目标", target_ref or "latest")],
+                    action="请等待结果通知，更新完成后再执行 `restart`。",
+                ),
+                user_ctx,
+                global_config,
+            )
             result = await asyncio.to_thread(update_to_version, None, target_ref)
             if result.get("success"):
                 if result.get("no_change"):
-                    await send_to_admin(client, f"✅ {result.get('message', '当前已是目标版本')}", user_ctx, global_config)
+                    await send_to_admin(
+                        client,
+                        _build_ops_card(
+                            "✅ 无需更新",
+                            summary=result.get('message', '当前已是目标版本'),
+                            action="如需确认当前状态，可执行 `ver` 或 `status`。",
+                        ),
+                        user_ctx,
+                        global_config,
+                    )
                 else:
                     after = result.get("after", {})
                     resolved = result.get("resolved_target", "") or result.get("target_ref", target_ref or "latest")
-                    mes = (
-                        "✅ 更新成功\n"
-                        f"目标：{resolved}\n"
-                        f"当前：{after.get('display_version', after.get('short_commit', 'unknown'))}\n"
-                        "请执行 `restart` 重启脚本使新版本生效"
+                    mes = _build_ops_card(
+                        "✅ 更新成功",
+                        summary="代码已经切换到目标版本，但需要重启后才会实际生效。",
+                        fields=[
+                            ("目标", resolved),
+                            ("当前", after.get('display_version', after.get('short_commit', 'unknown'))),
+                        ],
+                        action="请执行 `restart` 让新版本正式生效。",
                     )
                     await send_to_admin(client, mes, user_ctx, global_config)
             else:
                 blocking_paths = result.get("blocking_paths", [])
                 detail = result.get("detail", "")
-                mes_lines = [f"❌ 更新失败：{result.get('error', 'unknown')}"]
-                if blocking_paths:
-                    mes_lines.append("阻塞文件：")
-                    mes_lines.extend([f"- {path}" for path in blocking_paths[:10]])
-                if detail:
-                    mes_lines.append(f"详情：{detail[:200]}")
-                await send_to_admin(client, "\n".join(mes_lines), user_ctx, global_config)
+                blocking_text = " / ".join(blocking_paths[:5]) if blocking_paths else ""
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "❌ 更新失败",
+                        summary="本次更新没有完成，当前版本保持不变。",
+                        fields=[
+                            ("错误", result.get('error', 'unknown')),
+                            ("阻塞文件", blocking_text),
+                        ],
+                        action="建议先处理阻塞文件，再重新执行 `update`。",
+                        note=detail[:200] if detail else "",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             return
 
@@ -4843,22 +4908,39 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 await send_to_admin(client, "用法：`reback <版本号|commit|branch>`", user_ctx, global_config)
                 return
 
-            await send_to_admin(client, f"↩️ 开始回退到：{target_ref}", user_ctx, global_config)
+            await send_to_admin(
+                client,
+                _build_ops_card(
+                    "↩️ 开始回退",
+                    summary="系统已经开始切换到指定历史版本。",
+                    fields=[("目标", target_ref)],
+                    action="请等待结果通知，回退完成后再执行 `restart`。",
+                ),
+                user_ctx,
+                global_config,
+            )
             result = await asyncio.to_thread(reback_to_version, None, target_ref)
             if result.get("success"):
                 after = result.get("after", {})
                 resolved = result.get("resolved_target", target_ref)
-                mes = (
-                    "✅ 回退成功\n"
-                    f"目标：{resolved}\n"
-                    f"当前：{after.get('display_version', after.get('short_commit', 'unknown'))}\n"
-                    "请执行 `restart` 重启脚本使回退生效"
+                mes = _build_ops_card(
+                    "✅ 回退成功",
+                    summary="代码已经切换到目标历史版本，但需要重启后才会正式生效。",
+                    fields=[
+                        ("目标", resolved),
+                        ("当前", after.get('display_version', after.get('short_commit', 'unknown'))),
+                    ],
+                    action="请执行 `restart` 让回退版本正式生效。",
                 )
                 await send_to_admin(client, mes, user_ctx, global_config)
             else:
-                mes = f"❌ 回滚失败：{result.get('error', 'unknown')}"
-                if result.get("detail"):
-                    mes += f"\n详情：{str(result.get('detail'))[:200]}"
+                mes = _build_ops_card(
+                    "❌ 回退失败",
+                    summary="本次回退没有完成，当前版本保持不变。",
+                    fields=[("错误", result.get('error', 'unknown'))],
+                    action="请确认目标版本或提交是否正确，再重新执行 `reback`。",
+                    note=str(result.get('detail'))[:200] if result.get("detail") else "",
+                )
                 await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             return
@@ -4866,9 +4948,18 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         if cmd in ("restart", "reboot"):
             service_name = resolve_systemd_service_name()
             if service_name:
-                mes = f"♻️ 收到重启指令，2 秒后通过 systemd 重启服务：{service_name}"
+                mes = _build_ops_card(
+                    "♻️ 已接收重启指令",
+                    summary="系统会在 2 秒后通过 systemd 重启服务。",
+                    fields=[("服务名", service_name)],
+                    action="重启期间消息可能短暂中断，建议稍后执行 `status` 确认恢复情况。",
+                )
             else:
-                mes = "♻️ 收到重启指令，2 秒后自动重启进程..."
+                mes = _build_ops_card(
+                    "♻️ 已接收重启指令",
+                    summary="系统会在 2 秒后自动重启当前进程。",
+                    action="重启期间消息可能短暂中断，建议稍后执行 `status` 确认恢复情况。",
+                )
             await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 3))
             asyncio.create_task(restart_process())

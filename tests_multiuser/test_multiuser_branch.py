@@ -1884,6 +1884,8 @@ def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monk
     monkeypatch.setattr(zm, "get_current_repo_info", lambda: {"current_tag": "v1.0.10", "nearest_tag": "v1.0.10", "short_commit": "abcd1234"})
 
     msg = zm.format_dashboard(ctx)
+    assert "📍 当前概览" in msg
+    assert "下一手预计下注：" in msg
     assert "🔢 **软件版本：v1.0.10(abcd1234)**" in msg
     assert "📋 **预设名称：yc10**" in msg
     assert "🤖 **预设参数：1 11 2.8 2.3 2.2 2.05 10000**" in msg
