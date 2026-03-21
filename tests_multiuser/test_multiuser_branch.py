@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from user_manager import UserContext, UserManager
+from user_manager import UserContext, UserManager, trim_bet_sequence_log
 from model_manager import ModelManager
 import constants
 import zq_multiuser as zm
@@ -509,7 +509,10 @@ def test_process_bet_on_parses_history_and_places_bet(tmp_path, monkeypatch):
         user_ctx.state.predictions.append(1)
         return 1
 
+    sent_messages = []
+
     async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
         return SimpleNamespace(chat_id=1, id=1)
 
     async def fake_delete_later(*args, **kwargs):
@@ -547,6 +550,7 @@ def test_process_bet_on_parses_history_and_places_bet(tmp_path, monkeypatch):
     assert rt.get("bet") is True
     assert len(ctx.state.bet_sequence_log) == 1
     assert rt.get("current_bet_seq", 1) >= 2
+    assert any("押注方向：大" in message for message in sent_messages)
 
 
 def test_process_bet_on_allows_short_history_like_master(tmp_path, monkeypatch):
@@ -1346,6 +1350,22 @@ def test_build_pending_bet_heal_notice_contains_reconciled_status():
     assert "下一手预计下注：477,000" in notice
 
 
+def test_trim_bet_sequence_log_keeps_new_chain_after_res_bet_rollover():
+    runtime = {"bet_reset_log_index": 5000}
+    logs = [{"bet_id": f"b{i}", "result": "输", "profit": -1} for i in range(5000)]
+
+    trimmed = trim_bet_sequence_log(logs, runtime)
+    assert len(trimmed) == 5000
+    assert runtime["bet_reset_log_index"] == 5000
+
+    logs = trimmed + [{"bet_id": "new-chain-1", "result": None, "profit": 0}]
+    trimmed = trim_bet_sequence_log(logs, runtime)
+
+    assert len(trimmed) == 5000
+    assert runtime["bet_reset_log_index"] == 4999
+    assert trimmed[-1]["bet_id"] == "new-chain-1"
+
+
 def test_process_bet_on_sends_heal_notice_when_stale_pending_entries_are_fixed(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5094"
     _write_json(
@@ -1803,6 +1823,41 @@ def test_process_settle_only_consumes_pending_bet_once(tmp_path, monkeypatch):
     assert len(second_result_msgs) == 0
 
 
+def test_process_user_command_explain_returns_last_logic_audit(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "explain_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "解释用户"},
+            "telegram": {"user_id": 70151},
+            "groups": {"admin_chat": 70151},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.state.runtime["last_logic_audit"] = json.dumps({"prediction": 1, "tag": "TEST"}, ensure_ascii=False)
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70151, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="explain", chat_id=70151, id=8)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert sent_messages
+    assert "最近一次模型判断依据" in sent_messages[-1]
+    assert '"prediction": 1' in sent_messages[-1]
+
+
 def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5013"
     _write_json(
@@ -2248,5 +2303,3 @@ def test_predict_next_bet_v10_prompt_contains_rhythm_layer(tmp_path, monkeypatch
     assert "pair_score" in captured["prompt"]
     assert "pair_would_form_double" in captured["prompt"]
     assert "PAIR_FORMATION" in captured["prompt"]
-
-

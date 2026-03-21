@@ -24,6 +24,7 @@ file_handler = TimedRotatingFileHandler('user_manager.log', when='midnight', int
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
+MAX_BET_SEQUENCE_LOG = 5000
 
 
 def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
@@ -59,6 +60,34 @@ def _resolve_user_identity(user_id: Any = 0, account_name: str = "") -> Dict[str
         "account_label": _build_account_label(account_slug),
         "account_tag": f"【ydx-{account_slug}】",
     }
+
+
+def trim_bet_sequence_log(logs: Any, runtime: Optional[Dict[str, Any]] = None, max_len: int = MAX_BET_SEQUENCE_LOG) -> List[Dict[str, Any]]:
+    """
+    将押注日志裁剪到固定长度，并同步修正 res bet 使用的切片起点。
+    这样在日志滚动裁剪后，新的策略链不会被旧的绝对下标“卡死”。
+    """
+    if not isinstance(logs, list):
+        if isinstance(runtime, dict):
+            runtime["bet_reset_log_index"] = 0
+        return []
+
+    if not isinstance(runtime, dict):
+        runtime = {}
+
+    try:
+        reset_index = int(runtime.get("bet_reset_log_index", 0) or 0)
+    except (TypeError, ValueError):
+        reset_index = 0
+
+    if max_len > 0 and len(logs) > max_len:
+        drop_count = len(logs) - max_len
+        logs = logs[-max_len:]
+        reset_index = max(0, reset_index - drop_count)
+
+    reset_index = max(0, min(reset_index, len(logs)))
+    runtime["bet_reset_log_index"] = reset_index
+    return logs
 
 
 class _UserManagerLogDefaultsFilter(logging.Filter):
@@ -404,7 +433,7 @@ def get_default_runtime() -> Dict[str, Any]:
         "status": 0,
         
         # 算法相关变量
-        "last_predict_info": "V10 预测",
+        "last_predict_info": "等待本局预测",
         "api_key_index": 0,
         "current_model_id": "qwen3-coder-plus",
         
@@ -587,7 +616,10 @@ class UserContext:
                     history=data.get("history", [])[-2000:],
                     bet_type_history=data.get("bet_type_history", [])[-2000:],
                     predictions=data.get("predictions", [])[-2000:],
-                    bet_sequence_log=data.get("bet_sequence_log", [])[-5000:],
+                    bet_sequence_log=trim_bet_sequence_log(
+                        data.get("bet_sequence_log", [])[-MAX_BET_SEQUENCE_LOG:],
+                        merged_runtime,
+                    ),
                     runtime=merged_runtime
                 )
                 log_event(logging.DEBUG, 'load_state', '加载用户状态成功', f'user_id={self.user_id}')
@@ -639,7 +671,10 @@ class UserContext:
         self.state.history = legacy_history
         self.state.bet_type_history = legacy_state.get("bet_type_history", [])[-2000:]
         self.state.predictions = legacy_state.get("predictions", [])[-2000:]
-        self.state.bet_sequence_log = legacy_state.get("bet_sequence_log", [])[-5000:]
+        self.state.bet_sequence_log = trim_bet_sequence_log(
+            legacy_state.get("bet_sequence_log", [])[-MAX_BET_SEQUENCE_LOG:],
+            self.state.runtime,
+        )
 
         legacy_runtime = legacy_state.get("state", {})
         for key in [
@@ -694,11 +729,15 @@ class UserContext:
     def save_state(self):
         with self._lock:
             state_path = os.path.join(self.user_dir, "state.json")
+            self.state.bet_sequence_log = trim_bet_sequence_log(
+                self.state.bet_sequence_log,
+                self.state.runtime,
+            )
             data = {
                 "history": self.state.history[-2000:],
                 "bet_type_history": self.state.bet_type_history[-2000:],
                 "predictions": self.state.predictions[-2000:],
-                "bet_sequence_log": self.state.bet_sequence_log[-5000:],
+                "bet_sequence_log": self.state.bet_sequence_log,
                 "runtime": self.state.runtime
             }
             try:

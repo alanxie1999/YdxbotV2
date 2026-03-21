@@ -14,7 +14,7 @@ import requests
 import aiohttp
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
-from user_manager import UserContext, UserState
+from user_manager import UserContext, UserState, trim_bet_sequence_log
 from typing import Dict, Any, List, Optional
 import constants
 from update_manager import (
@@ -389,6 +389,7 @@ def _get_strategy_bet_sequence_log(state: UserState) -> List[Dict[str, Any]]:
         reset_index = int(rt.get("bet_reset_log_index", 0) or 0)
     except (TypeError, ValueError):
         reset_index = 0
+    reset_index = max(0, min(reset_index, len(logs)))
     if reset_index <= 0:
         return logs
     if reset_index >= len(logs):
@@ -545,6 +546,12 @@ def reconcile_bet_runtime_from_log(user_ctx: UserContext, include_open: bool = F
     return summary
 
 
+def _append_bet_sequence_entry(state: UserState, entry: Dict[str, Any]) -> None:
+    logs = state.bet_sequence_log if isinstance(state.bet_sequence_log, list) else []
+    logs.append(entry)
+    state.bet_sequence_log = trim_bet_sequence_log(logs, state.runtime)
+
+
 def build_pending_bet_heal_notice(healed_pending: Dict[str, Any], summary: Dict[str, Any], rt: Dict[str, Any]) -> str:
     """生成历史脏挂单自愈提示，便于管理员快速确认当前已对齐到哪一手。"""
     healed_count = int(healed_pending.get("count", 0) or 0)
@@ -572,6 +579,7 @@ def build_pending_bet_heal_notice(healed_pending: Dict[str, Any], summary: Dict[
         f"当前连输：{lose_count} 次",
         f"下一手预计下注：{format_number(next_bet_amount)}",
         "说明：已按真实已结算记录重新对齐状态",
+        "后续动作：脚本会按对齐后的状态继续处理，无需手动重启",
     ]
     return "\n".join(lines)
 
@@ -1266,7 +1274,7 @@ async def _send_transient_admin_notice(
     return sent
 
 
-# ==================== V10 M-SMP 核心算法函数 ====================
+# ==================== 核心预测函数 ====================
 
 def calculate_trend_gap(history, window=100):
     """
@@ -1630,11 +1638,11 @@ def parse_analysis_result_insight(resp_text, default_prediction=1):
         }
 
 
-# V10 预测函数 - M-SMP架构
+# 主预测函数
 async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, current_round: int = 1) -> int:
     """
-    V10 深度量化博弈版：多策略模拟预测（M-SMP）架构
-    核心逻辑：多策略人格模拟博弈，强制输出0或1，绝不暂停！
+    多策略模拟预测主流程。
+    核心逻辑：结合盘面节奏、统计特征和模型输出来决定本局方向。
     """
     state = user_ctx.state
     rt = state.runtime
@@ -1969,26 +1977,16 @@ Return JSON only:
         recent_sum = sum(recent_20)
         fallback = 0 if recent_sum >= len(recent_20) / 2 else 1
         
-        rt["last_predict_info"] = f"M-SMP终极保底 | 强制预测:{fallback}"
+        rt["last_predict_info"] = f"模型终极保底 | 强制预测:{fallback}"
         rt["last_predict_tag"] = "FALLBACK"
         rt["last_predict_confidence"] = 0
         rt["last_predict_source"] = "hard_fallback"
-        rt["last_predict_reason"] = "M-SMP异常终极保底"
+        rt["last_predict_reason"] = "模型异常终极保底"
         state.predictions.append(fallback)
         return fallback
 
 
 # 押注处理
-def _apply_round_pause_slim(rt: dict, pause_rounds: int, reason: str) -> int:
-    rounds = max(1, int(pause_rounds))
-    rt["stop_count"] = max(int(rt.get("stop_count", 0) or 0), rounds)
-    rt["pause_reason"] = str(reason or "").strip()
-    rt["bet"] = False
-    rt["bet_on"] = False
-    rt["mode_stop"] = True
-    return rounds
-
-
 async def _refresh_dashboard_message_slim(client, user_ctx: UserContext, global_config: dict):
     dashboard = format_dashboard(user_ctx)
     if hasattr(user_ctx, "dashboard_message") and user_ctx.dashboard_message:
@@ -2151,7 +2149,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         await send_to_admin(client, _build_ai_key_warning_message(rt), user_ctx, global_config)
 
     rt["bet_amount"] = int(bet_amount)
-    direction = "澶?" if prediction == 1 else "灏?"
+    direction = "大" if prediction == 1 else "小"
     direction_en = "big" if prediction == 1 else "small"
     buttons = constants.BIG_BUTTON if prediction == 1 else constants.SMALL_BUTTON
     combination = constants.find_combination(rt["bet_amount"], buttons)
@@ -2186,7 +2184,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     rt["limit_stop_notified"] = False
 
     bet_id = generate_bet_id(user_ctx)
-    state.bet_sequence_log.append({
+    _append_bet_sequence_entry(state, {
         "bet_id": bet_id,
         "sequence": rt.get("bet_sequence_count", 0),
         "direction": direction_en,
@@ -2196,7 +2194,6 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         "lose_stop": rt.get("lose_stop", 13),
         "profit_target": rt.get("profit", 1000000)
     })
-    state.bet_sequence_log = state.bet_sequence_log[-5000:]
 
     bet_report = generate_mobile_bet_report(
         state.history,
@@ -3980,37 +3977,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
         if len(state.history) % 5 == 0:
             user_ctx.save_state()
 
-        if int(rt.get("explode_count", 0)) >= int(rt.get("explode", 5)) or int(rt.get("period_profit", 0)) >= int(rt.get("profit", 1000000)):
-            is_explode_pause = int(rt.get("explode_count", 0)) >= int(rt.get("explode", 5))
-            pause_rounds = int(rt.get("stop", 3) if is_explode_pause else rt.get("profit_stop", 5))
-            pause_reason = "炸号保护暂停" if is_explode_pause else "盈利达成暂停"
-            _apply_round_pause_slim(rt, pause_rounds, pause_reason)
-            await send_message_v2(
-                client,
-                "goal_pause",
-                f"原因：{pause_reason}\n本次暂停：{pause_rounds} 局",
-                user_ctx,
-                global_config,
-                title=f"博彩机器人 {user_ctx.config.name} {'炸号' if is_explode_pause else '盈利'}暂停",
-                desp=f"原因：{pause_reason}\n本次暂停：{pause_rounds} 局",
-            )
-            await send_to_admin(
-                client,
-                f"⏸️ 暂停倒计时提醒\n原因：{pause_reason}\n倒计时：{pause_rounds} 局",
-                user_ctx,
-                global_config,
-            )
-            if not is_explode_pause:
-                rt["current_round"] = int(rt.get("current_round", 1)) + 1
-                rt["current_bet_seq"] = 1
-            rt["bet_sequence_count"] = 0
-            rt["explode_count"] = 0
-            rt["period_profit"] = 0
-            rt["lose_count"] = 0
-            rt["win_count"] = 0
-            rt["bet_amount"] = int(rt.get("initial_amount", 500))
-            _clear_lose_recovery_tracking(rt)
-            user_ctx.save_state()
+        await _handle_goal_pause_after_settle(client, user_ctx, global_config)
 
         if hasattr(user_ctx, 'dashboard_message') and user_ctx.dashboard_message:
             await cleanup_message(client, user_ctx.dashboard_message)
@@ -4031,7 +3998,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
             for window in windows:
                 history_window = state.history[-window:]
                 result_counts = count_consecutive(history_window)
-                bet_sequence_log = state.bet_sequence_log[-window:]
+                bet_sequence_log = _get_strategy_bet_sequence_log(state)[-window:]
                 lose_streaks = count_lose_streaks(bet_sequence_log)
                 stats["连大"].append(result_counts["大"])
                 stats["连小"].append(result_counts["小"])
@@ -4169,7 +4136,7 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
             f"✅ **模型切换成功**\n"
             f"🤖 **当前模型**: `{target_id}`\n"
             f"🔗 **连接状态**: 🟢 正常\n"
-            f"🧠 **算法模式**: V10 (已激活)"
+            "📌 **后续新局**: 将使用这个模型继续判断"
         )
         await event.reply(success_msg)
         log_event(logging.INFO, 'model', '切换模型', user_id=user_ctx.user_id, model=target_id)
@@ -4407,6 +4374,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
 - `res tj` : 重置统计数据
 - `res state` : 清空历史与状态
 - `res bet` : 重置押注策略
+- `explain` : 查看最近一次模型判断依据
 - `stats` : 查看连大、连小、连输统计
 - `balance` : 查询账户余额
 - `xx` : 清理配置群中“我发送的消息”
@@ -4587,7 +4555,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             for window in windows:
                 history_window = state.history[-window:]
                 result_counts = count_consecutive(history_window)
-                bet_sequence_log = state.bet_sequence_log[-window:]
+                bet_sequence_log = _get_strategy_bet_sequence_log(state)[-window:]
                 lose_streaks = count_lose_streaks(bet_sequence_log)
                 
                 stats["连大"].append(result_counts["大"])
@@ -4716,11 +4684,6 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         
         # model - 模型管理 - 使用与master一致的handle_model_command
         if cmd == "model":
-            if len(my) == 2 and my[1].lower().startswith("v"):
-                mes = "当前算法固定为 V10，无需切换。请使用 `model select <id>` 切换模型。"
-                await event.reply(mes)
-                asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-                return
             await handle_model_command_multiuser(event, my[1:], user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             return
@@ -4971,7 +4934,20 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
             return
         
-        # explain - 查看AI决策解释 - 与master一致
+        # explain - 查看最近一次模型判断依据
+        if cmd == "explain":
+            last_logic_audit = rt.get("last_logic_audit", "")
+            if last_logic_audit:
+                log_event(logging.INFO, 'user_cmd', '查看决策解释', user_id=user_ctx.user_id)
+                mes = f"🧠 **最近一次模型判断依据**\n```json\n{last_logic_audit}\n```"
+            else:
+                mes = "当前还没有可展示的模型判断记录，请等下一次有效判断后再查看。"
+            message = await send_to_admin(client, mes, user_ctx, global_config)
+            asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
+            if message:
+                asyncio.create_task(delete_later(client, message.chat_id, message.id, 60))
+            return
+
         # balance - 查询余额 - 与master一致
         if cmd == "balance":
             try:
