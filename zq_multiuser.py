@@ -1568,8 +1568,8 @@ def analyze_rhythm_context(history, recent_window: int = 9, lookback_events: int
 
 def fallback_prediction(history):
     """
-    天眼兜底机制：如果AI异常，强行维持50:50概率
-    缺哪个补哪个，绝不暂停！
+    统计兜底预测。
+    当模型不可用时，优先补最近窗口里相对偏少的一侧。
     """
     if not history:
         return 1
@@ -1581,7 +1581,7 @@ def fallback_prediction(history):
     
     prediction = 1 if big_count < small_count else 0
     
-    log_event(logging.WARNING, 'predict_v10', '天眼兜底触发', 
+    log_event(logging.WARNING, 'predict_core', '统计兜底触发', 
               user_id=0, data=f'big={big_count}, small={small_count}, fallback={prediction}')
     
     return prediction
@@ -1623,7 +1623,7 @@ def parse_analysis_result_insight(resp_text, default_prediction=1):
         confidence = int(resp_json.get('confidence', 50))
         confidence = max(0, min(100, confidence))
         
-        reason = resp_json.get('reason', resp_json.get('logic', '天眼分析'))
+        reason = resp_json.get('reason', resp_json.get('logic', '模型分析'))
         
         return {
             'prediction': prediction,
@@ -1639,37 +1639,36 @@ def parse_analysis_result_insight(resp_text, default_prediction=1):
 
 
 # 主预测函数
-async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, current_round: int = 1) -> int:
+async def predict_next_bet_core(user_ctx: UserContext, global_config: dict, current_round: int = 1) -> int:
     """
-    多策略模拟预测主流程。
-    核心逻辑：结合盘面节奏、统计特征和模型输出来决定本局方向。
+    根据历史节奏、统计特征和模型输出来决定本局方向。
     """
     state = user_ctx.state
     rt = state.runtime
     history = state.history
     
     try:
-        # ========== 第一步：构建三维历史快照（交易员终端感） ==========
+        # 第一步：构建历史窗口快照。
         
-        # 1.1 短期精确抖动（20局）
+        # 短期窗口（20局）
         short_term_20 = history[-20:] if len(history) >= 20 else history[:]
         short_str = "".join(['1' if x == 1 else '0' for x in short_term_20])
         
-        # 1.2 中期暗趋势（50局）
+        # 中期窗口（50局）
         medium_term_50 = history[-50:] if len(history) >= 50 else history[:]
         medium_str = "".join(['1' if x == 1 else '0' for x in medium_term_50])
         
-        # 1.3 长期大周期回归（100局）
+        # 长期窗口（100局）
         long_term_100 = history[-100:] if len(history) >= 100 else history[:]
         long_term_gap = round(sum(long_term_100) / len(long_term_100), 3) if long_term_100 else 0.5
         
-        # 1.4 趋势缺口计算
+        # 趋势缺口
         trend_gap = calculate_trend_gap(history, window=100)
         big_cnt = trend_gap['big_count']
         small_cnt = trend_gap['small_count']
         gap = trend_gap['gap']
         
-        # 1.5 形态特征
+        # 形态与节奏特征
         pattern_features = extract_pattern_features(history)
         pattern_tag = pattern_features['pattern_tag']
         tail_streak_len = pattern_features['tail_streak_len']
@@ -1677,11 +1676,11 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
         double_streak_stats = analyze_double_streak_followups(history)
         rhythm_context = analyze_rhythm_context(history)
         
-        # 1.6 模式标记
+        # 当前连押压力标签
         lose_count = rt.get('lose_count', 0)
         entropy_tag = "Pattern_Breaking" if lose_count > 2 else "Stability"
         
-        # ========== 第二步：构建交易员终端数据负载 ==========
+        # 第二步：整理模型输入上下文。
         
         payload = {
             "current_status": {
@@ -1731,64 +1730,10 @@ async def predict_next_bet_v10(user_ctx: UserContext, global_config: dict, curre
             }
         }
         
-        # ========== 第三步：深度博弈推理Prompt（M-SMP架构） ==========
+        # 第三步：构建推理提示词。
         
         current_model_id = rt.get('current_model_id', 'qwen3-coder-plus')
         actual_model_id = current_model_id
-        
-        prompt = f"""[System Instruction]
-????????????????????????????????????????????????????????????????????? SKIP?-1??
-
-[Hard Risk Rules]
-???????????????????
-1. ? martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} ??????? < {HIGH_PRESSURE_SKIP_MIN_CONF}????? SKIP?
-2. ? pattern tag ?? CHAOS_SWITCH / SINGLE_JUMP / SYMMETRIC_WRAP ? martingale_step >= 3 ?????? SKIP?
-3. ????????????????????????????????
-4. DRAGON_CANDIDATE ????????????? martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} ????? < {DRAGON_CANDIDATE_MIN_TAIL_STEP5} ?????? SKIP?
-5. ? long_term_gap ?? [{NEUTRAL_LONG_TERM_GAP_LOW:.2f}, {NEUTRAL_LONG_TERM_GAP_HIGH:.2f}]?????????????????????
-6. ???????????????????? reason ????????? / ?????? / ???? / ????? / ?????????? SKIP?
-7. ?5??????????? LONG_DRAGON ???????????? SKIP?????????
-
-[Context Reasoning Flow]
-???????????
-1. ??????????????????????????
-2. ???????????????????????????
-3. ??????? tag ????????????/????
-4. ???????????????????????????????????????????
-
-[Evidence Grading]
-????????????
-- ??????LONG_DRAGON ????? >= 5???????????
-- ??????|gap| >= 8????????????20??????
-
-????????
-- CHAOS_SWITCH
-- SINGLE_JUMP
-- SYMMETRIC_WRAP
-- DRAGON_CANDIDATE ?????
-- ????????
-- ???????? / ??????
-???????
-
-[Data Evidence]
-??20?: {short_str}
-??50?: {medium_str}
-??100????: {long_term_gap:.2f}
-????: {pattern_tag} (??{tail_streak_len}?{'?' if tail_streak_char==1 else '?'})
-????: {gap:+d} (?=??, ?=??)
-????: ?{lose_count + 1}? ({entropy_tag})
-
-[Output Policy]
-- ????????????????????????
-- ????????????????? SKIP?
-- reasoning ?????????????????????????????
-- ??????????????
-
-[Response Format]
-???????? JSON?
-{{"logic": "50????", "reasoning": "??????????", "confidence": 1-100, "prediction": -1?0?1}}
-
-???prediction ??? -1?0?1 ???"""
         prompt = f"""[System Instruction]
 You are a quantitative trading analyst for a binary big/small game. First identify the dominant rhythm of the board, then decide whether it deserves a bet. If evidence is weak or conflicting, output SKIP (-1).
 
@@ -1868,10 +1813,10 @@ Return JSON only:
             {'role': 'user', 'content': prompt}
         ]
         
-        log_event(logging.INFO, 'predict_v10', f'M-SMP模式调用: {current_model_id}', 
+        log_event(logging.INFO, 'predict_core', f'模型分析调用: {current_model_id}', 
                   user_id=user_ctx.user_id, data=f'形态:{pattern_tag} 缺口:{gap:+d} 压力:{lose_count + 1}次')
         
-        # ========== 第四步：调用模型与多层兜底 ==========
+        # 第四步：调用模型并处理降级。
 
         model_used = True
         try:
@@ -1894,7 +1839,7 @@ Return JSON only:
                 rt["current_model_id"] = actual_model_id
                 log_event(
                     logging.WARNING,
-                    'predict_v10',
+                    'predict_core',
                     '主模型不可用，已按排序自动降级',
                     user_id=user_ctx.user_id,
                     data=f'{current_model_id} -> {actual_model_id}'
@@ -1912,7 +1857,7 @@ Return JSON only:
                 _mark_ai_key_issue(rt, "未配置可用 api_keys")
             elif _looks_like_ai_key_issue(err_text):
                 _mark_ai_key_issue(rt, err_text)
-            log_event(logging.WARNING, 'predict_v10', '模型调用失败，统计兜底', 
+            log_event(logging.WARNING, 'predict_core', '模型调用失败，统计兜底', 
                       user_id=user_ctx.user_id, data=err_text)
             final_result = {
                 'prediction': trend_gap['regression_target'],
@@ -1920,7 +1865,7 @@ Return JSON only:
                 'reason': '模型异常，统计回归兜底'
             }
         
-        # ========== 第五步：结果强制校验与记录 ==========
+        # 第五步：校验输出并写回运行态。
         
         prediction = final_result['prediction']
         confidence = final_result['confidence']
@@ -1933,7 +1878,7 @@ Return JSON only:
         
         # 构建预测信息
         rt["last_predict_info"] = (
-            f"M-SMP/{pattern_tag}/{rhythm_context['rhythm_tag']} | {reason} | 信:{confidence}% | "
+            f"模型分析/{pattern_tag}/{rhythm_context['rhythm_tag']} | {reason} | 信:{confidence}% | "
             f"缺口:{gap:+d} | 回归:{trend_gap['regression_target']}"
         )
         rt["last_predict_tag"] = pattern_tag
@@ -1952,7 +1897,7 @@ Return JSON only:
         audit_log = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "round": current_round,
-            "mode": "M-SMP",
+            "mode": "core_predictor",
             "input_payload": payload,
             "output": final_result,
             "model_id": actual_model_id,
@@ -1964,24 +1909,24 @@ Return JSON only:
         # 记录预测
         state.predictions.append(prediction)
         
-        log_event(logging.INFO, 'predict_v10', 'M-SMP预测完成', 
+        log_event(logging.INFO, 'predict_core', '模型分析完成', 
                   user_id=user_ctx.user_id, data=f'pred={prediction}, conf={confidence}, pattern={pattern_tag}')
         
         return prediction
         
     except Exception as e:
-        log_event(logging.ERROR, 'predict_v10', 'M-SMP异常，最终保底', 
+        log_event(logging.ERROR, 'predict_core', '核心预测异常，使用最终保底', 
                   user_id=user_ctx.user_id, data=str(e))
         
         recent_20 = history[-20:] if len(history) >= 20 else history
         recent_sum = sum(recent_20)
         fallback = 0 if recent_sum >= len(recent_20) / 2 else 1
         
-        rt["last_predict_info"] = f"模型终极保底 | 强制预测:{fallback}"
+        rt["last_predict_info"] = f"模型最终兜底 | 强制预测:{fallback}"
         rt["last_predict_tag"] = "FALLBACK"
         rt["last_predict_confidence"] = 0
         rt["last_predict_source"] = "hard_fallback"
-        rt["last_predict_reason"] = "模型异常终极保底"
+        rt["last_predict_reason"] = "模型异常最终兜底"
         state.predictions.append(fallback)
         return fallback
 
@@ -2121,7 +2066,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     try:
         prediction = await asyncio.wait_for(
-            predict_next_bet_v10(user_ctx, global_config),
+            predict_next_bet_core(user_ctx, global_config),
             timeout=predict_timeout_sec,
         )
     except asyncio.TimeoutError:

@@ -525,7 +525,7 @@ def test_process_bet_on_parses_history_and_places_bet(tmp_path, monkeypatch):
         coro.close()
         return None
 
-    monkeypatch.setattr(zm, "predict_next_bet_v10", fake_predict)
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm, "delete_later", fake_delete_later)
     monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
@@ -593,7 +593,7 @@ def test_process_bet_on_allows_short_history_like_master(tmp_path, monkeypatch):
         coro.close()
         return None
 
-    monkeypatch.setattr(zm, "predict_next_bet_v10", fake_predict)
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm, "delete_later", fake_delete_later)
     monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
@@ -661,7 +661,7 @@ def test_process_bet_on_recovers_when_source_message_id_invalid(tmp_path, monkey
         coro.close()
         return None
 
-    monkeypatch.setattr(zm, "predict_next_bet_v10", fake_predict)
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm, "delete_later", fake_delete_later)
     monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
@@ -979,7 +979,7 @@ def test_pause_command_sets_manual_pause_and_blocks_bet_on(tmp_path, monkeypatch
 
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(zm, "predict_next_bet_v10", fail_predict)
+    monkeypatch.setattr(zm, "predict_next_bet_core", fail_predict)
 
     cmd_event = SimpleNamespace(raw_text="pause", chat_id=5005, id=10)
     asyncio.run(zm.process_user_command(SimpleNamespace(), cmd_event, ctx, {}))
@@ -2097,7 +2097,7 @@ def test_generate_mobile_bet_report_formats_bet_id():
     assert "20260318_3_58押注执行" not in report
 
 
-def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, monkeypatch):
+def test_predict_next_bet_core_updates_current_model_after_fallback(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "fallback_model_user"
     _write_json(
         user_dir / "config.json",
@@ -2136,7 +2136,7 @@ def test_predict_next_bet_v10_updates_current_model_after_fallback(tmp_path, mon
 
     monkeypatch.setattr(ctx, "get_model_manager", lambda: FakeModelManager())
 
-    prediction = asyncio.run(zm.predict_next_bet_v10(ctx, {}))
+    prediction = asyncio.run(zm.predict_next_bet_core(ctx, {}))
 
     assert prediction == 1
     assert rt["current_model_id"] == "model-2"
@@ -2259,7 +2259,7 @@ def test_analyze_rhythm_context_prefers_pair_for_pair_formation_sequence():
     assert result["pair_would_form_double"] is True
 
 
-def test_predict_next_bet_v10_prompt_contains_rhythm_layer(tmp_path, monkeypatch):
+def test_predict_next_bet_core_prompt_contains_rhythm_layer(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "rhythm_model_user"
     _write_json(
         user_dir / "config.json",
@@ -2295,7 +2295,7 @@ def test_predict_next_bet_v10_prompt_contains_rhythm_layer(tmp_path, monkeypatch
 
     monkeypatch.setattr(ctx, "get_model_manager", lambda: FakeModelManager())
 
-    prediction = asyncio.run(zm.predict_next_bet_v10(ctx, {}))
+    prediction = asyncio.run(zm.predict_next_bet_core(ctx, {}))
 
     assert prediction == 1
     assert "rhythm_tag" in captured["prompt"]
