@@ -957,6 +957,26 @@ def _build_ops_card(
     return "\n".join(lines).strip()
 
 
+async def _reply_ops_card(
+    event,
+    title: str,
+    *,
+    summary: str = "",
+    fields: Optional[List[tuple[str, Any]]] = None,
+    action: str = "",
+    note: str = "",
+):
+    return await event.reply(
+        _build_ops_card(
+            title,
+            summary=summary,
+            fields=fields,
+            action=action,
+            note=note,
+        )
+    )
+
+
 def _build_priority_summary(msg_type: str, text: str, account_prefix: str) -> str:
     content = _strip_account_prefix(text)
     lines = _clean_message_lines(content)
@@ -4227,21 +4247,31 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
 
     if sub_cmd == "list":
         models = user_ctx.config.ai.get("models", {})
-        msg = "**可用模型列表**\n"
+        entries = []
         idx = 1
         current_model_id = rt.get("current_model_id", "")
         
         for k, m in models.items():
             if m.get("enabled", True):
-                status = "✅"
-                current = "👈 当前" if m.get('model_id') == current_model_id else ""
-                msg += f"{idx}. `{m.get('model_id', 'unknown')}` {status} {current}\n"
+                current = "（当前）" if m.get('model_id') == current_model_id else ""
+                entries.append(f"{idx}. `{m.get('model_id', 'unknown')}` {current}".strip())
                 idx += 1
-        await event.reply(msg)
+        await _reply_ops_card(
+            event,
+            "🤖 可用模型列表",
+            summary="以下是当前账号可用的模型。",
+            fields=[("模型", "\n".join(entries) if entries else "暂无可用模型")],
+            action="切换模型可执行 `model select <编号或ID>`。",
+        )
         
     elif sub_cmd in ["select", "use", "switch"]:
         if len(args) < 2:
-            await event.reply("请指定模型ID或编号，例如: `model select 1` 或 `model select qwen3-coder-plus`")
+            await _reply_ops_card(
+                event,
+                "❌ 缺少模型目标",
+                summary="当前没有提供要切换的模型编号或 ID。",
+                action="请执行 `model select 1` 或 `model select qwen3-coder-plus`。",
+            )
             return
             
         target_id = args[1]
@@ -4254,32 +4284,56 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
             if 1 <= idx <= len(enabled_models):
                 target_id = enabled_models[idx-1].get('model_id', '')
             else:
-                await event.reply(f"❌ 编号 {idx} 无效")
+                await _reply_ops_card(
+                    event,
+                    "❌ 模型编号无效",
+                    summary=f"编号 {idx} 不在当前可选范围内。",
+                    action="请先执行 `model list` 查看可用编号。",
+                )
                 return
         
         # 验证模型是否存在
         model_exists = any(m.get('model_id') == target_id for m in models.values() if m.get("enabled"))
         if not model_exists:
-            await event.reply(f"❌ 模型 `{target_id}` 不存在或未启用")
+            await _reply_ops_card(
+                event,
+                "❌ 模型不可用",
+                summary=f"模型 `{target_id}` 不存在或当前未启用。",
+                action="请先执行 `model list` 确认可用模型。",
+            )
             return
             
-        await event.reply(f"🔄 正在切换模型 `{target_id}`...")
+        await _reply_ops_card(
+            event,
+            "🔄 正在切换模型",
+            summary="系统正在切换默认模型。",
+            fields=[("目标模型", f"`{target_id}`")],
+            action="请等待切换结果返回。",
+        )
         
         # 切换模型
         rt["current_model_id"] = target_id
         user_ctx.save_state()
         
-        success_msg = (
-            f"✅ **模型切换成功**\n"
-            f"🤖 **当前模型**: `{target_id}`\n"
-            f"🔗 **连接状态**: 🟢 正常\n"
-            "📌 **后续新局**: 将使用这个模型继续判断"
+        success_msg = _build_ops_card(
+            "✅ 模型切换成功",
+            summary="后续新局会使用这个模型继续判断。",
+            fields=[
+                ("当前模型", f"`{target_id}`"),
+                ("连接状态", "正常"),
+            ],
+            action="建议等待下一局生效，或执行 `status` 查看当前概览。",
         )
         await event.reply(success_msg)
         log_event(logging.INFO, 'model', '切换模型', user_id=user_ctx.user_id, model=target_id)
             
     elif sub_cmd == "reload":
-        await event.reply("🔄 重新加载模型配置...")
+        await _reply_ops_card(
+            event,
+            "🔄 重新加载模型配置",
+            summary="系统正在重新读取当前账号的模型配置。",
+            action="请等待结果返回。",
+        )
         try:
             user_ctx.reload_user_config()
             model_mgr = user_ctx.get_model_manager()
@@ -4292,12 +4346,30 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
                 if model.get("enabled", True)
             )
             log_event(logging.INFO, 'model', '重新加载模型', user_id=user_ctx.user_id, enabled=enabled_count)
-            await event.reply(f"✅ 模型配置已重新加载（可用模型：{enabled_count}）")
+            await _reply_ops_card(
+                event,
+                "✅ 模型配置已重新加载",
+                summary="模型配置刷新完成。",
+                fields=[("可用模型", enabled_count)],
+                action="如需切换，请执行 `model select <编号或ID>`。",
+            )
         except Exception as e:
             log_event(logging.ERROR, 'model', '重载模型配置失败', user_id=user_ctx.user_id, error=str(e))
-            await event.reply(f"❌ 模型配置重载失败：{str(e)[:120]}")
+            await _reply_ops_card(
+                event,
+                "❌ 模型配置重载失败",
+                summary="本次重载没有完成。",
+                fields=[("错误", str(e)[:120])],
+                action="建议检查账号配置文件后再重试。",
+            )
     else:
-        await event.reply("未知命令。用法:\n`model list`\n`model select <id>`\n`model reload`")
+        await _reply_ops_card(
+            event,
+            "❓ 未知模型命令",
+            summary="当前子命令无法识别。",
+            fields=[("用法", "`model list`\n`model select <id>`\n`model reload`")],
+            action="建议先执行 `model list` 查看当前可用模型。",
+        )
 
 
 async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
@@ -4309,26 +4381,43 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
 
     if sub_cmd in ("show", "list", "ls"):
         if not keys:
-            await event.reply(
-                "当前未配置任何 AI key。\n"
-                "请执行：`apikey set <新key>`"
+            await _reply_ops_card(
+                event,
+                "🔐 当前未配置 AI key",
+                summary="当前账号还没有可用的模型密钥。",
+                action="请执行 `apikey set <新key>`。",
             )
             return
-        lines = ["🔐 当前账号 AI key 列表（已脱敏）"]
+        lines = []
         for idx, key in enumerate(keys, 1):
             lines.append(f"{idx}. `{_mask_api_key(key)}`")
-        lines.append("\n用法：`apikey set <key>` / `apikey add <key>` / `apikey del <序号>` / `apikey test`")
-        await event.reply("\n".join(lines))
+        await _reply_ops_card(
+            event,
+            "🔐 当前账号 AI key 列表",
+            summary="已按脱敏方式展示，避免在聊天窗口泄露完整 key。",
+            fields=[("Key", "\n".join(lines))],
+            action="可执行 `apikey set` / `apikey add` / `apikey del` / `apikey test`。",
+        )
         return
 
     if sub_cmd in ("set", "add"):
         if len(args) < 2:
-            await event.reply(f"用法：`apikey {sub_cmd} <新key>`")
+            await _reply_ops_card(
+                event,
+                "❌ 缺少 key 参数",
+                summary="当前没有提供新的 key。",
+                action=f"请执行 `apikey {sub_cmd} <新key>`。",
+            )
             return
 
         new_key = str(args[1]).strip()
         if not new_key:
-            await event.reply("❌ key 不能为空")
+            await _reply_ops_card(
+                event,
+                "❌ key 不能为空",
+                summary="当前输入的 key 为空。",
+                action=f"请重新执行 `apikey {sub_cmd} <新key>`。",
+            )
             return
 
         if sub_cmd == "set":
@@ -4336,7 +4425,12 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
         else:
             updated_keys = list(keys)
             if new_key in updated_keys:
-                await event.reply("⚠️ 该 key 已存在，无需重复添加")
+                await _reply_ops_card(
+                    event,
+                    "⚠️ 无需重复添加",
+                    summary="该 key 已经存在于当前账号配置中。",
+                    action="如需覆盖全部 key，请使用 `apikey set <新key>`。",
+                )
                 return
             updated_keys.append(new_key)
 
@@ -4349,28 +4443,54 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             user_ctx.save_state()
             model_mgr = user_ctx.get_model_manager()
             model_mgr.load_models()
-            await event.reply(
-                f"✅ AI key 已更新并写入配置\n"
-                f"文件：`{os.path.basename(config_path)}`\n"
-                f"当前 key 数量：{len(updated_keys)}"
+            await _reply_ops_card(
+                event,
+                "✅ AI key 已更新",
+                summary="新的 key 已写入配置并重新加载。",
+                fields=[
+                    ("文件", f"`{os.path.basename(config_path)}`"),
+                    ("当前 key 数量", len(updated_keys)),
+                ],
+                action="如需确认可用性，建议继续执行 `apikey test`。",
             )
         except Exception as e:
             log_event(logging.ERROR, 'apikey', '写入 key 失败', user_id=user_ctx.user_id, error=str(e))
-            await event.reply(f"❌ 更新失败：{str(e)[:160]}")
+            await _reply_ops_card(
+                event,
+                "❌ AI key 更新失败",
+                summary="本次写入配置没有完成。",
+                fields=[("错误", str(e)[:160])],
+                action="建议检查配置文件权限后再重试。",
+            )
         return
 
     if sub_cmd in ("del", "rm", "remove"):
         if len(args) < 2:
-            await event.reply("用法：`apikey del <序号>`")
+            await _reply_ops_card(
+                event,
+                "❌ 缺少删除序号",
+                summary="当前没有提供要删除的 key 序号。",
+                action="请执行 `apikey del <序号>`。",
+            )
             return
         try:
             idx = int(str(args[1]).strip())
         except ValueError:
-            await event.reply("❌ 序号必须是整数")
+            await _reply_ops_card(
+                event,
+                "❌ 序号格式错误",
+                summary="删除序号必须是整数。",
+                action="请执行 `apikey del <序号>`。",
+            )
             return
 
         if idx < 1 or idx > len(keys):
-            await event.reply(f"❌ 序号超出范围，当前 key 数量：{len(keys)}")
+            await _reply_ops_card(
+                event,
+                "❌ 序号超出范围",
+                summary=f"当前 key 数量只有 {len(keys)} 个。",
+                action="请先执行 `apikey show` 查看当前序号。",
+            )
             return
 
         updated_keys = list(keys)
@@ -4383,14 +4503,25 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             if not updated_keys:
                 _mark_ai_key_issue(rt, "管理员删除了全部 key")
             user_ctx.save_state()
-            await event.reply(
-                f"✅ 已删除第 {idx} 个 key 并写入配置\n"
-                f"文件：`{os.path.basename(config_path)}`\n"
-                f"剩余 key 数量：{len(updated_keys)}"
+            await _reply_ops_card(
+                event,
+                "✅ AI key 已删除",
+                summary=f"第 {idx} 个 key 已从当前账号配置中移除。",
+                fields=[
+                    ("文件", f"`{os.path.basename(config_path)}`"),
+                    ("剩余 key 数量", len(updated_keys)),
+                ],
+                action="如需确认当前可用 key，请执行 `apikey show`。",
             )
         except Exception as e:
             log_event(logging.ERROR, 'apikey', '删除 key 失败', user_id=user_ctx.user_id, error=str(e))
-            await event.reply(f"❌ 删除失败：{str(e)[:160]}")
+            await _reply_ops_card(
+                event,
+                "❌ AI key 删除失败",
+                summary="本次删除没有完成。",
+                fields=[("错误", str(e)[:160])],
+                action="建议检查配置文件权限后再重试。",
+            )
         return
 
     if sub_cmd in ("test", "check"):
@@ -4400,32 +4531,47 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             if result.get("success"):
                 _clear_ai_key_issue(rt)
                 user_ctx.save_state()
-                await event.reply(
-                    f"✅ 模型测试成功\n"
-                    f"模型：`{model_id}`\n"
-                    f"延迟：{result.get('latency', '-') }ms"
+                await _reply_ops_card(
+                    event,
+                    "✅ 模型测试成功",
+                    summary="当前模型连通性正常，可继续使用。",
+                    fields=[
+                        ("模型", f"`{model_id}`"),
+                        ("延迟", f"{result.get('latency', '-')}ms"),
+                    ],
+                    action="如需切换，请执行 `model select <编号或ID>`。",
                 )
             else:
                 err = str(result.get("error", "unknown"))
                 if _looks_like_ai_key_issue(err):
                     _mark_ai_key_issue(rt, err)
                     user_ctx.save_state()
-                await event.reply(
-                    f"❌ 模型测试失败\n"
-                    f"模型：`{model_id}`\n"
-                    f"错误：{err[:180]}"
+                await _reply_ops_card(
+                    event,
+                    "❌ 模型测试失败",
+                    summary="当前模型未通过可用性检测。",
+                    fields=[
+                        ("模型", f"`{model_id}`"),
+                        ("错误", err[:180]),
+                    ],
+                    action="建议先检查 key 或网络，再重新执行 `apikey test`。",
                 )
         except Exception as e:
-            await event.reply(f"❌ 测试失败：{str(e)[:180]}")
+            await _reply_ops_card(
+                event,
+                "❌ 模型测试失败",
+                summary="测试过程中发生异常。",
+                fields=[("错误", str(e)[:180])],
+                action="建议稍后重试；若持续失败，可检查配置或网络。",
+            )
         return
 
-    await event.reply(
-        "未知命令。用法：\n"
-        "`apikey show`\n"
-        "`apikey set <key>`\n"
-        "`apikey add <key>`\n"
-        "`apikey del <序号>`\n"
-        "`apikey test`"
+    await _reply_ops_card(
+        event,
+        "❓ 未知 key 命令",
+        summary="当前子命令无法识别。",
+        fields=[("用法", "`apikey show`\n`apikey set <key>`\n`apikey add <key>`\n`apikey del <序号>`\n`apikey test`")],
+        action="建议先执行 `apikey show` 查看当前状态。",
     )
 
 
@@ -4795,14 +4941,25 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                         raise ValueError
                     rt["warning_lose_count"] = warning_count
                     user_ctx.save_state()
-                    mes = f"连输告警阈值已设置为: {warning_count} 次"
+                    mes = _build_ops_card(
+                        "✅ 连输告警阈值已更新",
+                        summary="后续达到该连输次数时，系统会发出高优提醒。",
+                        fields=[("当前阈值", f"{warning_count} 次")],
+                        action="建议结合 `status` 观察当前链路压力。",
+                    )
                     log_event(logging.INFO, 'user_cmd', '设置连输告警阈值', user_id=user_ctx.user_id, warning_lose_count=warning_count)
                 except ValueError:
-                    mes = "❌ 参数错误：阈值必须是 >= 1 的整数。用法: warn <次数>"
+                    mes = _build_ops_card(
+                        "❌ 告警阈值设置失败",
+                        summary="阈值必须是大于等于 1 的整数。",
+                        action="请执行 `warn <次数>` 或 `wlc <次数>`。",
+                    )
             else:
-                mes = (
-                    f"当前连输告警阈值: {rt.get('warning_lose_count', 3)} 次\n"
-                    "用法: warn <次数> 或 wlc <次数>"
+                mes = _build_ops_card(
+                    "📌 当前连输告警阈值",
+                    summary="这是当前账号触发连输告警的阈值。",
+                    fields=[("当前阈值", f"{rt.get('warning_lose_count', 3)} 次")],
+                    action="如需调整，请执行 `warn <次数>` 或 `wlc <次数>`。",
                 )
             message = await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -4990,7 +5147,11 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     rt["risk_deep_triggered_milestones"] = []
                     _clear_lose_recovery_tracking(rt)
                     user_ctx.save_state()
-                    mes = "统计数据已重置"
+                    mes = _build_ops_card(
+                        "✅ 统计数据已重置",
+                        summary="收益、胜率和计数类统计已经清空。",
+                        action="建议执行 `status` 查看当前状态是否符合预期。",
+                    )
                     log_event(logging.INFO, 'user_cmd', '重置统计数据', user_id=user_ctx.user_id, action='completed')
                 elif my[1] == "state":
                     # 重置状态
@@ -5015,7 +5176,11 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     rt["risk_deep_triggered_milestones"] = []
                     _clear_lose_recovery_tracking(rt)
                     user_ctx.save_state()
-                    mes = "状态文件已重置"
+                    mes = _build_ops_card(
+                        "✅ 状态文件已重置",
+                        summary="历史、统计和运行态已清空到初始状态。",
+                        action="如需重新开始，建议先执行 `st <预设名>`。",
+                    )
                     log_event(logging.INFO, 'user_cmd', '重置状态文件', user_id=user_ctx.user_id, action='completed')
                 elif my[1] == "bet":
                     # 重置押注策略
@@ -5042,13 +5207,26 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     rt["risk_deep_triggered_milestones"] = []
                     _clear_lose_recovery_tracking(rt)
                     user_ctx.save_state()
-                    mes = f"押注策略已重置: 初始金额={rt.get('initial_amount', 500)}"
+                    mes = _build_ops_card(
+                        "✅ 押注策略已重置",
+                        summary="当前连押链路已清空，后续会按首注重新开始。",
+                        fields=[("初始金额", rt.get('initial_amount', 500))],
+                        action="建议执行 `status` 确认当前状态，再等待下一次盘口。",
+                    )
                     log_event(logging.INFO, 'user_cmd', '重置押注策略', user_id=user_ctx.user_id, action='completed')
                 else:
-                    mes = "无效命令，正确格式：res tj 或 res state 或 res bet"
+                    mes = _build_ops_card(
+                        "❌ 重置命令无效",
+                        summary="当前重置类型无法识别。",
+                        action="可用命令：`res tj`、`res state`、`res bet`。",
+                    )
                     log_event(logging.WARNING, 'user_cmd', '无效重置命令', user_id=user_ctx.user_id, cmd=text)
             else:
-                mes = "请指定重置类型：res tj / res state / res bet"
+                mes = _build_ops_card(
+                    "📌 请选择重置类型",
+                    summary="当前没有指定具体要重置的内容。",
+                    action="请执行 `res tj`、`res state` 或 `res bet`。",
+                )
             
             message = await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -5076,11 +5254,29 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 balance = await fetch_balance(user_ctx)
                 rt["account_balance"] = balance
                 user_ctx.save_state()
-                mes = f"账户余额: {format_number(balance)}"
+                mes = _build_ops_card(
+                    "💰 账户余额查询成功",
+                    summary="余额已刷新到当前最新值。",
+                    fields=[
+                        ("账户余额", format_number(balance)),
+                        ("菠菜资金", format_number(rt.get("gambling_fund", 0))),
+                    ],
+                    action="如需继续操作，建议再执行 `status` 查看完整概览。",
+                )
                 await send_to_admin(client, mes, user_ctx, global_config)
                 log_event(logging.INFO, 'user_cmd', '查询余额', user_id=user_ctx.user_id, balance=balance)
             except Exception as e:
-                await send_to_admin(client, f"查询余额失败: {str(e)}", user_ctx, global_config)
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "❌ 账户余额查询失败",
+                        summary="本次没有成功获取最新余额。",
+                        fields=[("错误", str(e)[:180])],
+                        action="建议稍后重试；若持续失败，请检查 Cookie 或网络状态。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
             return
         
         # ========== 预设管理命令 ==========
@@ -5151,16 +5347,34 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     if mode in mode_names:
                         rt["bet_mode"] = mode
                         user_ctx.save_state()
-                        mes = f"模式已切换: {mode_names[mode]} ({mode})"
+                        mes = _build_ops_card(
+                            "✅ 模式切换成功",
+                            summary="后续会按新的下注模式继续运行。",
+                            fields=[("当前模式", f"{mode_names[mode]} ({mode})")],
+                            action="建议执行 `status` 确认当前状态。",
+                        )
                         log_event(logging.INFO, 'user_cmd', '切换模式', user_id=user_ctx.user_id, mode=mode)
                     else:
-                        mes = "无效模式: 0=反投, 1=预测, 2=追投"
+                        mes = _build_ops_card(
+                            "❌ 模式切换失败",
+                            summary="当前模式值无效。",
+                            action="可选模式：`0=反投`、`1=预测`、`2=追投`。",
+                        )
                 except ValueError:
-                    mes = "模式必须是数字: 0, 1, 或 2"
+                    mes = _build_ops_card(
+                        "❌ 模式切换失败",
+                        summary="模式参数必须是数字。",
+                        action="请执行 `ms 0`、`ms 1` 或 `ms 2`。",
+                    )
             else:
                 current_mode = rt.get("bet_mode", 1)
                 mode_names = {0: "反投", 1: "预测", 2: "追投"}
-                mes = f"当前模式: {mode_names.get(current_mode, '未知')} ({current_mode})\n用法: ms [0|1|2]"
+                mes = _build_ops_card(
+                    "📌 当前下注模式",
+                    summary="这是当前账号使用的下注模式。",
+                    fields=[("当前模式", f"{mode_names.get(current_mode, '未知')} ({current_mode})")],
+                    action="如需切换，请执行 `ms [0|1|2]`。",
+                )
             
             message = await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -5172,12 +5386,19 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         # users - 查看所有用户
         if cmd == "users":
             # 获取当前用户信息
-            user_info = f"👤 当前用户: {user_ctx.config.name} (ID: {user_ctx.user_id})\n"
-            user_info += f"💰 菠菜资金: {format_number(rt.get('gambling_fund', 0))}\n"
-            user_info += f"📊 状态: {get_bet_status_text(rt)}\n"
-            user_info += f"🎯 预设: {rt.get('current_preset_name', '无')}\n"
-            user_info += f"🤖 模型: {rt.get('current_model_id', 'default')}\n"
-            user_info += f"📈 胜率: {rt.get('win_total', 0)}/{rt.get('total', 0)}"
+            user_info = _build_ops_card(
+                "👤 当前用户信息",
+                summary="以下是当前账号的核心运行信息。",
+                fields=[
+                    ("账号", f"{user_ctx.config.name} (ID: {user_ctx.user_id})"),
+                    ("菠菜资金", format_number(rt.get('gambling_fund', 0))),
+                    ("状态", get_bet_status_text(rt)),
+                    ("预设", rt.get('current_preset_name', '无')),
+                    ("模型", rt.get('current_model_id', 'default')),
+                    ("胜率", f"{rt.get('win_total', 0)}/{rt.get('total', 0)}"),
+                ],
+                action="如果需要更完整的运行态，请执行 `status`。",
+            )
             message = await send_to_admin(client, user_info, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             if message:

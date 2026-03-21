@@ -1858,6 +1858,78 @@ def test_process_user_command_explain_returns_last_logic_audit(tmp_path, monkeyp
     assert '"prediction": 1' in sent_messages[-1]
 
 
+def test_process_user_command_balance_uses_ops_card(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "balance_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "余额用户"},
+            "telegram": {"user_id": 70152},
+            "groups": {"admin_chat": 70152},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.state.runtime["gambling_fund"] = 456000
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70152, id=len(sent_messages))
+
+    async def fake_fetch_balance(user_ctx):
+        return 1234000
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "fetch_balance", fake_fetch_balance)
+
+    event = SimpleNamespace(raw_text="balance", chat_id=70152, id=9)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert sent_messages
+    assert "账户余额查询成功" in sent_messages[-1]
+    assert "账户余额：1,234,000" in sent_messages[-1]
+    assert "菠菜资金：456,000" in sent_messages[-1]
+
+
+def test_process_user_command_users_uses_ops_card(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "users_info_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "用户信息用户"},
+            "telegram": {"user_id": 70153},
+            "groups": {"admin_chat": 70153},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["gambling_fund"] = 888000
+    rt["current_preset_name"] = "yc05"
+    rt["current_model_id"] = "model-x"
+    rt["win_total"] = 12
+    rt["total"] = 20
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70153, id=len(sent_messages))
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+
+    event = SimpleNamespace(raw_text="users", chat_id=70153, id=10)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert sent_messages
+    assert "当前用户信息" in sent_messages[-1]
+    assert "账号：用户信息用户 (ID: 70153)" in sent_messages[-1]
+    assert "模型：model-x" in sent_messages[-1]
+    assert "胜率：12/20" in sent_messages[-1]
+
+
 def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5013"
     _write_json(
