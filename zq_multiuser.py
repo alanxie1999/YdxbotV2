@@ -571,17 +571,19 @@ def build_pending_bet_heal_notice(healed_pending: Dict[str, Any], summary: Dict[
     if len(healed_items) > 3:
         fixed_text += " 等"
 
-    lines = [
+    return _build_ops_card(
         "🩹 已修正历史异常挂单",
-        f"修复条数：{healed_count}",
-        f"修复记录：{fixed_text}",
-        f"当前连续押注：{continuous_count} 次",
-        f"当前连输：{lose_count} 次",
-        f"下一手预计下注：{format_number(next_bet_amount)}",
-        "说明：已按真实已结算记录重新对齐状态",
-        "后续动作：脚本会按对齐后的状态继续处理，无需手动重启",
-    ]
-    return "\n".join(lines)
+        summary="检测到历史挂单与当前运行态不一致，系统已自动对齐。",
+        fields=[
+            ("修复条数", healed_count),
+            ("修复记录", fixed_text),
+            ("当前连续押注", f"{continuous_count} 次"),
+            ("当前连输", f"{lose_count} 次"),
+            ("下一手预计下注", format_number(next_bet_amount)),
+        ],
+        action="建议先执行 `status` 确认当前状态，无需手动重启。",
+        note="已按真实已结算记录重新对齐状态。",
+    )
 
 
 def _normalize_ai_keys(ai_cfg: Dict[str, Any]) -> List[str]:
@@ -871,6 +873,19 @@ MESSAGE_ROUTING_TABLE = {
     "error": {"channels": ["admin", "priority"], "priority": True},
 }
 
+MESSAGE_POLICY = {
+    "win": {"level": "P2", "title": "盈利达成", "action": "建议查看 `status`，确认新一轮是否已经开始。"},
+    "explode": {"level": "P1", "title": "炸号提醒", "action": "建议立即查看 `status`，必要时调整参数后再继续。"},
+    "lose_streak": {"level": "P1", "title": "连输告警", "action": "建议立即查看 `status`，如需止损可执行 `pause`。"},
+    "lose_end": {"level": "P2", "title": "连输恢复", "action": "建议关注是否已回到首注，再观察下一次盘口。"},
+    "fund_pause": {"level": "P1", "title": "资金暂停", "action": "如需恢复，请执行 `gf 金额` 后再用 `status` 确认。"},
+    "goal_pause": {"level": "P1", "title": "目标暂停", "action": "建议等待倒计时结束，或用 `status` 查看剩余暂停局数。"},
+    "risk_pause": {"level": "P2", "title": "风控暂停", "action": "建议观察盘面，等待倒计时结束后再继续。"},
+    "risk_summary": {"level": "P3", "title": "风控总结", "action": "建议作为复盘信息阅读，不需要立即处理。"},
+    "warning": {"level": "P2", "title": "提醒", "action": "建议查看详情，确认是否需要人工介入。"},
+    "error": {"level": "P1", "title": "异常提醒", "action": "建议立即查看 `status`，必要时执行 `restart`。"},
+}
+
 
 def _strip_account_prefix(text: str) -> str:
     """管理员消息统一移除账号前缀，与 master 行为一致。"""
@@ -884,6 +899,52 @@ def _strip_account_prefix(text: str) -> str:
     if len(lines) <= 1:
         return ""
     return "\n".join(lines[1:]).lstrip("\n")
+
+
+def _clean_message_lines(text: str) -> List[str]:
+    return [line.strip() for line in str(text or "").splitlines() if line.strip()]
+
+
+def _build_ops_card(
+    title: str,
+    *,
+    summary: str = "",
+    fields: Optional[List[tuple[str, Any]]] = None,
+    action: str = "",
+    note: str = "",
+) -> str:
+    lines = [str(title or "").strip()]
+    if summary:
+        lines.extend(["", f"结论：{summary}"])
+    for label, value in fields or []:
+        if value in (None, ""):
+            continue
+        lines.append(f"{label}：{value}")
+    if action:
+        lines.extend(["", f"建议动作：{action}"])
+    if note:
+        lines.extend(["", f"补充说明：{note}"])
+    return "\n".join(lines).strip()
+
+
+def _build_priority_summary(msg_type: str, text: str, account_prefix: str) -> str:
+    content = _strip_account_prefix(text)
+    lines = _clean_message_lines(content)
+    policy = MESSAGE_POLICY.get(msg_type, {})
+    level = policy.get("level", "P2")
+    title = policy.get("title", msg_type)
+    action = policy.get("action", "")
+
+    summary_lines: List[str] = [account_prefix, f"[{level}] {title}"]
+    picked = 0
+    for line in lines:
+        if picked >= 3:
+            break
+        summary_lines.append(line)
+        picked += 1
+    if action:
+        summary_lines.append(f"建议：{action}")
+    return "\n".join(summary_lines)
 
 
 def _ensure_account_prefix(text: str, account_prefix: str) -> str:
@@ -1085,9 +1146,9 @@ async def send_message_v2(
     account_name = user_ctx.config.name.strip()
     account_prefix = f"【账号：{account_name}】"
     admin_message = _strip_account_prefix(message)
-    # 重点通道（IYUU/TG Bot）统一带账号前缀；管理员通道统一不带前缀。
-    priority_message = _ensure_account_prefix(message, account_prefix)
-    priority_desp = _ensure_account_prefix(desp if desp is not None else message, account_prefix)
+    # 重点通道发送摘要版，管理员通道保留完整版。
+    priority_message = _build_priority_summary(msg_type, message, account_prefix)
+    priority_desp = _build_priority_summary(msg_type, desp if desp is not None else message, account_prefix)
 
     sent_message = None
     admin_chat = None
@@ -2033,11 +2094,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         if not is_fund_available(user_ctx, bet_amount):
             if not rt.get("fund_pause_notified", False):
                 display_fund = max(0, rt.get("gambling_fund", 0))
-                mes = (
-                    f"**菠菜资金不足，已暂停押注**\n"
-                    f"当前剩余：{display_fund / 10000:.2f} 万\n"
-                    "请使用 `gf [金额]` 恢复"
-                )
+                mes = _build_fund_pause_message(display_fund)
                 await send_message_v2(
                     client,
                     "fund_pause",
@@ -3474,14 +3531,23 @@ async def _handle_goal_pause_after_settle(
             1 for entry in state.bet_sequence_log
             if str(entry.get("bet_id", "")).startswith(current_round_str)
         )
-        win_msg = (
-            f"😄📈 {date_str}第 {rt.get('current_round', 1)} 轮 赢了\n"
-            f"收益：{period_profit / 10000:.2f} 万\n"
-            f"共下注：{round_bet_count} 次"
+        win_msg = _build_ops_card(
+            f"😄📈 {date_str}第 {rt.get('current_round', 1)} 轮 赢了",
+            summary="本轮已达到盈利条件，系统会按设定进入暂停观察。",
+            fields=[
+                ("收益", f"{period_profit / 10000:.2f} 万"),
+                ("共下注", f"{round_bet_count} 次"),
+            ],
+            action="建议查看 `status`，确认暂停局数和下一轮状态。",
         )
         await send_message_v2(client, "win", win_msg, user_ctx, global_config)
     else:
-        explode_msg = f"**💥 本轮炸了**\n收益：{period_profit / 10000:.2f} 万"
+        explode_msg = _build_ops_card(
+            "💥 本轮炸了",
+            summary="当前轮次触发炸号保护，系统会立即暂停观察。",
+            fields=[("收益", f"{period_profit / 10000:.2f} 万")],
+            action="建议先看 `status`，确认暂停局数与当前资金状态。",
+        )
         await send_message_v2(client, "explode", explode_msg, user_ctx, global_config)
 
     configured_stop_rounds = int(rt.get("stop", 3) if notify_type == "explode" else rt.get("profit_stop", 5))
@@ -3501,12 +3567,15 @@ async def _handle_goal_pause_after_settle(
     _clear_lose_recovery_tracking(rt)
 
     resume_hint = _build_pause_resume_hint(rt)
-    pause_msg = (
-        f"⛔ {'被炸保护暂停' if notify_type == 'explode' else '盈利达成暂停'} ⛔\n\n"
-        f"原因：{'被炸保护' if notify_type == 'explode' else '盈利达成'}\n"
-        f"本次暂停：{configured_stop_rounds} 局\n"
-        f"暂停期间：保留策略状态，等待倒计时结束\n"
-        f"{resume_hint}"
+    pause_msg = _build_ops_card(
+        f"⛔ {'被炸保护暂停' if notify_type == 'explode' else '盈利达成暂停'} ⛔",
+        summary="系统已进入目标暂停，当前策略状态会被保留，不会重置首注。",
+        fields=[
+            ("原因", "被炸保护" if notify_type == 'explode' else "盈利达成"),
+            ("本次暂停", f"{configured_stop_rounds} 局"),
+            ("恢复提示", resume_hint),
+        ],
+        action="建议等待倒计时结束，或执行 `status` 查看剩余暂停局数。",
     )
     log_event(
         logging.INFO,
@@ -3680,12 +3749,16 @@ def generate_mobile_bet_report(
 ) -> str:
     streak_len, streak_side = _get_current_streak(history)
     bet_label = format_bet_id(bet_id) if bet_id else "本次"
-    return (
-        f"🎯 **{bet_label}押注执行** 🎯\n\n"
-        f"😀 连续押注：{sequence_count} 次\n"
-        f"⚡ 押注方向：{direction}\n"
-        f"💵 押注本金：{format_number(amount)}\n"
-        f"📊 当前连{streak_side}：{streak_len}"
+    return _build_ops_card(
+        f"🎯 **{bet_label}押注执行** 🎯",
+        summary="本局下注指令已发送，等待结算结果回写。",
+        fields=[
+            ("😀 连续押注", f"{sequence_count} 次"),
+            ("⚡ 押注方向", direction),
+            ("💵 押注本金", format_number(amount)),
+            (f"📊 当前连{streak_side}", streak_len),
+        ],
+        action="本局无需额外操作，建议等待结果通知。",
     )
 
 
@@ -3720,6 +3793,18 @@ def generate_mobile_pause_report(
         ]
     )
     return "\n".join(lines)
+
+
+def _build_fund_pause_message(current_fund: int) -> str:
+    return _build_ops_card(
+        "⛔ 菠菜资金不足，已暂停押注",
+        summary="当前资金无法覆盖下一手下注，系统已自动暂停以避免继续扩大风险。",
+        fields=[
+            ("当前剩余", f"{max(0, int(current_fund or 0)) / 10000:.2f} 万"),
+            ("恢复方式", "`gf [金额]`"),
+        ],
+        action="补充资金后，建议先执行 `status`，确认状态正常再继续。",
+    )
 
 
 async def _process_settle_slim(client, event, user_ctx: UserContext, global_config: dict):
@@ -3765,11 +3850,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 if not is_fund_available(user_ctx, next_bet_amount):
                     if not rt.get("fund_pause_notified", False):
                         display_fund = max(0, rt.get("gambling_fund", 0))
-                        mes = (
-                            f"**菠菜资金不足，已暂停押注**\n"
-                            f"当前剩余：{display_fund / 10000:.2f} 万\n"
-                            "请使用 `gf [金额]` 恢复"
-                        )
+                        mes = _build_fund_pause_message(display_fund)
                         await send_message_v2(
                             client,
                             "fund_pause",
@@ -3842,16 +3923,20 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 if rt.get("lose_count", 0) >= warning_lose_count:
                     rt["lose_notify_pending"] = True
                     total_losses = int(active_chain_summary.get("total_losses", abs(profit)))
-                    warn_msg = (
-                        f"⚠️ {int(rt.get('lose_count', 0))} 连输告警 ⚠️\n\n"
-                        f"🔢 {datetime.now().strftime('%m月%d日')} 第 {settle_round} 轮第 {settle_seq} 次\n"
-                        f"📋 预设名称：{rt.get('current_preset_name', 'none')}\n"
-                        f"😀 连续押注：{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次\n"
-                        f"⚡ 押注方向：{direction}\n"
-                        f"💵 押注本金：{format_number(bet_amount)}\n"
-                        f"💰 累计损失：{format_number(total_losses)}\n"
-                        f"💰 账户余额：{rt.get('account_balance', 0) / 10000:.2f} 万\n"
-                        f"💰 菠菜余额：{rt.get('gambling_fund', 0) / 10000:.2f} 万"
+                    warn_msg = _build_ops_card(
+                        f"⚠️ {int(rt.get('lose_count', 0))} 连输告警 ⚠️",
+                        summary="当前链路已进入高关注状态，请重点关注下一手与账户余额变化。",
+                        fields=[
+                            ("🔢 时间", f"{datetime.now().strftime('%m月%d日')} 第 {settle_round} 轮第 {settle_seq} 次"),
+                            ("📋 预设名称", rt.get('current_preset_name', 'none')),
+                            ("😀 连续押注", f"{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次"),
+                            ("⚡ 押注方向", direction),
+                            ("💵 押注本金", format_number(bet_amount)),
+                            ("💰 累计损失", format_number(total_losses)),
+                            ("💰 账户余额", f"{rt.get('account_balance', 0) / 10000:.2f} 万"),
+                            ("💰 菠菜余额", f"{rt.get('gambling_fund', 0) / 10000:.2f} 万"),
+                        ],
+                        action="建议立即查看 `status`；如不准备继续，可直接执行 `pause`。",
                     )
                     if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
                         await cleanup_message(client, user_ctx.lose_streak_message)
@@ -3904,13 +3989,19 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
             bet_id = format_bet_id(last_bet_id) if last_bet_id else f"{datetime.now().strftime('%m月%d日')}第 {rt.get('current_round', 1)} 轮第 {rt.get('current_bet_seq', 1)} 次"
             settle_sequence_count = int(recent_resolved_summary.get("continuous_count", rt.get("bet_sequence_count", 0)))
 
-            mes = f"🔢 {bet_id}押注结果 🔢\n\n"
-            mes += f"😀 连续押注：{settle_sequence_count} 次\n"
-            mes += f"⚡ 押注方向：{direction}\n"
-            mes += f"💵 押注本金：{format_number(bet_amount)}\n"
-            mes += f"📉 输赢结果：{result_text} {result_amount}\n"
-            mes += f"🎲 开奖结果：{result_type}\n"
-            mes += f"🤖 预测依据：{rt.get('last_predict_info', 'N/A')}"
+            mes = _build_ops_card(
+                f"🔢 {bet_id}押注结果 🔢",
+                summary="本局已完成结算，状态和资金已同步更新。",
+                fields=[
+                    ("😀 连续押注", f"{settle_sequence_count} 次"),
+                    ("⚡ 押注方向", direction),
+                    ("💵 押注本金", format_number(bet_amount)),
+                    ("📉 输赢结果", f"{result_text} {result_amount}"),
+                    ("🎲 开奖结果", result_type),
+                    ("🤖 预测依据", rt.get('last_predict_info', 'N/A')),
+                ],
+                action="如需继续观察，等待下一次盘口；如需复核当前状态，请执行 `status`。",
+            )
             await send_to_admin(client, mes, user_ctx, global_config)
 
             if win or rt.get("lose_count", 0) >= rt.get("lose_stop", 13):
@@ -3986,15 +4077,19 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_seq} 次"
             else:
                 range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_round} 轮第 {end_seq} 次"
-            rec_msg = (
-                f"✅ {lose_count} 连输已终止！ ✅\n\n"
-                f"🔢 时间：{range_text}\n"
-                f"📋 预设名称：{rt.get('current_preset_name', 'none')}\n"
-                f"😀 连续押注：{lose_end_payload.get('continuous_count', lose_count)} 次\n"
-                f"⚠️本局连输： {lose_count} 次\n"
-                f"💰 本局盈利： {format_number(lose_end_payload.get('total_profit', 0))}\n"
-                f"💰 账户余额：{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万\n"
-                f"💰 菠菜资金剩余：{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"
+            rec_msg = _build_ops_card(
+                f"✅ {lose_count} 连输已终止！ ✅",
+                summary="本轮回补已经结束，系统已回写收益与当前余额。",
+                fields=[
+                    ("🔢 时间", range_text),
+                    ("📋 预设名称", rt.get('current_preset_name', 'none')),
+                    ("😀 连续押注", f"{lose_end_payload.get('continuous_count', lose_count)} 次"),
+                    ("⚠️本局连输", f" {lose_count} 次"),
+                    ("💰 本局盈利", f" {format_number(lose_end_payload.get('total_profit', 0))}"),
+                    ("💰 账户余额", f"{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万"),
+                    ("💰 菠菜资金剩余", f"{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"),
+                ],
+                action="建议关注是否已回到首注，并继续观察下一次盘口。",
             )
             if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
                 await cleanup_message(client, user_ctx.lose_streak_message)
@@ -4291,54 +4386,21 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
     try:
         # ========== help命令 ==========
         if cmd == "help":
-            mes = """**️ 命令列表 (Commands)**
-
-**基础控制（推荐）**
-- `st [预设名]` : 启动预设并进入可下注状态 (例: `st yc10`)
-- `pause` : 仅暂停当前账号押注（不影响其他账号）
-- `resume` : 恢复当前账号押注
-- `open/off` : 兼容旧命令（分别等同 `resume/pause`）
-
-**参数设置**
-- `gf [金额]` : 设置本金 (例: `gf 1000000`)
-- `set [炸] [赢] [停] [盈停]` : 设置风控参数
-  (例: `set 5 1000000 3 5` -> 炸5次, 赢100w, 停3局, 盈停5局)
-- `warn [次数]` : 设置连输告警阈值 (例: `warn 2`)
-- `wlc [次数]` : `warn` 的简写命令
-
-**模型与策略**
-- `model [list|select|reload]` : 模型管理 (例: `model select 1`)
-- `apikey [show|set|add|del|test]` : 管理当前账号 AI key (`ak` 同义)
-- `ms [模式]` : 切换模式 (0:反投, 1:预测, 2:追投)
-
-**测算功能**
-- `yc [预设名]` : 测算预设策略盈利 (例: `yc yc05`)
-- `yc [参数...]` : 自定义参数测算 (例: `yc 1 13 3 2.1 2.1 2.05 500`)
-
-**数据管理**
-- `res tj` : 重置统计数据
-- `res state` : 清空历史与状态
-- `res bet` : 重置押注策略
-- `explain` : 查看最近一次模型判断依据
-- `stats` : 查看连大、连小、连输统计
-- `balance` : 查询账户余额
-- `xx` : 清理配置群中“我发送的消息”
-
-**发布更新**
-- `ver` : 查看版本概览（最近3个Tag + 最近3个Commit）
-- `update [版本|提交]` : 更新到指定版本（留空默认最新）
-- `reback [版本|提交]` : 回退到指定版本
-- `restart` : 重启当前进程
-
-**预设管理**
-- `ys [名] ...` : 保存预设
-- `yss` : 查看所有预设
-- `yss dl [名]` : 删除预设
-
-**多用户管理**
-- `users` : 查看当前用户状态
-- `status` : 查看仪表盘
-"""
+            mes = _build_ops_card(
+                "📘 命令列表",
+                summary="新手建议先掌握 5 个高频命令：`st`、`status`、`pause`、`resume`、`balance`。",
+                fields=[
+                    ("基础控制", "`st [预设名]` / `pause` / `resume` / `open` / `off`"),
+                    ("参数设置", "`gf [金额]` / `set [炸] [赢] [停] [盈停]` / `warn [次数]` / `wlc [次数]`"),
+                    ("模型与策略", "`model [list|select|reload]` / `apikey [show|set|add|del|test]` / `ms [模式]`"),
+                    ("测算功能", "`yc [预设名]` / `yc [参数...]`"),
+                    ("数据管理", "`res tj` / `res state` / `res bet` / `explain` / `stats` / `balance` / `xx`"),
+                    ("发布更新", "`ver` / `update [版本|提交]` / `reback [版本|提交]` / `restart`"),
+                    ("预设管理", "`ys [名] ...` / `yss` / `yss dl [名]`"),
+                    ("多用户管理", "`users` / `status`"),
+                ],
+                action="如果只是日常使用，优先看 `status`，启动用 `st`，遇到异常先 `pause`。",
+            )
             log_event(logging.INFO, 'user_cmd', '显示帮助', user_id=user_ctx.user_id)
             message = await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -4414,7 +4476,16 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         # pause/resume - 暂停/恢复押注
         if cmd in ("pause", "暂停"):
             if rt.get("manual_pause", False):
-                await send_to_admin(client, "⏸️ 当前账号已是暂停状态 ⏸️", user_ctx, global_config)
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "⏸️ 当前账号已是暂停状态",
+                        summary="系统已处于手动暂停，无需重复执行。",
+                        action="如需继续，请执行 `resume`；如需查看详情，请执行 `status`。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
                 return
             await _clear_pause_countdown_notice(client, user_ctx)
             rt["switch"] = True
@@ -4424,7 +4495,11 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             rt["manual_pause"] = True
             _clear_lose_recovery_tracking(rt)
             user_ctx.save_state()
-            mes = "⏸️ 已暂停当前账号押注 ⏸️"
+            mes = _build_ops_card(
+                "⏸️ 已暂停当前账号押注",
+                summary="当前账号后续不会自动下注，已有状态会被保留。",
+                action="如需恢复，请执行 `resume`；如需查看当前链路，请执行 `status`。",
+            )
             await send_to_admin(client, mes, user_ctx, global_config)
             log_event(logging.INFO, 'user_cmd', '暂停押注', user_id=user_ctx.user_id)
             return
@@ -4437,7 +4512,11 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             rt["mode_stop"] = True
             rt["manual_pause"] = False
             user_ctx.save_state()
-            mes = "▶️ 已恢复当前账号押注 ▶️"
+            mes = _build_ops_card(
+                "▶️ 已恢复当前账号押注",
+                summary="后续会继续等待有效盘口触发，不会立即补发历史下注。",
+                action="建议执行 `status` 确认当前状态，并等待下一次盘口。",
+            )
             await send_to_admin(client, mes, user_ctx, global_config)
             log_event(logging.INFO, 'user_cmd', '恢复押注', user_id=user_ctx.user_id)
             return
@@ -4469,7 +4548,14 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 _clear_lose_recovery_tracking(rt)
                 user_ctx.save_state()
                 
-                mes = f"🎯 预设启动成功: {preset_name} 🎯\n\n策略参数：{preset[0]} {preset[1]} {preset[2]} {preset[3]} {preset[4]} {preset[5]} {preset[6]}"
+                mes = _build_ops_card(
+                    f"🎯 预设启动成功: {preset_name}",
+                    summary="当前账号已经切换到新的预设，后续将按这套参数进入可下注状态。",
+                    fields=[
+                        ("策略参数", f"{preset[0]} {preset[1]} {preset[2]} {preset[3]} {preset[4]} {preset[5]} {preset[6]}"),
+                    ],
+                    action="建议留意本轮自动测算结果，并用 `status` 确认当前状态。",
+                )
                 log_event(logging.INFO, 'user_cmd', '启动预设', user_id=user_ctx.user_id, preset=preset_name)
                 message = await send_to_admin(client, mes, user_ctx, global_config)
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
