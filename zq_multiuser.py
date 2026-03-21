@@ -2222,9 +2222,28 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 await asyncio.sleep(click_interval_sec)
     except Exception as e:
         if _is_invalid_callback_message_error(e):
-            await send_to_admin(client, "本轮下注窗口已失效，已自动跳过。", user_ctx, global_config)
+            await send_to_admin(
+                client,
+                _build_ops_card(
+                    "⏰ 本轮下注窗口已失效",
+                    summary="当前盘口的按钮已经不可用，系统已自动跳过本局。",
+                    action="无需手动补单，建议等待下一次盘口并关注结果通知。",
+                ),
+                user_ctx,
+                global_config,
+            )
         else:
-            await send_to_admin(client, f"押注出错: {e}", user_ctx, global_config)
+            await send_to_admin(
+                client,
+                _build_ops_card(
+                    "❌ 押注执行失败",
+                    summary="本次下注没有执行成功。",
+                    fields=[("错误", str(e)[:180])],
+                    action="建议先执行 `status` 查看当前状态，再决定是否继续。",
+                ),
+                user_ctx,
+                global_config,
+            )
         return
 
     rt["bet"] = True
@@ -4214,7 +4233,17 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
             await send_message_v2(client, "lose_end", rec_msg, user_ctx, global_config)
     except Exception as e:
         log_event(logging.ERROR, 'settle', '结算失败', user_id=user_ctx.user_id, data=str(e))
-        await send_to_admin(client, f"结算出错: {e}", user_ctx, global_config)
+        await send_to_admin(
+            client,
+            _build_ops_card(
+                "❌ 结算处理失败",
+                summary="本次结算回写没有完成。",
+                fields=[("错误", str(e)[:180])],
+                action="建议稍后关注下一条结果；如持续异常，请执行 `status` 或 `restart`。",
+            ),
+            user_ctx,
+            global_config,
+        )
 
 
 async def process_settle(client, event, user_ctx: UserContext, global_config: dict):
@@ -4673,7 +4702,16 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 unique_groups.append(gid)
 
             if not unique_groups:
-                message = await send_to_admin(client, "未配置可清理的群组（zq_group）", user_ctx, global_config)
+                message = await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "⚠️ 未配置可清理群组",
+                        summary="当前账号没有配置 `zq_group`，因此无法执行群消息清理。",
+                        action="如需使用 `xx`，请先在账号配置里补充 `zq_group`。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
                 if message:
                     asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
@@ -4694,12 +4732,17 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     failed_groups.append(f"{gid}: {str(e)[:40]}")
 
             mes = (
-                "群组消息已清理\n"
-                f"扫描群组：{scanned_groups}\n"
-                f"删除消息：{deleted_total}"
+                _build_ops_card(
+                    "🧹 群组消息已清理",
+                    summary="已按当前配置扫描并清理我发送的历史消息。",
+                    fields=[
+                        ("扫描群组", scanned_groups),
+                        ("删除消息", deleted_total),
+                    ],
+                    action="如需再次清理，可重新执行 `xx`。",
+                    note="\n".join(failed_groups[:5]) if failed_groups else "",
+                )
             )
-            if failed_groups:
-                mes += "\n失败群组：\n" + "\n".join(f"- {item}" for item in failed_groups[:5])
 
             log_event(
                 logging.INFO,
@@ -4813,13 +4856,31 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     auto_trigger=True,
                 )
             else:
-                await send_to_admin(client, f"❌❌ 预设不存在 ❌❌\n\n预设名称：{preset_name}", user_ctx, global_config)
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "❌ 预设不存在",
+                        summary=f"当前账号没有找到名为 `{preset_name}` 的预设。",
+                        action="请先执行 `yss` 查看可用预设，或用 `ys` 新建一个预设。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
             return
         
         # stats - 查看连大、连小、连输统计
         if cmd == "stats":
             if len(state.history) < 10:
-                await send_to_admin(client, "历史数据不足，无法生成统计", user_ctx, global_config)
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "📉 暂无法生成统计",
+                        summary="当前历史数据不足 10 局，统计结果参考意义不够。",
+                        action="建议再观察几局后执行 `stats`。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
                 return
             
             windows = [1000, 500, 200, 100]
@@ -4880,24 +4941,51 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             old_fund = rt.get("gambling_fund", 0)
             if len(my) == 1:
                 rt["gambling_fund"] = rt.get("gambling_fund", 2000000)
-                mes = f"菠菜资金已重置为 {rt['gambling_fund'] / 10000:.2f} 万"
+                mes = _build_ops_card(
+                    "✅ 菠菜资金已重置",
+                    summary="当前账号的菠菜资金已恢复为默认值。",
+                    fields=[("当前金额", f"{rt['gambling_fund'] / 10000:.2f} 万")],
+                    action="建议执行 `status` 确认资金与状态是否符合预期。",
+                )
             elif len(my) == 2:
                 try:
                     new_fund = int(my[1])
                     if new_fund < 0:
-                        mes = "菠菜资金不能设置为负数"
+                        mes = _build_ops_card(
+                            "❌ 菠菜资金设置失败",
+                            summary="菠菜资金不能设置为负数。",
+                            action="请执行 `gf [金额]`，金额必须是大于等于 0 的整数。",
+                        )
                     else:
                         account_balance = rt.get("account_balance", 0)
                         if new_fund > account_balance:
                             new_fund = account_balance
-                            mes = f"设置的资金超过账户余额，已调整为 {new_fund / 10000:.2f} 万"
+                            mes = _build_ops_card(
+                                "⚠️ 菠菜资金已自动调整",
+                                summary="输入金额超过当前账户余额，系统已自动压到可用上限。",
+                                fields=[("当前金额", f"{new_fund / 10000:.2f} 万")],
+                                action="建议执行 `balance` 或 `status` 再确认余额状态。",
+                            )
                         else:
-                            mes = f"菠菜资金已设置为 {new_fund / 10000:.2f} 万"
+                            mes = _build_ops_card(
+                                "✅ 菠菜资金已更新",
+                                summary="新的菠菜资金已经写入当前账号状态。",
+                                fields=[("当前金额", f"{new_fund / 10000:.2f} 万")],
+                                action="建议执行 `status` 确认后续下一手金额是否符合预期。",
+                            )
                         rt["gambling_fund"] = new_fund
                 except ValueError:
-                    mes = "无效的金额格式，请输入整数"
+                    mes = _build_ops_card(
+                        "❌ 菠菜资金设置失败",
+                        summary="金额格式无效，必须是整数。",
+                        action="请执行 `gf [金额]`，例如 `gf 1000000`。",
+                    )
             else:
-                mes = "gf 命令格式错误：gf 或 gf [金额]"
+                mes = _build_ops_card(
+                    "❌ 菠菜资金命令格式错误",
+                    summary="当前命令参数数量不正确。",
+                    action="正确用法：`gf` 或 `gf [金额]`。",
+                )
             
             log_event(logging.INFO, 'user_cmd', '设置资金', user_id=user_ctx.user_id, mes=mes)
             message = await send_to_admin(client, mes, user_ctx, global_config)
@@ -4921,7 +5009,17 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 if len(my) > 5:
                     rt["stop_count"] = int(my[5])
                 user_ctx.save_state()
-                mes = f"设置成功: 炸{rt['explode']}次, 盈利{rt['profit']/10000:.2f}万, 暂停{rt['stop']}局, 盈停{rt['profit_stop']}局"
+                mes = _build_ops_card(
+                    "✅ 风控参数已更新",
+                    summary="新的炸号、盈利和暂停参数已经写入当前账号状态。",
+                    fields=[
+                        ("炸号阈值", f"{rt['explode']} 次"),
+                        ("盈利目标", f"{rt['profit']/10000:.2f} 万"),
+                        ("暂停局数", f"{rt['stop']} 局"),
+                        ("盈停局数", f"{rt['profit_stop']} 局"),
+                    ],
+                    action="建议执行 `status` 复核当前参数是否符合预期。",
+                )
                 log_event(logging.INFO, 'user_cmd', '设置参数', user_id=user_ctx.user_id,
                          explode=rt['explode'], profit=rt['profit'], stop=rt['stop'], profit_stop=rt['profit_stop'])
                 message = await send_to_admin(client, mes, user_ctx, global_config)
@@ -4929,7 +5027,28 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 if message:
                     asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
             except ValueError:
-                await send_to_admin(client, "参数格式错误，请输入整数", user_ctx, global_config)
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "❌ 风控参数设置失败",
+                        summary="参数格式无效，当前只支持整数。",
+                        action="请按 `set [炸] [赢] [停] [盈停]` 重新输入。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
+            return
+        if cmd == "set":
+            await send_to_admin(
+                client,
+                _build_ops_card(
+                    "❌ 风控参数设置失败",
+                    summary="当前参数数量不足。",
+                    action="请按 `set [炸] [赢] [停] [盈停]` 重新输入完整参数。",
+                ),
+                user_ctx,
+                global_config,
+            )
             return
 
         # warn/wlc - 设置连输告警阈值 - 与master一致
@@ -5062,7 +5181,16 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         if cmd in ("reback", "rollback", "uprollback"):
             target_ref = my[1].strip() if len(my) > 1 else ""
             if not target_ref:
-                await send_to_admin(client, "用法：`reback <版本号|commit|branch>`", user_ctx, global_config)
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "❌ 缺少回退目标",
+                        summary="当前没有提供要回退到的版本、提交或分支。",
+                        action="请执行 `reback <版本号|commit|branch>`。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
                 return
 
             await send_to_admin(
@@ -5289,14 +5417,41 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 user_ctx.save_presets()
                 rt["current_preset_name"] = preset_name
                 user_ctx.save_state()
-                mes = f"预设保存成功: {preset_name} ({ys[0]} {ys[1]} {ys[2]} {ys[3]} {ys[4]} {ys[5]} {ys[6]})"
+                mes = _build_ops_card(
+                    f"✅ 预设保存成功: {preset_name}",
+                    summary="新的预设参数已经写入当前账号，并设置为当前预设。",
+                    fields=[("策略参数", f"{ys[0]} {ys[1]} {ys[2]} {ys[3]} {ys[4]} {ys[5]} {ys[6]}")],
+                    action=f"建议执行 `st {preset_name}` 或 `status` 确认当前状态。",
+                )
                 log_event(logging.INFO, 'user_cmd', '保存预设策略', user_id=user_ctx.user_id, preset=preset_name, params=ys)
                 message = await send_to_admin(client, mes, user_ctx, global_config)
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
                 if message:
                     asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
             except (ValueError, IndexError) as e:
-                await send_to_admin(client, f"预设格式错误: {e}", user_ctx, global_config)
+                await send_to_admin(
+                    client,
+                    _build_ops_card(
+                        "❌ 预设保存失败",
+                        summary="参数格式不正确，当前预设没有写入。",
+                        fields=[("错误", str(e)[:180])],
+                        action="请按 `ys [名] ...` 的格式重新输入完整参数。",
+                    ),
+                    user_ctx,
+                    global_config,
+                )
+            return
+        if cmd == "ys":
+            await send_to_admin(
+                client,
+                _build_ops_card(
+                    "❌ 预设保存失败",
+                    summary="当前参数数量不足，预设没有写入。",
+                    action="请按 `ys [名] [连续] [停] [倍1] [倍2] [倍3] [倍4] [首注]` 重新输入。",
+                ),
+                user_ctx,
+                global_config,
+            )
             return
         
         # yss - 查看/删除预设 - 与master一致
@@ -5307,10 +5462,18 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 if preset_name in presets:
                     del presets[preset_name]
                     user_ctx.save_presets()
-                    mes = f"预设删除成功: {preset_name}"
+                    mes = _build_ops_card(
+                        f"✅ 预设删除成功: {preset_name}",
+                        summary="该预设已经从当前账号配置中移除。",
+                        action="建议执行 `yss` 再确认剩余预设。",
+                    )
                     log_event(logging.INFO, 'user_cmd', '删除预设', user_id=user_ctx.user_id, preset=preset_name)
                 else:
-                    mes = "删除失败：预设不存在或格式错误"
+                    mes = _build_ops_card(
+                        "❌ 预设删除失败",
+                        summary="目标预设不存在或命令格式不正确。",
+                        action="请先执行 `yss` 查看当前预设名称，再执行 `yss dl [名]`。",
+                    )
                     log_event(logging.WARNING, 'user_cmd', '删除预设失败', user_id=user_ctx.user_id, cmd=text)
                 message = await send_to_admin(client, mes, user_ctx, global_config)
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -5320,10 +5483,19 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 # 查看所有预设
                 if len(presets) > 0:
                     max_key_length = max(len(str(k)) for k in presets.keys())
-                    mes = "\n".join(f"'{k.ljust(max_key_length)}': {v}" for k, v in presets.items())
+                    mes = _build_ops_card(
+                        "📚 当前预设列表",
+                        summary="以下是当前账号可用的全部预设。",
+                        fields=[("预设", "\n".join(f"'{k.ljust(max_key_length)}': {v}" for k, v in presets.items()))],
+                        action="删除可执行 `yss dl [名]`，启动可执行 `st [名]`。",
+                    )
                     log_event(logging.INFO, 'user_cmd', '查看预设', user_id=user_ctx.user_id)
                 else:
-                    mes = "暂无预设"
+                    mes = _build_ops_card(
+                        "📚 当前暂无预设",
+                        summary="当前账号还没有保存任何自定义预设。",
+                        action="可执行 `ys [名] ...` 新建预设，或直接使用内置预设。",
+                    )
                     log_event(logging.INFO, 'user_cmd', '暂无预设', user_id=user_ctx.user_id)
                 message = await send_to_admin(client, mes, user_ctx, global_config)
                 asyncio.create_task(delete_later(client, event.chat_id, event.id, 60))
@@ -5407,12 +5579,31 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         
         # 未知命令
         log_event(logging.DEBUG, 'user_cmd', '未知命令', user_id=user_ctx.user_id, data=text[:50])
-        message = await send_to_admin(client, f"未知命令: {cmd}\n输入 help 查看帮助", user_ctx, global_config)
+        message = await send_to_admin(
+            client,
+            _build_ops_card(
+                "❓ 未知命令",
+                summary=f"`{cmd}` 不是当前支持的命令。",
+                action="请执行 `help` 查看可用命令列表。",
+            ),
+            user_ctx,
+            global_config,
+        )
         asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
         
     except Exception as e:
         log_event(logging.ERROR, 'user_cmd', '命令执行出错', user_id=user_ctx.user_id, error=str(e))
-        await send_to_admin(client, f"命令执行出错: {e}", user_ctx, global_config)
+        await send_to_admin(
+            client,
+            _build_ops_card(
+                "❌ 命令执行出错",
+                summary="本次命令没有执行完成。",
+                fields=[("错误", str(e)[:180])],
+                action="建议稍后重试；若持续失败，可执行 `status` 确认当前状态。",
+            ),
+            user_ctx,
+            global_config,
+        )
 
 
 async def check_bet_status(client, user_ctx: UserContext, global_config: dict):
@@ -5430,7 +5621,12 @@ async def check_bet_status(client, user_ctx: UserContext, global_config: dict):
             lose_stop = int(rt.get("lose_stop", 13))
             await send_to_admin(
                 client,
-                f"⚠️ 已达到预设连投上限（{lose_stop} 手），已保持暂停",
+                _build_ops_card(
+                    "⚠️ 已达到预设连投上限",
+                    summary="当前链路已经到达设定的最大连投次数，系统将保持暂停。",
+                    fields=[("当前上限", f"{lose_stop} 手")],
+                    action="如需继续，可切换预设、重置策略，或等待新一轮开始。",
+                ),
                 user_ctx,
                 global_config,
             )
@@ -5719,7 +5915,17 @@ async def yc_command_handler_multiuser(
 
     params, preset_name, error_msg = _parse_yc_params(args, presets)
     if error_msg:
-        await send_to_admin(client, error_msg, user_ctx, global_config)
+        await send_to_admin(
+            client,
+            _build_ops_card(
+                "❌ 测算命令无法执行",
+                summary="当前测算参数不完整或格式不正确。",
+                note=error_msg,
+                action="请执行 `yc [预设名]` 或 `yc [参数...]`，例如 `yc yc05`。",
+            ),
+            user_ctx,
+            global_config,
+        )
         return
 
     result_msg = _build_yc_result_message(
