@@ -1488,7 +1488,75 @@ def test_process_bet_on_skips_duplicate_trigger_when_previous_bet_pending(tmp_pa
     assert ctx.state.bet_sequence_log[0]["bet_id"] == "20260312_1_28"
     assert ctx.state.bet_sequence_log[0]["result"] is None
     assert rt["bet"] is True
-    assert sent_messages == []
+    assert any("上一手仍待结算" in message for message in sent_messages)
+
+
+def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "runtime_heal_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "运行中自愈用户"},
+            "telegram": {"user_id": 5096},
+            "groups": {"admin_chat": 5096},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["bet_amount"] = 500
+    rt["lose_count"] = 0
+    rt["win_count"] = 0
+    ctx.state.history = [0, 1] * 20
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260322_1_100", "sequence": 1, "direction": "small", "amount": 500, "result": None, "profit": 0}
+    ]
+
+    sent_messages = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        user_ctx.state.runtime["last_predict_info"] = "runtime-heal"
+        return 1
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5096, id=len(sent_messages))
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    class DummyEvent:
+        def __init__(self):
+            history = " ".join((["1", "0"] * 20))
+            self.message = SimpleNamespace(message=f"[近 40 次结果][由近及远][0 小 1 大] {history}")
+            self.reply_markup = object()
+            self.chat_id = 5096
+            self.id = 101
+            self.clicks = []
+
+        async def click(self, data):
+            self.clicks.append(data)
+
+    event = DummyEvent()
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert ctx.state.bet_sequence_log[0]["result"] == "异常未结算"
+    assert ctx.state.bet_sequence_log[-1]["result"] is None
+    assert any("运行中已修正异常挂单" in message for message in sent_messages)
+    assert any("押注执行" in message for message in sent_messages)
 
 
 def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, monkeypatch):
@@ -1957,10 +2025,11 @@ def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monk
 
     msg = zm.format_dashboard(ctx)
     assert "📍 当前概览" in msg
-    assert "下一手预计下注：" in msg
-    assert "🔢 **软件版本：v1.0.10(abcd1234)**" in msg
-    assert "📋 **预设名称：yc10**" in msg
-    assert "🤖 **预设参数：1 11 2.8 2.3 2.2 2.05 10000**" in msg
+    assert "下一手下注：" in msg
+    assert "菠菜余额：" in msg
+    assert "🔢 软件版本：v1.0.10(abcd1234)" in msg
+    assert "📋 预设名称：yc10" in msg
+    assert "🤖 预设参数：1 11 2.8 2.3 2.2 2.05 10000" in msg
 
 
 def test_st_command_triggers_auto_yc_report(tmp_path, monkeypatch):

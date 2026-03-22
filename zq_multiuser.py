@@ -552,6 +552,28 @@ def _append_bet_sequence_entry(state: UserState, entry: Dict[str, Any]) -> None:
     state.bet_sequence_log = trim_bet_sequence_log(logs, state.runtime)
 
 
+def _extract_history_from_bet_on_text(text: str) -> List[int]:
+    history_match = re.search(r"\[0\s*小\s*1\s*大\]([\s\S]*)", str(text or ""))
+    if not history_match:
+        return []
+    history_str = history_match.group(1)
+    return [int(x) for x in re.findall(r"(?<!\d)[01](?!\d)", history_str)]
+
+
+def _heal_runtime_open_bet(open_bet_entry: Dict[str, Any], rt: Dict[str, Any]) -> str:
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    open_bet_entry["result"] = "异常未结算"
+    if open_bet_entry.get("profit") is None:
+        open_bet_entry["profit"] = 0
+    open_bet_entry["heal_time"] = now_text
+    open_bet_entry["heal_note"] = "runtime_auto_heal_missed_settle"
+    rt["bet"] = False
+    rt["pending_bet_heal_total"] = int(rt.get("pending_bet_heal_total", 0) or 0) + 1
+    rt["pending_bet_last_heal_count"] = 1
+    rt["pending_bet_last_heal_at"] = now_text
+    return str(open_bet_entry.get("bet_id") or "unknown")
+
+
 def build_pending_bet_heal_notice(healed_pending: Dict[str, Any], summary: Dict[str, Any], rt: Dict[str, Any]) -> str:
     """生成历史脏挂单自愈提示，便于管理员快速确认当前已对齐到哪一手。"""
     healed_count = int(healed_pending.get("count", 0) or 0)
@@ -678,7 +700,7 @@ def format_dashboard(user_ctx: UserContext) -> str:
     mes = _build_dashboard_summary(user_ctx)
 
     reversed_data = ["✅" if x == 1 else "❌" for x in state.history[-40:][::-1]]
-    mes += f"""📊 **近期 40 次结果**（由近及远）
+    mes += f"""📊 近期 40 次结果（由近及远）
 ✅：大（1）  ❌：小（0）
 {os.linesep.join(
         " ".join(map(str, reversed_data[i:i + 10])) 
@@ -686,16 +708,16 @@ def format_dashboard(user_ctx: UserContext) -> str:
     )}
 
 ———————————————
-🎯 **策略设定**
-🔢 **软件版本：{get_software_version_text()}**
-🤖 **模型 API：{rt.get('current_model_id', 'unknown')}**
-🚦 **当前押注状态：{get_bet_status_text(rt)}**
-📋 **预设名称：{rt.get('current_preset_name', 'none')}**
-🤖 **预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}**
-💰 **初始金额：{rt.get('initial_amount', 500)}**
-⏹ **押注 {rt.get('lose_stop', 13)} 次停止**
-💥 **炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局**
-📚 **押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}**
+🎯 策略设定
+🔢 软件版本：{get_software_version_text()}
+🤖 模型 API：{rt.get('current_model_id', 'unknown')}
+🚦 当前押注状态：{get_bet_status_text(rt)}
+📋 预设名称：{rt.get('current_preset_name', 'none')}
+🤖 预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}
+💰 初始金额：{rt.get('initial_amount', 500)}
+⏹ 押注 {rt.get('lose_stop', 13)} 次停止
+💥 炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局
+📚 押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}
 
 """
     
@@ -711,11 +733,11 @@ def format_dashboard(user_ctx: UserContext) -> str:
     else:
         balance_str = f"{account_balance / 10000:.2f} 万"
         
-    mes += f"""💰 **账户余额：{balance_str}**
-💰 **菠菜余额：{max(0, rt.get('gambling_fund', 0)) / 10000:.2f} 万**
-📈 **盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局**
-📈 **本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万**
-📈 **总盈利：{rt.get('earnings', 0) / 10000:.2f} 万**
+    mes += f"""💰 账户余额：{balance_str}
+💰 菠菜余额：{max(0, rt.get('gambling_fund', 0)) / 10000:.2f} 万
+📈 盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局
+📈 本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万
+📈 总盈利：{rt.get('earnings', 0) / 10000:.2f} 万
 
 """
     
@@ -723,9 +745,9 @@ def format_dashboard(user_ctx: UserContext) -> str:
     total = rt.get('total', 0)
     if win_total > 0 or total > 0:
         win_rate = (win_total / total * 100) if total > 0 else 0.00
-        mes += f"""🎯 **押注次数：{total}**
-🏆 **胜率：{win_rate:.2f}%**
-💰 **收益：{format_number(rt.get('earnings', 0))}**"""
+        mes += f"""🎯 押注次数：{total}
+🏆 胜率：{win_rate:.2f}%
+💰 收益：{format_number(rt.get('earnings', 0))}"""
     
     return mes
 
@@ -776,6 +798,7 @@ def _build_dashboard_summary(user_ctx: UserContext) -> str:
     next_amount = int(calculate_bet_amount(rt) or 0)
     balance_status = rt.get("balance_status", "unknown")
     account_balance = int(rt.get("account_balance", 0) or 0)
+    gambling_fund = max(0, int(rt.get("gambling_fund", 0) or 0))
 
     if balance_status == "auth_failed":
         balance_text = "Cookie 失效"
@@ -790,8 +813,11 @@ def _build_dashboard_summary(user_ctx: UserContext) -> str:
         "📍 当前概览",
         f"状态：{status_text}",
         f"预设：{preset_name}",
-        f"下一手预计下注：{format_number(next_amount) if next_amount > 0 else '已停止'}",
+        f"下一手下注：{format_number(next_amount) if next_amount > 0 else '已停止'}",
         f"账户余额：{balance_text}",
+        f"菠菜余额：{gambling_fund / 10000:.2f} 万",
+        "",
+        "———————————————",
         "",
     ]
     return "\n".join(summary_lines)
@@ -1196,9 +1222,9 @@ async def send_message_v2(
     account_name = user_ctx.config.name.strip()
     account_prefix = f"【账号：{account_name}】"
     admin_message = _strip_account_prefix(message)
-    # 重点通道发送摘要版，管理员通道保留完整版。
-    priority_message = _build_priority_summary(msg_type, message, account_prefix)
-    priority_desp = _build_priority_summary(msg_type, desp if desp is not None else message, account_prefix)
+    # 重点通道保留完整详细内容，并统一补充账号前缀，方便多账号并行查看。
+    priority_message = _ensure_account_prefix(message, account_prefix)
+    priority_desp = _ensure_account_prefix(desp if desp is not None else message, account_prefix)
 
     sent_message = None
     admin_chat = None
@@ -2065,6 +2091,14 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         await asyncio.sleep(prompt_wait_sec)
 
     text = event.message.message
+    history_before = list(state.history)
+    incoming_history: List[int] = []
+    try:
+        incoming_history = _extract_history_from_bet_on_text(text)
+        if incoming_history and len(incoming_history) >= len(history_before):
+            state.history = incoming_history[-2000:]
+    except Exception as e:
+        log_event(logging.WARNING, 'bet_on', '解析历史数据失败', user_id=user_ctx.user_id, data=str(e))
 
     if not rt.get("switch", True):
         if rt.get("bet", False):
@@ -2080,7 +2114,46 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     open_bet_entry = _get_latest_open_bet_entry(state)
     if rt.get("bet", False) and open_bet_entry is not None:
-        return
+        history_advanced = False
+        if incoming_history:
+            previous_history_tail = history_before[-len(incoming_history):] if len(history_before) >= len(incoming_history) else history_before[:]
+            history_advanced = incoming_history != previous_history_tail
+        if history_advanced:
+            healed_bet_id = _heal_runtime_open_bet(open_bet_entry, rt)
+            summary = reconcile_bet_runtime_from_log(user_ctx)
+            user_ctx.save_state()
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                _build_ops_card(
+                    "🩹 运行中已修正异常挂单",
+                    summary="检测到上一手疑似漏结算，系统已按新一轮历史自动对齐后继续处理。",
+                    fields=[
+                        ("修复记录", healed_bet_id),
+                        ("当前连续押注", f"{summary.get('continuous_count', 0)} 次"),
+                        ("当前连输", f"{summary.get('lose_count', 0)} 次"),
+                    ],
+                    action="建议执行 `status` 确认当前链路；本局会继续尝试正常下注。",
+                ),
+                ttl_seconds=180,
+                attr_name="pending_bet_heal_message",
+            )
+        else:
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                _build_ops_card(
+                    "⏳ 上一手仍待结算",
+                    summary="当前检测到上一手还未完成结算，系统不会重复下注。",
+                    fields=[("待结算记录", str(open_bet_entry.get("bet_id", "unknown")))],
+                    action="建议等待结果回写；若长时间不更新，可执行 `status` 检查。",
+                ),
+                ttl_seconds=90,
+                attr_name="pending_bet_hold_message",
+            )
+            return
     if rt.get("bet", False) and open_bet_entry is None:
         rt["bet"] = False
         user_ctx.save_state()
@@ -2108,16 +2181,6 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             rt["pause_reason"] = ""
         user_ctx.save_state()
         return
-
-    try:
-        history_match = re.search(r"\[0\s*小\s*1\s*大\]([\s\S]*)", text)
-        if history_match:
-            history_str = history_match.group(1)
-            new_history = [int(x) for x in re.findall(r"(?<!\d)[01](?!\d)", history_str)]
-            if new_history and len(new_history) >= len(state.history):
-                state.history = new_history[-2000:]
-    except Exception as e:
-        log_event(logging.WARNING, 'bet_on', '瑙ｆ瀽鍘嗗彶鏁版嵁澶辫触', user_id=user_ctx.user_id, data=str(e))
 
     bet_amount = calculate_bet_amount(rt)
     if bet_amount <= 0:
@@ -2169,6 +2232,18 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     if not event.reply_markup:
         rt["bet"] = False
         user_ctx.save_state()
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            _build_ops_card(
+                "⏭️ 本局未执行下注",
+                summary="当前盘口消息没有可点击按钮，系统已自动跳过本局。",
+                action="建议等待下一次盘口；如频繁出现，请检查群消息格式。",
+            ),
+            ttl_seconds=90,
+            attr_name="skip_reason_message",
+        )
         return
 
     try:
@@ -2195,6 +2270,19 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         rt["bet_on"] = True
         rt["mode_stop"] = True
         user_ctx.save_state()
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            _build_ops_card(
+                "⏭️ 本局策略选择观望",
+                summary="当前模型判断不建议下注，本局已主动跳过。",
+                fields=[("原因", rt.get("last_predict_info", "模型未给出可执行信号"))],
+                action="建议继续观察下一次盘口，或执行 `status` 查看当前状态。",
+            ),
+            ttl_seconds=120,
+            attr_name="skip_reason_message",
+        )
         return
 
     if rt.get("ai_key_issue_active", False):
@@ -2209,6 +2297,19 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     if not combination:
         rt["bet"] = False
         user_ctx.save_state()
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            _build_ops_card(
+                "⏭️ 本局未执行下注",
+                summary="当前金额没有匹配到可点击的下注按钮组合。",
+                fields=[("目标金额", format_number(rt["bet_amount"]))],
+                action="建议检查按钮映射配置，或等待下一次盘口。",
+            ),
+            ttl_seconds=120,
+            attr_name="skip_reason_message",
+        )
         return
 
     try:
@@ -4890,7 +4991,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             for window in windows:
                 history_window = state.history[-window:]
                 result_counts = count_consecutive(history_window)
-                bet_sequence_log = _get_strategy_bet_sequence_log(state)[-window:]
+                bet_sequence_log = state.bet_sequence_log[-window:]
                 lose_streaks = count_lose_streaks(bet_sequence_log)
                 
                 stats["连大"].append(result_counts["大"])

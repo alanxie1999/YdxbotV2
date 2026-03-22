@@ -106,8 +106,7 @@ def test_send_message_v2_records_outbound_interactions(tmp_path, monkeypatch):
     assert "发送 | iyuu | 通知 | lose_streak | 成功" in content
     assert "发送 | tg_bot | 通知 | lose_streak | 成功 | chat_id=chat" in content
     assert "\n测试告警\n" in content
-    assert "【账号：Route User】\n[P1] 连输告警" in content
-    assert "建议：建议立即查看 `status`，如需止损可执行 `pause`。" in content
+    assert "【账号：Route User】\n测试告警" in content
 
 
 def test_process_user_command_records_masked_apikey_command(tmp_path, monkeypatch):
