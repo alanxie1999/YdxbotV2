@@ -927,6 +927,7 @@ MESSAGE_ROUTING_TABLE = {
     "info": {"channels": ["admin"], "priority": False},
     "warning": {"channels": ["admin"], "priority": False},
     "error": {"channels": ["admin", "priority"], "priority": True},
+    "skip_notice": {"channels": ["admin", "priority"], "priority": True},
 }
 
 MESSAGE_POLICY = {
@@ -1323,6 +1324,7 @@ async def send_message(
         "explode": "explode",
         "lose_streak": "lose_streak",
         "profit_recovery": "lose_end",
+        "skip_notice": "skip_notice",
         "info": "info",
     }
     msg_type = msg_type_map.get(notify_type, "info")
@@ -1392,6 +1394,7 @@ async def _send_transient_admin_notice(
     message: str,
     ttl_seconds: int = 120,
     attr_name: str = "transient_notice_message",
+    msg_type: str = "info",
 ):
     """
     发送“短时说明通知”（用于暂停结束/恢复等状态提示）：
@@ -1402,6 +1405,18 @@ async def _send_transient_admin_notice(
     if old_message:
         await cleanup_message(client, old_message)
     sent = await send_to_admin(client, message, user_ctx, global_config)
+    if msg_type != "info":
+        try:
+            await send_message(
+                client,
+                "priority",
+                message,
+                user_ctx,
+                global_config,
+                notify_type=msg_type,
+            )
+        except Exception:
+            pass
     if sent:
         setattr(user_ctx, attr_name, sent)
         chat_id = getattr(sent, "chat_id", None)
@@ -2138,6 +2153,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 ),
                 ttl_seconds=180,
                 attr_name="pending_bet_heal_message",
+                msg_type="skip_notice",
             )
         else:
             await _send_transient_admin_notice(
@@ -2152,6 +2168,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 ),
                 ttl_seconds=90,
                 attr_name="pending_bet_hold_message",
+                msg_type="skip_notice",
             )
             return
     if rt.get("bet", False) and open_bet_entry is None:
@@ -2214,7 +2231,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                     mes,
                     user_ctx,
                     global_config,
-                    title=f"博彩机器人 {user_ctx.config.name} 资金暂停",
+                    title=f"菠菜机器人 {user_ctx.config.name} 资金暂停",
                     desp=mes,
                 )
                 rt["fund_pause_notified"] = True
@@ -2243,6 +2260,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             ),
             ttl_seconds=90,
             attr_name="skip_reason_message",
+            msg_type="skip_notice",
         )
         return
 
@@ -2282,6 +2300,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             ),
             ttl_seconds=120,
             attr_name="skip_reason_message",
+            msg_type="skip_notice",
         )
         return
 
@@ -2309,6 +2328,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             ),
             ttl_seconds=120,
             attr_name="skip_reason_message",
+            msg_type="skip_notice",
         )
         return
 
@@ -4094,7 +4114,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                             mes,
                             user_ctx,
                             global_config,
-                            title=f"博彩机器人 {user_ctx.config.name} 资金暂停",
+                            title=f"菠菜机器人 {user_ctx.config.name} 资金暂停",
                             desp=mes,
                         )
                         rt["fund_pause_notified"] = True
@@ -4183,7 +4203,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                         warn_msg,
                         user_ctx,
                         global_config,
-                        title=f"博彩机器人 {user_ctx.config.name} 连输告警",
+                        title=f"菠菜机器人 {user_ctx.config.name} 连输告警",
                         desp=warn_msg
                     )
 
@@ -4271,7 +4291,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
             for window in windows:
                 history_window = state.history[-window:]
                 result_counts = count_consecutive(history_window)
-                bet_sequence_log = _get_strategy_bet_sequence_log(state)[-window:]
+                bet_sequence_log = state.bet_sequence_log[-window:]
                 lose_streaks = count_lose_streaks(bet_sequence_log)
                 stats["连大"].append(result_counts["大"])
                 stats["连小"].append(result_counts["小"])
