@@ -2300,7 +2300,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             ),
             ttl_seconds=120,
             attr_name="skip_reason_message",
-            msg_type="skip_notice",
+            msg_type="info",
         )
         return
 
