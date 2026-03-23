@@ -1580,6 +1580,40 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
     assert any(event == "下注执行完成" for _, event, _ in log_events)
 
 
+def test_process_bet_on_pause_countdown_completion_restores_flag(tmp_path):
+    user_dir = tmp_path / "users" / "pause_flag_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "暂停恢复用户"},
+            "telegram": {"user_id": 5098},
+            "groups": {"admin_chat": 5098},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = False
+    rt["bet_on"] = False
+    rt["mode_stop"] = False
+    rt["stop_count"] = 1
+    rt["flag"] = False
+
+    event = SimpleNamespace(
+        id=60001,
+        chat_id=5098,
+        reply_markup=None,
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["stop_count"] == 0
+    assert rt["flag"] is True
+    assert rt["bet_on"] is True
+
+
 def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5093"
     _write_json(

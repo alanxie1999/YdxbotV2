@@ -2411,6 +2411,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         rt["stop_count"] = max(0, stop_count - 1)
         rt["bet"] = False
         if rt["stop_count"] == 0:
+            rt["flag"] = True
             rt["bet_on"] = True
             rt["mode_stop"] = True
             rt["pause_reason"] = ""
