@@ -399,6 +399,7 @@ def get_default_runtime() -> Dict[str, Any]:
         "entry_timeout_gate_last_settled": -1,
         "stall_guard_sequence": -1,
         "stall_guard_last_history_len": -1,
+        "stall_guard_last_history_sig": "",
         "stall_guard_no_bet_streak": 0,
         "stall_guard_skip_streak": 0,
         "stall_guard_timeout_streak": 0,

@@ -1523,6 +1523,7 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
     rt["bet_on"] = True
     rt["mode_stop"] = True
     rt["bet_amount"] = 500
+    rt["bet_type"] = 0
     rt["lose_count"] = 0
     rt["win_count"] = 0
     ctx.state.history = [0, 1] * 20
@@ -1572,12 +1573,78 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
     event = DummyEvent()
     asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
 
-    assert ctx.state.bet_sequence_log[0]["result"] == "异常未结算"
+    assert ctx.state.bet_sequence_log[0]["result"] == "输"
     assert ctx.state.bet_sequence_log[-1]["result"] is None
-    assert any("运行中已修正异常挂单" in message for message in sent_messages)
+    assert any("运行中已按历史补结算" in message for message in sent_messages)
     assert any("押注执行" in message for message in sent_messages)
-    assert any(event == "运行中自愈漏结算挂单" for _, event, _ in log_events)
+    assert any(event == "运行中按历史推断补结算" for _, event, _ in log_events)
     assert any(event == "下注执行完成" for _, event, _ in log_events)
+
+
+def test_process_bet_on_inferred_settle_keeps_martingale_step(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "runtime_chain_keep_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "倍投保持用户"},
+            "telegram": {"user_id": 5099},
+            "groups": {"admin_chat": 5099},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["bet_type"] = 0
+    rt["bet_amount"] = 1_461_000
+    rt["lose_count"] = 3
+    rt["win_count"] = 0
+    rt["lose_stop"] = 9
+    rt["lose_four"] = 2.05
+    ctx.state.history = [0, 1] * 20
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260323_2_263", "sequence": 4, "direction": "small", "amount": 1_461_000, "result": None, "profit": 0}
+    ]
+
+    async def fake_predict(user_ctx, global_cfg):
+        return 1
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        return SimpleNamespace(chat_id=5099, id=1)
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    class DummyEvent:
+        def __init__(self):
+            history = " ".join((["1", "0"] * 20))
+            self.message = SimpleNamespace(message=f"[近 40 次结果][由近及远][0 小 1 大] {history}")
+            self.reply_markup = object()
+            self.chat_id = 5099
+            self.id = 102
+            self.clicks = []
+
+        async def click(self, data):
+            self.clicks.append(data)
+
+    event = DummyEvent()
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert ctx.state.bet_sequence_log[0]["result"] == "输"
+    assert rt["lose_count"] == 4
+    assert rt["bet_amount"] == 3_025_000
 
 
 def test_process_bet_on_pause_countdown_completion_restores_flag(tmp_path):
@@ -1612,6 +1679,77 @@ def test_process_bet_on_pause_countdown_completion_restores_flag(tmp_path):
     assert rt["stop_count"] == 0
     assert rt["flag"] is True
     assert rt["bet_on"] is True
+
+
+def test_process_bet_on_force_unlocks_after_repeated_skip(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "skip_unlock_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "观望解锁用户"},
+            "telegram": {"user_id": 5100},
+            "groups": {"admin_chat": 5100},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = False
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["lose_count"] = 4
+    rt["bet_amount"] = 1_461_000
+    rt["bet_type"] = 0
+    ctx.state.history = [0, 1] * 20
+
+    sent_messages = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        return -1
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5100, id=len(sent_messages))
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    class DummyEvent:
+        def __init__(self, history_text, event_id):
+            self.message = SimpleNamespace(message=f"[近 40 次结果][由近及远][0 小 1 大] {history_text}")
+            self.reply_markup = object()
+            self.chat_id = 5100
+            self.id = event_id
+            self.clicks = []
+
+        async def click(self, data):
+            self.clicks.append(data)
+
+    events = [
+        DummyEvent(" ".join((["0", "1"] * 20)), 1),
+        DummyEvent(" ".join((["1", "0"] * 20)), 2),
+        DummyEvent(" ".join((["1", "1"] + (["0", "1"] * 19))), 3),
+    ]
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), events[0], ctx, {}))
+    assert rt["bet"] is False
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), events[1], ctx, {}))
+    assert rt["bet"] is False
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), events[2], ctx, {}))
+    assert rt["bet"] is True
+    assert any("连续观望已触发保守解锁" in message for message in sent_messages)
 
 
 def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, monkeypatch):

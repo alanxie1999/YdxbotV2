@@ -560,6 +560,30 @@ def _extract_history_from_bet_on_text(text: str) -> List[int]:
     return [int(x) for x in re.findall(r"(?<!\d)[01](?!\d)", history_str)]
 
 
+def _infer_history_advance_result(history_before: List[int], incoming_history: List[int]) -> Dict[str, Any]:
+    if not history_before or not incoming_history:
+        return {"advanced": False, "result": None, "shift": 0, "mode": ""}
+    if len(incoming_history) < len(history_before):
+        return {"advanced": False, "result": None, "shift": 0, "mode": "insufficient_window"}
+
+    old = list(history_before)
+    new = list(incoming_history)
+
+    # 兼容“由近及远”和“由远及近”两种潜在排列，只要能识别出单步推进就直接推断最新结果。
+    max_shift = min(3, len(old), len(new))
+    for shift in range(1, max_shift + 1):
+        if len(new) == len(old) and new[shift:] == old[:-shift]:
+            return {"advanced": True, "result": int(new[shift - 1]), "shift": shift, "mode": "near_to_far"}
+        if len(new) == len(old) and new[:-shift] == old[shift:]:
+            return {"advanced": True, "result": int(new[-shift]), "shift": shift, "mode": "chronological"}
+        if len(new) == len(old) + shift and new[shift:] == old:
+            return {"advanced": True, "result": int(new[shift - 1]), "shift": shift, "mode": "near_to_far_extend"}
+        if len(new) == len(old) + shift and new[:-shift] == old:
+            return {"advanced": True, "result": int(new[-shift]), "shift": shift, "mode": "chronological_extend"}
+
+    return {"advanced": bool(new != old), "result": None, "shift": 0, "mode": "unknown"}
+
+
 def _heal_runtime_open_bet(open_bet_entry: Dict[str, Any], rt: Dict[str, Any]) -> str:
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     open_bet_entry["result"] = "异常未结算"
@@ -572,6 +596,55 @@ def _heal_runtime_open_bet(open_bet_entry: Dict[str, Any], rt: Dict[str, Any]) -
     rt["pending_bet_last_heal_count"] = 1
     rt["pending_bet_last_heal_at"] = now_text
     return str(open_bet_entry.get("bet_id") or "unknown")
+
+
+def _apply_inferred_settle_from_history(state: UserState, rt: Dict[str, Any], open_bet_entry: Dict[str, Any], inferred_result: int) -> Dict[str, Any]:
+    prediction = int(rt.get("bet_type", -1))
+    bet_amount = int(open_bet_entry.get("amount", rt.get("bet_amount", 500)) or rt.get("bet_amount", 500) or 500)
+    win = (int(inferred_result) == 1 and prediction == 1) or (int(inferred_result) == 0 and prediction == 0)
+    result_text = "赢" if win else "输"
+    profit = int(bet_amount * 0.99) if win else -bet_amount
+    old_lose_count = int(rt.get("lose_count", 0) or 0)
+
+    rt["bet"] = False
+    state.bet_type_history.append(prediction)
+    rt["gambling_fund"] = int(rt.get("gambling_fund", 0) or 0) + profit
+    rt["earnings"] = int(rt.get("earnings", 0) or 0) + profit
+    rt["period_profit"] = int(rt.get("period_profit", 0) or 0) + profit
+    rt["win_total"] = int(rt.get("win_total", 0) or 0) + (1 if win else 0)
+    rt["win_count"] = int(rt.get("win_count", 0) or 0) + 1 if win else 0
+    rt["lose_count"] = int(rt.get("lose_count", 0) or 0) + 1 if not win else 0
+    rt["status"] = 1 if win else 0
+
+    open_bet_entry["result"] = result_text
+    open_bet_entry["profit"] = profit
+    open_bet_entry["settled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    open_bet_entry["settle_note"] = "inferred_from_history_advance"
+
+    active_chain_summary = _summarize_effective_bet_chain(state)
+    if not win:
+        rt["bet_sequence_count"] = max(
+            int(active_chain_summary.get("continuous_count", 0)),
+            old_lose_count + 1,
+        )
+        rt["lose_count"] = max(
+            int(active_chain_summary.get("lose_count", 0)),
+            old_lose_count + 1,
+        )
+        rt["bet_amount"] = int(active_chain_summary.get("last_amount", bet_amount) or bet_amount)
+    if win or rt.get("lose_count", 0) >= rt.get("lose_stop", 13):
+        rt["bet_sequence_count"] = 0
+        rt["bet_amount"] = int(rt.get("initial_amount", 500))
+
+    return {
+        "win": win,
+        "result_text": result_text,
+        "profit": profit,
+        "bet_amount": bet_amount,
+        "sequence_after": int(rt.get("bet_sequence_count", 0) or 0),
+        "lose_count_after": int(rt.get("lose_count", 0) or 0),
+        "next_bet_amount": int(calculate_bet_amount(rt) or 0),
+    }
 
 
 def _build_runtime_chain_diag(rt: Dict[str, Any], state: Optional[UserState] = None, **extra: Any) -> Dict[str, Any]:
@@ -2304,10 +2377,8 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     open_bet_entry = _get_latest_open_bet_entry(state)
     if rt.get("bet", False) and open_bet_entry is not None:
-        history_advanced = False
-        if incoming_history:
-            previous_history_tail = history_before[-len(incoming_history):] if len(history_before) >= len(incoming_history) else history_before[:]
-            history_advanced = incoming_history != previous_history_tail
+        history_delta = _infer_history_advance_result(history_before, incoming_history)
+        history_advanced = bool(history_delta.get("advanced", False))
         if history_advanced:
             pre_heal_diag = _build_runtime_chain_diag(
                 rt,
@@ -2315,43 +2386,87 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 heal_reason="history_advanced_with_open_bet",
                 history_before_len=len(history_before),
                 incoming_history_len=len(incoming_history),
+                history_delta_mode=history_delta.get("mode", ""),
+                history_delta_shift=int(history_delta.get("shift", 0) or 0),
+                inferred_result=history_delta.get("result", None),
             )
-            healed_bet_id = _heal_runtime_open_bet(open_bet_entry, rt)
-            summary = reconcile_bet_runtime_from_log(user_ctx)
-            log_event(
-                logging.WARNING,
-                'bet_on',
-                '运行中自愈漏结算挂单',
-                user_id=user_ctx.user_id,
-                category='warning',
-                **{
-                    **pre_heal_diag,
-                    "healed_bet_id": healed_bet_id,
-                    "reconciled_sequence": int(summary.get("continuous_count", 0) or 0),
-                    "reconciled_lose_count": int(summary.get("lose_count", 0) or 0),
-                    "reconciled_bet_amount": int(rt.get("bet_amount", 0) or 0),
-                    "reconciled_next_bet_amount": int(calculate_bet_amount(rt) or 0),
-                },
-            )
-            user_ctx.save_state()
-            await _send_transient_admin_notice(
-                client,
-                user_ctx,
-                global_config,
-                _build_ops_card(
-                    "🩹 运行中已修正异常挂单",
-                    summary="检测到上一手疑似漏结算，系统已按新一轮历史自动对齐后继续处理。",
-                    fields=[
-                        ("修复记录", healed_bet_id),
-                        ("当前连续押注", f"{summary.get('continuous_count', 0)} 次"),
-                        ("当前连输", f"{summary.get('lose_count', 0)} 次"),
-                    ],
-                    action="建议执行 `status` 确认当前链路；本局会继续尝试正常下注。",
-                ),
-                ttl_seconds=180,
-                attr_name="pending_bet_heal_message",
-                msg_type="skip_notice",
-            )
+            inferred_result = history_delta.get("result", None)
+            if inferred_result in (0, 1):
+                inferred = _apply_inferred_settle_from_history(state, rt, open_bet_entry, int(inferred_result))
+                log_event(
+                    logging.WARNING,
+                    'bet_on',
+                    '运行中按历史推断补结算',
+                    user_id=user_ctx.user_id,
+                    category='warning',
+                    **{
+                        **pre_heal_diag,
+                        "healed_bet_id": str(open_bet_entry.get("bet_id", "unknown")),
+                        "inferred_outcome": inferred.get("result_text", ""),
+                        "inferred_profit": int(inferred.get("profit", 0) or 0),
+                        "chain_sequence_after": int(inferred.get("sequence_after", 0) or 0),
+                        "chain_lose_after": int(inferred.get("lose_count_after", 0) or 0),
+                        "next_bet_amount_after": int(inferred.get("next_bet_amount", 0) or 0),
+                    },
+                )
+                user_ctx.save_state()
+                await _send_transient_admin_notice(
+                    client,
+                    user_ctx,
+                    global_config,
+                    _build_ops_card(
+                        "🩹 运行中已按历史补结算",
+                        summary="检测到上一手疑似漏结算，系统已根据新一轮历史推断该手结果并自动对齐。",
+                        fields=[
+                            ("补结算记录", str(open_bet_entry.get("bet_id", "unknown"))),
+                            ("推断结果", inferred.get("result_text", "")),
+                            ("当前连续押注", f"{inferred.get('sequence_after', 0)} 次"),
+                            ("当前连输", f"{inferred.get('lose_count_after', 0)} 次"),
+                            ("下一手预计下注", format_number(inferred.get("next_bet_amount", 0))),
+                        ],
+                        action="建议执行 `status` 复核当前链路；本局会继续尝试正常下注。",
+                    ),
+                    ttl_seconds=180,
+                    attr_name="pending_bet_heal_message",
+                    msg_type="skip_notice",
+                )
+            else:
+                healed_bet_id = _heal_runtime_open_bet(open_bet_entry, rt)
+                summary = reconcile_bet_runtime_from_log(user_ctx)
+                log_event(
+                    logging.WARNING,
+                    'bet_on',
+                    '运行中自愈漏结算挂单',
+                    user_id=user_ctx.user_id,
+                    category='warning',
+                    **{
+                        **pre_heal_diag,
+                        "healed_bet_id": healed_bet_id,
+                        "reconciled_sequence": int(summary.get("continuous_count", 0) or 0),
+                        "reconciled_lose_count": int(summary.get("lose_count", 0) or 0),
+                        "reconciled_bet_amount": int(rt.get("bet_amount", 0) or 0),
+                        "reconciled_next_bet_amount": int(calculate_bet_amount(rt) or 0),
+                    },
+                )
+                user_ctx.save_state()
+                await _send_transient_admin_notice(
+                    client,
+                    user_ctx,
+                    global_config,
+                    _build_ops_card(
+                        "🩹 运行中已修正异常挂单",
+                        summary="检测到上一手疑似漏结算，但无法可靠推断结果，系统先按保守方式对齐。",
+                        fields=[
+                            ("修复记录", healed_bet_id),
+                            ("当前连续押注", f"{summary.get('continuous_count', 0)} 次"),
+                            ("当前连输", f"{summary.get('lose_count', 0)} 次"),
+                        ],
+                        action="建议执行 `status` 核对链路；若再次出现，请回传 runtime.log。",
+                    ),
+                    ttl_seconds=180,
+                    attr_name="pending_bet_heal_message",
+                    msg_type="skip_notice",
+                )
         else:
             log_event(
                 logging.WARNING,
@@ -2491,6 +2606,9 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         )
         return
 
+    next_sequence = int(rt.get("bet_sequence_count", 0) or 0) + 1
+    history_signature = "".join(str(x) for x in state.history[-12:])
+
     try:
         prediction = await asyncio.wait_for(
             predict_next_bet_core(user_ctx, global_config),
@@ -2511,40 +2629,80 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         rt["last_predict_confidence"] = 0
 
     if prediction == -1:
-        log_event(
-            logging.INFO,
-            'bet_on',
-            '模型返回观望，本局跳过',
-            user_id=user_ctx.user_id,
-            category='runtime',
-            **_build_runtime_chain_diag(
-                rt,
-                state,
-                predict_source=str(rt.get("last_predict_source", "")),
-                predict_tag=str(rt.get("last_predict_tag", "")),
-                predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
-                next_bet_amount=bet_amount,
-            ),
-        )
-        rt["bet"] = False
-        rt["bet_on"] = True
-        rt["mode_stop"] = True
-        user_ctx.save_state()
-        await _send_transient_admin_notice(
-            client,
-            user_ctx,
-            global_config,
-            _build_ops_card(
-                "⏭️ 本局策略选择观望",
-                summary="当前模型判断不建议下注，本局已主动跳过。",
-                fields=[("原因", rt.get("last_predict_info", "模型未给出可执行信号"))],
-                action="建议继续观察下一次盘口，或执行 `status` 查看当前状态。",
-            ),
-            ttl_seconds=120,
-            attr_name="skip_reason_message",
-            msg_type="info",
-        )
-        return
+        skip_trigger = _record_hand_stall_block(rt, next_sequence, history_signature, "skip")
+        if skip_trigger.get("force_unlock", False):
+            prediction = _prepare_force_unlock_prediction(state, rt, next_sequence, skip_trigger)
+            log_event(
+                logging.WARNING,
+                'bet_on',
+                '连续观望触发防卡死解锁',
+                user_id=user_ctx.user_id,
+                category='warning',
+                **_build_runtime_chain_diag(
+                    rt,
+                    state,
+                    next_sequence=next_sequence,
+                    stall_skip_streak=int(skip_trigger.get("skip_streak", 0) or 0),
+                    stall_total=int(skip_trigger.get("no_bet_streak", 0) or 0),
+                    unlocked_prediction=int(prediction),
+                ),
+            )
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                _build_ops_card(
+                    "🔓 连续观望已触发保守解锁",
+                    summary="同一手位已经连续多次观望，系统本局改用统计兜底继续下注，避免长时间停住。",
+                    fields=[
+                        ("当前手位", f"{next_sequence} 手"),
+                        ("连续观望", f"{int(skip_trigger.get('skip_streak', 0) or 0)} 次"),
+                        ("兜底方向", "大" if int(prediction) == 1 else "小"),
+                    ],
+                    action="建议重点观察这手结果，并执行 `status` 复核链路。",
+                ),
+                ttl_seconds=120,
+                attr_name="skip_reason_message",
+                msg_type="info",
+            )
+        else:
+            log_event(
+                logging.INFO,
+                'bet_on',
+                '模型返回观望，本局跳过',
+                user_id=user_ctx.user_id,
+                category='runtime',
+                **_build_runtime_chain_diag(
+                    rt,
+                    state,
+                    predict_source=str(rt.get("last_predict_source", "")),
+                    predict_tag=str(rt.get("last_predict_tag", "")),
+                    predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
+                    next_bet_amount=bet_amount,
+                    next_sequence=next_sequence,
+                    stall_skip_streak=int(skip_trigger.get("skip_streak", 0) or 0),
+                    stall_total=int(skip_trigger.get("no_bet_streak", 0) or 0),
+                ),
+            )
+            rt["bet"] = False
+            rt["bet_on"] = True
+            rt["mode_stop"] = True
+            user_ctx.save_state()
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                _build_ops_card(
+                    "⏭️ 本局策略选择观望",
+                    summary="当前模型判断不建议下注，本局已主动跳过。",
+                    fields=[("原因", rt.get("last_predict_info", "模型未给出可执行信号"))],
+                    action="建议继续观察下一次盘口，或执行 `status` 查看当前状态。",
+                ),
+                ttl_seconds=120,
+                attr_name="skip_reason_message",
+                msg_type="info",
+            )
+            return
 
     if rt.get("ai_key_issue_active", False):
         await send_to_admin(client, _build_ai_key_warning_message(rt), user_ctx, global_config)
@@ -2641,6 +2799,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         "lose_stop": rt.get("lose_stop", 13),
         "profit_target": rt.get("profit", 1000000)
     })
+    _clear_hand_stall_guard(rt)
 
     log_event(
         logging.INFO,
@@ -3022,13 +3181,14 @@ def _clear_hand_stall_guard(rt: dict) -> None:
     """清理“同手位卡死防护”计数器。"""
     rt["stall_guard_sequence"] = -1
     rt["stall_guard_last_history_len"] = -1
+    rt["stall_guard_last_history_sig"] = ""
     rt["stall_guard_no_bet_streak"] = 0
     rt["stall_guard_skip_streak"] = 0
     rt["stall_guard_timeout_streak"] = 0
     rt["stall_guard_gate_streak"] = 0
 
 
-def _record_hand_stall_block(rt: dict, next_sequence: int, history_len: int, reason: str) -> dict:
+def _record_hand_stall_block(rt: dict, next_sequence: int, history_signature: str, reason: str) -> dict:
     """
     记录同手位“未下单”阻断事件，并判断是否触发防卡死解锁。
     reason: skip/timeout/gate
@@ -3042,9 +3202,11 @@ def _record_hand_stall_block(rt: dict, next_sequence: int, history_len: int, rea
         _clear_hand_stall_guard(rt)
         rt["stall_guard_sequence"] = int(next_sequence)
 
-    last_history_len = int(rt.get("stall_guard_last_history_len", -1))
-    if int(history_len) != last_history_len:
-        rt["stall_guard_last_history_len"] = int(history_len)
+    current_signature = str(history_signature or "").strip()
+    last_signature = str(rt.get("stall_guard_last_history_sig", "") or "").strip()
+    if current_signature and current_signature != last_signature:
+        rt["stall_guard_last_history_sig"] = current_signature
+        rt["stall_guard_last_history_len"] = len(current_signature)
         rt["stall_guard_no_bet_streak"] = int(rt.get("stall_guard_no_bet_streak", 0)) + 1
         if reason == "skip":
             rt["stall_guard_skip_streak"] = int(rt.get("stall_guard_skip_streak", 0)) + 1
@@ -3067,6 +3229,7 @@ def _record_hand_stall_block(rt: dict, next_sequence: int, history_len: int, rea
         "force_unlock": force_unlock,
         "sequence": int(next_sequence),
         "reason": reason,
+        "history_signature": current_signature,
         "no_bet_streak": no_bet_streak,
         "skip_streak": skip_streak,
         "timeout_streak": timeout_streak,
