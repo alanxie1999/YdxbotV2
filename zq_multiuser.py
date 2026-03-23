@@ -574,6 +574,40 @@ def _heal_runtime_open_bet(open_bet_entry: Dict[str, Any], rt: Dict[str, Any]) -
     return str(open_bet_entry.get("bet_id") or "unknown")
 
 
+def _build_runtime_chain_diag(rt: Dict[str, Any], state: Optional[UserState] = None, **extra: Any) -> Dict[str, Any]:
+    diag: Dict[str, Any] = {
+        "bet_flag": bool(rt.get("bet", False)),
+        "bet_on": bool(rt.get("bet_on", False)),
+        "mode_stop": bool(rt.get("mode_stop", False)),
+        "manual_pause": bool(rt.get("manual_pause", False)),
+        "bet_sequence_count": int(rt.get("bet_sequence_count", 0) or 0),
+        "lose_count": int(rt.get("lose_count", 0) or 0),
+        "bet_amount": int(rt.get("bet_amount", 0) or 0),
+        "stop_count": int(rt.get("stop_count", 0) or 0),
+        "current_round": int(rt.get("current_round", 0) or 0),
+        "current_bet_seq": int(rt.get("current_bet_seq", 0) or 0),
+        "last_settle_message_id": int(rt.get("last_settle_message_id", 0) or 0),
+    }
+    if state is not None:
+        try:
+            diag["history_len"] = len(state.history)
+        except Exception:
+            pass
+        try:
+            diag["bet_log_len"] = len(state.bet_sequence_log)
+        except Exception:
+            pass
+        open_entry = _get_latest_open_bet_entry(state)
+        if open_entry:
+            diag["open_bet_id"] = str(open_entry.get("bet_id", "unknown"))
+            diag["open_bet_amount"] = int(open_entry.get("amount", 0) or 0)
+    for key, value in extra.items():
+        if value is None:
+            continue
+        diag[key] = value
+    return diag
+
+
 def build_pending_bet_heal_notice(healed_pending: Dict[str, Any], summary: Dict[str, Any], rt: Dict[str, Any]) -> str:
     """生成历史脏挂单自愈提示，便于管理员快速确认当前已对齐到哪一手。"""
     healed_count = int(healed_pending.get("count", 0) or 0)
@@ -2240,6 +2274,22 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     except Exception as e:
         log_event(logging.WARNING, 'bet_on', '解析历史数据失败', user_id=user_ctx.user_id, data=str(e))
 
+    next_bet_amount_snapshot = calculate_bet_amount(rt)
+    log_event(
+        logging.INFO,
+        'bet_on',
+        '下注入口诊断',
+        user_id=user_ctx.user_id,
+        category='runtime',
+        **_build_runtime_chain_diag(
+            rt,
+            state,
+            incoming_history_len=len(incoming_history),
+            history_advanced=bool(incoming_history) and incoming_history != history_before[-len(incoming_history):] if incoming_history else False,
+            next_bet_amount=next_bet_amount_snapshot,
+        ),
+    )
+
     if not rt.get("switch", True):
         if rt.get("bet", False):
             rt["bet"] = False
@@ -2259,8 +2309,30 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             previous_history_tail = history_before[-len(incoming_history):] if len(history_before) >= len(incoming_history) else history_before[:]
             history_advanced = incoming_history != previous_history_tail
         if history_advanced:
+            pre_heal_diag = _build_runtime_chain_diag(
+                rt,
+                state,
+                heal_reason="history_advanced_with_open_bet",
+                history_before_len=len(history_before),
+                incoming_history_len=len(incoming_history),
+            )
             healed_bet_id = _heal_runtime_open_bet(open_bet_entry, rt)
             summary = reconcile_bet_runtime_from_log(user_ctx)
+            log_event(
+                logging.WARNING,
+                'bet_on',
+                '运行中自愈漏结算挂单',
+                user_id=user_ctx.user_id,
+                category='warning',
+                **{
+                    **pre_heal_diag,
+                    "healed_bet_id": healed_bet_id,
+                    "reconciled_sequence": int(summary.get("continuous_count", 0) or 0),
+                    "reconciled_lose_count": int(summary.get("lose_count", 0) or 0),
+                    "reconciled_bet_amount": int(rt.get("bet_amount", 0) or 0),
+                    "reconciled_next_bet_amount": int(calculate_bet_amount(rt) or 0),
+                },
+            )
             user_ctx.save_state()
             await _send_transient_admin_notice(
                 client,
@@ -2281,6 +2353,19 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 msg_type="skip_notice",
             )
         else:
+            log_event(
+                logging.WARNING,
+                'bet_on',
+                '上一手待结算，阻止重复下注',
+                user_id=user_ctx.user_id,
+                category='warning',
+                **_build_runtime_chain_diag(
+                    rt,
+                    state,
+                    hold_reason="open_bet_still_pending",
+                    incoming_history_len=len(incoming_history),
+                ),
+            )
             await _send_transient_admin_notice(
                 client,
                 user_ctx,
@@ -2315,6 +2400,14 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     stop_count = int(rt.get("stop_count", 0) or 0)
     if stop_count > 0:
+        log_event(
+            logging.INFO,
+            'bet_on',
+            '暂停倒计时阻止下注',
+            user_id=user_ctx.user_id,
+            category='runtime',
+            **_build_runtime_chain_diag(rt, state, next_bet_amount=next_bet_amount_snapshot),
+        )
         rt["stop_count"] = max(0, stop_count - 1)
         rt["bet"] = False
         if rt["stop_count"] == 0:
@@ -2335,6 +2428,14 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             )
             await send_to_admin(client, mes, user_ctx, global_config)
             rt["limit_stop_notified"] = True
+        log_event(
+            logging.WARNING,
+            'bet_on',
+            '达到连投上限，停止下注',
+            user_id=user_ctx.user_id,
+            category='warning',
+            **_build_runtime_chain_diag(rt, state, lose_stop=lose_stop, next_bet_amount=bet_amount),
+        )
         rt["bet"] = False
         rt["bet_on"] = False
         rt["mode_stop"] = True
@@ -2409,6 +2510,21 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         rt["last_predict_confidence"] = 0
 
     if prediction == -1:
+        log_event(
+            logging.INFO,
+            'bet_on',
+            '模型返回观望，本局跳过',
+            user_id=user_ctx.user_id,
+            category='runtime',
+            **_build_runtime_chain_diag(
+                rt,
+                state,
+                predict_source=str(rt.get("last_predict_source", "")),
+                predict_tag=str(rt.get("last_predict_tag", "")),
+                predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
+                next_bet_amount=bet_amount,
+            ),
+        )
         rt["bet"] = False
         rt["bet_on"] = True
         rt["mode_stop"] = True
@@ -2439,6 +2555,19 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     combination = constants.find_combination(rt["bet_amount"], buttons)
 
     if not combination:
+        log_event(
+            logging.WARNING,
+            'bet_on',
+            '目标金额缺少可点击按钮组合',
+            user_id=user_ctx.user_id,
+            category='warning',
+            **_build_runtime_chain_diag(
+                rt,
+                state,
+                next_bet_amount=rt["bet_amount"],
+                button_side=direction_en,
+            ),
+        )
         rt["bet"] = False
         user_ctx.save_state()
         await _send_transient_admin_notice(
@@ -2511,6 +2640,24 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         "lose_stop": rt.get("lose_stop", 13),
         "profit_target": rt.get("profit", 1000000)
     })
+
+    log_event(
+        logging.INFO,
+        'bet_on',
+        '下注执行完成',
+        user_id=user_ctx.user_id,
+        category='business',
+        **_build_runtime_chain_diag(
+            rt,
+            state,
+            placed_bet_id=bet_id,
+            placed_direction=direction_en,
+            placed_amount=rt["bet_amount"],
+            predict_source=str(rt.get("last_predict_source", "")),
+            predict_tag=str(rt.get("last_predict_tag", "")),
+            predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
+        ),
+    )
 
     bet_report = generate_mobile_bet_report(
         state.history,
@@ -4210,6 +4357,20 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
         is_big = result_type == "大"
         result = 1 if is_big else 0
 
+        log_event(
+            logging.INFO,
+            'settle',
+            '收到结算并开始回写',
+            user_id=user_ctx.user_id,
+            category='runtime',
+            **_build_runtime_chain_diag(
+                rt,
+                state,
+                settle_msg_id=settle_msg_id,
+                settle_result=result_type,
+            ),
+        )
+
         try:
             rt["account_balance"] = await fetch_balance(user_ctx)
             rt["balance_status"] = "success"
@@ -4254,6 +4415,19 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
         if rt.get("bet", False):
             settled_entry = _get_latest_open_bet_entry(state)
             if settled_entry is None:
+                log_event(
+                    logging.WARNING,
+                    'settle',
+                    'runtime 标记待结算但未找到 open bet',
+                    user_id=user_ctx.user_id,
+                    category='warning',
+                    **_build_runtime_chain_diag(
+                        rt,
+                        state,
+                        settle_msg_id=settle_msg_id,
+                        settle_result=result_type,
+                    ),
+                )
                 rt["bet"] = False
                 user_ctx.save_state()
                 return
@@ -4266,6 +4440,23 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
             old_lose_count = int(rt.get("lose_count", 0))
             direction = "大" if prediction == 1 else "小"
             result_text = "赢" if win else "输"
+
+            log_event(
+                logging.INFO,
+                'settle',
+                '结算前链路诊断',
+                user_id=user_ctx.user_id,
+                category='runtime',
+                **_build_runtime_chain_diag(
+                    rt,
+                    state,
+                    settle_msg_id=settle_msg_id,
+                    settled_bet_id=str(settled_entry.get("bet_id", "unknown")),
+                    settled_amount=bet_amount,
+                    settled_prediction=direction,
+                    old_lose_count=old_lose_count,
+                ),
+            )
 
             rt["bet"] = False
             state.bet_type_history.append(prediction)
@@ -4292,6 +4483,25 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                     int(old_lose_count) + 1,
                 )
                 rt["bet_amount"] = int(active_chain_summary.get("last_amount", bet_amount) or bet_amount)
+
+            log_event(
+                logging.INFO,
+                'settle',
+                '结算后链路回写完成',
+                user_id=user_ctx.user_id,
+                category='business',
+                **_build_runtime_chain_diag(
+                    rt,
+                    state,
+                    settle_msg_id=settle_msg_id,
+                    settled_bet_id=str(settled_entry.get("bet_id", "unknown")),
+                    settle_outcome=result_text,
+                    settle_profit=profit,
+                    chain_sequence_after=int(rt.get("bet_sequence_count", 0) or 0),
+                    chain_lose_after=int(rt.get("lose_count", 0) or 0),
+                    next_bet_amount=int(calculate_bet_amount(rt) or 0),
+                ),
+            )
 
             if not win:
                 if rt.get("lose_count", 0) == 1:

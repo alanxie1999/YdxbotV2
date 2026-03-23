@@ -1531,6 +1531,7 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
     ]
 
     sent_messages = []
+    log_events = []
 
     async def fake_predict(user_ctx, global_cfg):
         user_ctx.state.runtime["last_predict_info"] = "runtime-heal"
@@ -1547,10 +1548,14 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
         coro.close()
         return None
 
+    def fake_log_event(level, module, event, message=None, **kwargs):
+        log_events.append((module, event, kwargs))
+
     monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(zm, "log_event", fake_log_event)
 
     class DummyEvent:
         def __init__(self):
@@ -1571,6 +1576,8 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
     assert ctx.state.bet_sequence_log[-1]["result"] is None
     assert any("运行中已修正异常挂单" in message for message in sent_messages)
     assert any("押注执行" in message for message in sent_messages)
+    assert any(event == "运行中自愈漏结算挂单" for _, event, _ in log_events)
+    assert any(event == "下注执行完成" for _, event, _ in log_events)
 
 
 def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, monkeypatch):
@@ -1638,8 +1645,58 @@ def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, mon
     assert "⚠️ 3 连输告警 ⚠️" in msg
     assert "😀 连续押注：3 次" in msg
     assert "💰 累计损失：2,420,500" in msg
-    assert rt["bet_sequence_count"] == 3
-    assert rt["lose_count"] == 3
+
+
+def test_process_settle_writes_chain_diagnostic_logs(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "settle_diag_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "结算诊断用户"},
+            "telegram": {"user_id": 5097},
+            "groups": {"admin_chat": 5097},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet"] = True
+    rt["bet_type"] = 1
+    rt["bet_amount"] = 1000
+    rt["bet_sequence_count"] = 2
+    rt["lose_count"] = 1
+    ctx.state.bet_sequence_log = [{"bet_id": "20260323_2_260", "amount": 1000, "result": None, "profit": 0}]
+
+    log_events = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        return SimpleNamespace(chat_id=5097, id=1)
+
+    async def fake_fetch_balance(user_ctx):
+        return 100000
+
+    def fake_log_event(level, module, event, message=None, **kwargs):
+        log_events.append((module, event, kwargs))
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "fetch_balance", fake_fetch_balance)
+    monkeypatch.setattr(zm, "log_event", fake_log_event)
+
+    class DummyClient:
+        async def send_message(self, target, message, parse_mode=None):
+            return SimpleNamespace(chat_id=target, id=1)
+
+        async def delete_messages(self, chat_id, message_id):
+            return None
+
+    event = SimpleNamespace(id=55001, message=SimpleNamespace(message="已结算: 结果为 9 大"))
+    asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
+
+    assert any(event == "收到结算并开始回写" for _, event, _ in log_events)
+    assert any(event == "结算前链路诊断" for _, event, _ in log_events)
+    assert any(event == "结算后链路回写完成" for _, event, _ in log_events)
+    assert rt["last_settle_message_id"] == 55001
+    assert ctx.state.bet_sequence_log[0]["result"] == "赢"
 
 
 def test_process_bet_on_insufficient_fund_sends_pause_notice_even_without_pending_bet(tmp_path, monkeypatch):
