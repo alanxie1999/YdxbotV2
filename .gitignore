@@ -51,6 +51,9 @@ ENV/
 .env
 .env.local
 
+# Codex 本地规范目录（仅本机使用，不同步到 GitHub）
+.codex-local/
+
 # 会话文件
 *.session
 *.session-journal
