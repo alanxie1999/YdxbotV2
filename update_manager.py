@@ -706,6 +706,7 @@ def _is_runtime_file(path: str) -> bool:
         "config/global.local.json",
         "config/global.json",
         "config/global_config.json",
+        "global_config.json",
         "global.json",
     }:
         return True

@@ -76,6 +76,7 @@ def test_get_blocking_dirty_paths_ignores_runtime_artifacts(monkeypatch, tmp_pat
             "?? users/shuji/session.session",
             " M users/shuji/state.json",
             "?? user/legacy_user/config.py",
+            " M global_config.json",
             " M config/global_config.json",
             "?? global.json",
             " M users/shuji/presets.json",
