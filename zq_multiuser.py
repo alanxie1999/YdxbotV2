@@ -1739,6 +1739,119 @@ def fallback_prediction(history):
     return prediction
 
 
+_PATTERN_LABELS = {
+    "LONG_DRAGON": "盘面连势明显",
+    "DRAGON_CANDIDATE": "连势开始抬头",
+    "DOUBLE_STREAK": "刚出现二连信号",
+    "SINGLE_JUMP": "单双交替明显",
+    "SYMMETRIC_WRAP": "盘面有来回拉扯",
+    "CHAOS_SWITCH": "盘面切换频繁",
+    "CHAOS_NOISE": "节奏偏乱",
+}
+
+_RHYTHM_LABELS = {
+    "ALTERNATION_RHYTHM": "单双交替更明显",
+    "PAIR_FORMATION": "成对走势更明显",
+    "DRAGON_TREND": "顺势延续更明显",
+    "CHAOS_NOISE": "节奏不稳定",
+}
+
+_REASON_REPLACEMENTS = [
+    ("alternation rhythm dominates", "单双交替更明显"),
+    ("pair formation rhythm dominates", "成对走势更明显"),
+    ("dragon trend dominates", "顺势延续更明显"),
+    ("chaos rhythm", "盘面偏乱"),
+    ("chaos switch", "盘面切换频繁"),
+    ("weak evidence", "依据偏弱"),
+    ("weak pair formation signal", "成对信号偏弱"),
+    ("supporting double streak evidence", "二连信号有一定支持"),
+    ("supporting double streak", "二连信号有一定支持"),
+    ("double streak", "二连信号"),
+    ("history hit rate supports alternation continuation", "历史命中率支持继续交替"),
+    ("history hit rate supports it", "历史命中率支持这个判断"),
+    ("despite chaos entropy tag", "虽然盘面有些乱"),
+    ("no streak support", "没有明显连势支撑"),
+    ("pair formation signal", "成对信号"),
+    ("pair formation", "成对走势"),
+    ("alternation continuation", "继续走交替"),
+    ("alternation", "交替走势"),
+    ("skip", "先观望"),
+]
+
+
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in str(text or ""))
+
+
+def _normalize_reason_text(raw_reason: str) -> str:
+    text = str(raw_reason or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    for old, new in _REASON_REPLACEMENTS:
+        lowered = lowered.replace(old, new)
+    lowered = lowered.replace("_", " ").replace("/", " ").replace("|", "，")
+    lowered = re.sub(r"\s+", " ", lowered).strip(" ,，。")
+    lowered = lowered.replace("  ", " ")
+    lowered = lowered.replace(" ,", "，").replace(",", "，")
+    lowered = lowered.replace(" .", "。").replace(".", "。")
+    lowered = lowered.replace(" ;", "；").replace(";", "；")
+    lowered = re.sub(r"\b(with|and|but|despite|while|because|the|a|an|to|of|for)\b", " ", lowered, flags=re.I)
+    lowered = re.sub(r"\s+", " ", lowered).strip(" ，。；")
+    return lowered
+
+
+def _fallback_reason_text(
+    pattern_tag: str,
+    rhythm_tag: str,
+    prediction: int,
+    confidence: int,
+) -> str:
+    pieces: List[str] = []
+    pattern_text = _PATTERN_LABELS.get(str(pattern_tag or "").upper(), "")
+    rhythm_text = _RHYTHM_LABELS.get(str(rhythm_tag or "").upper(), "")
+    if pattern_text:
+        pieces.append(pattern_text)
+    if rhythm_text and rhythm_text != pattern_text:
+        pieces.append(rhythm_text)
+
+    if prediction == -1:
+        if confidence < 40:
+            pieces.append("把握偏低，先观望一局")
+        else:
+            pieces.append("先观察一局更稳")
+    else:
+        if confidence < 40:
+            pieces.append("把握偏低")
+        elif confidence < 70:
+            pieces.append("把握一般")
+        else:
+            pieces.append("把握较强")
+
+    text = "，".join(piece for piece in pieces if piece)
+    return text or ("当前信号不清晰，先观望一局" if prediction == -1 else "当前信号可参考")
+
+
+def _humanize_predict_reason(
+    raw_reason: str,
+    pattern_tag: str,
+    rhythm_tag: str,
+    prediction: int,
+    confidence: int,
+) -> str:
+    normalized = _normalize_reason_text(raw_reason)
+    if not normalized or not _has_cjk(normalized):
+        normalized = _fallback_reason_text(pattern_tag, rhythm_tag, prediction, confidence)
+    else:
+        normalized = re.sub(r"\s+", " ", normalized).strip(" ，。；")
+        if prediction == -1 and not any(word in normalized for word in ("观望", "跳过", "先看", "先等")):
+            normalized = f"{normalized}，先观望一局"
+
+    parts = [part.strip(" ，。；") for part in re.split(r"[，。；]+", normalized) if part.strip(" ，。；")]
+    compact = "，".join(parts[:2]) if parts else normalized
+    return compact[:36].rstrip("，")
+
+
 def parse_analysis_result_insight(resp_text, default_prediction=1):
     """
     解析 AI 输出，返回 prediction/confidence/reason。
@@ -1956,6 +2069,11 @@ entropy_tag: {entropy_tag}
 - If pair rhythm dominates, prefer the side that forms the next double.
 - If neither rhythm is clearly dominant, or if the dominant rhythm is unsupported by history hit rate, output SKIP.
 
+[Language Rules]
+- reasoning 必须使用简体中文，面向普通用户，避免英文术语和标签名。
+- reasoning 尽量短，控制在 12 到 28 个汉字左右。
+- 可以像这样表达：`盘面偏乱，配对信号弱，先观望一局`。
+
 [Response Format]
 Return JSON only:
 {{"logic": "short summary", "reasoning": "why bet or skip", "confidence": 1-100, "prediction": -1 or 0 or 1}}"""
@@ -2028,10 +2146,17 @@ Return JSON only:
             confidence = 50
             reason = '强制校正：统计回归'
         
+        user_reason = _humanize_predict_reason(
+            reason,
+            pattern_tag,
+            rhythm_context['rhythm_tag'],
+            int(prediction),
+            int(confidence),
+        )
+
         # 构建预测信息
         rt["last_predict_info"] = (
-            f"模型分析/{pattern_tag}/{rhythm_context['rhythm_tag']} | {reason} | 信:{confidence}% | "
-            f"缺口:{gap:+d} | 回归:{trend_gap['regression_target']}"
+            f"{user_reason} | 信:{confidence}% | 缺口:{gap:+d} | 统计倾向:{'大' if trend_gap['regression_target'] == 1 else '小'}"
         )
         rt["last_predict_tag"] = pattern_tag
         rt["last_predict_confidence"] = int(confidence)
@@ -2039,7 +2164,7 @@ Return JSON only:
             rt["last_predict_source"] = "model_skip" if model_used else "fallback_skip"
         else:
             rt["last_predict_source"] = "model" if model_used else "fallback"
-        rt["last_predict_reason"] = reason
+        rt["last_predict_reason"] = user_reason
         rt["last_predict_gap"] = int(gap)
         rt["last_predict_long_term_gap"] = float(long_term_gap)
         rt["last_predict_tail_len"] = int(tail_streak_len)

@@ -173,6 +173,20 @@ def test_parse_analysis_result_insight_supports_skip_prediction():
     assert parsed["confidence"] == 66
 
 
+def test_humanize_predict_reason_turns_english_into_plain_chinese():
+    text = zm._humanize_predict_reason(
+        "Chaos rhythm with weak evidence",
+        "CHAOS_SWITCH",
+        "PAIR_FORMATION",
+        -1,
+        25,
+    )
+
+    assert "盘面" in text or "节奏" in text
+    assert "观望" in text
+    assert "Chaos" not in text
+
+
 def test_heal_stale_pending_bets_marks_orphan_none_records(tmp_path):
     user_dir = tmp_path / "users" / "heal_user_1"
     _write_json(
