@@ -79,6 +79,7 @@ def test_get_blocking_dirty_paths_ignores_runtime_artifacts(monkeypatch, tmp_pat
             " M global_config.json",
             " M config/global_config.json",
             "?? global.json",
+            "?? nohup.out",
             " M users/shuji/presets.json",
             "?? zq_multiuser.py",
         ]

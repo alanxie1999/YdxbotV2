@@ -690,6 +690,8 @@ def _is_runtime_file(path: str) -> bool:
     parts = [p for p in normalized.split("/") if p]
     if filename == ".DS_Store":
         return True
+    if filename == "nohup.out":
+        return True
     if normalized in {"state.json", "account_funds.json", "MULTIUSER_TEST_RESULTS.json"}:
         return True
     if normalized.endswith(".log"):
