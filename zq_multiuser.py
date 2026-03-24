@@ -1056,6 +1056,19 @@ def get_bet_status_text(rt: Dict[str, Any]) -> str:
     return "已暂停"
 
 
+def _format_account_balance_text(rt: Dict[str, Any]) -> str:
+    balance_status = str(rt.get("balance_status", "unknown") or "unknown")
+    account_balance = int(rt.get("account_balance", 0) or 0)
+
+    if balance_status == "auth_failed":
+        return "Cookie 失效"
+    if balance_status == "network_error":
+        return "网络异常"
+    if account_balance <= 0 and balance_status == "unknown":
+        return "获取中"
+    return format_number(account_balance)
+
+
 def _build_dashboard_summary(user_ctx: UserContext) -> str:
     rt = user_ctx.state.runtime
     status_text = get_bet_status_text(rt)
@@ -4399,6 +4412,8 @@ async def _handle_goal_pause_after_settle(
     _clear_lose_recovery_tracking(rt)
 
     resume_hint = _build_pause_resume_hint(rt)
+    account_balance_text = _format_account_balance_text(rt)
+    gambling_fund_text = format_number(max(0, int(rt.get("gambling_fund", 0) or 0)))
     pause_msg = _build_ops_card(
         f"⛔ {'被炸保护暂停' if notify_type == 'explode' else '盈利达成暂停'} ⛔",
         summary="系统已进入目标暂停，当前策略状态会被保留，不会重置首注。",
@@ -4406,6 +4421,8 @@ async def _handle_goal_pause_after_settle(
             ("原因", "被炸保护" if notify_type == 'explode' else "盈利达成"),
             ("本次暂停", f"{configured_stop_rounds} 局"),
             ("恢复提示", resume_hint),
+            ("账户资金", account_balance_text),
+            ("菠菜资金", gambling_fund_text),
         ],
         action="建议等待倒计时结束，或执行 `status` 查看剩余暂停局数。",
     )

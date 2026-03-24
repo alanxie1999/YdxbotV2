@@ -2738,6 +2738,53 @@ def test_predict_next_bet_core_queues_failure_notice_when_model_chain_unavailabl
     assert "超时" in rt["pending_model_notice"]["detail"]
 
 
+def test_handle_goal_pause_after_settle_includes_account_and_gambling_funds(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "goal_pause_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "目标暂停用户"},
+            "telegram": {"user_id": 70126},
+            "groups": {"admin_chat": 70126},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["flag"] = True
+    rt["period_profit"] = 1_200_000
+    rt["profit"] = 1_000_000
+    rt["profit_stop"] = 2
+    rt["stop"] = 3
+    rt["account_balance"] = 24_315_000
+    rt["balance_status"] = "success"
+    rt["gambling_fund"] = 21_654_000
+    rt["current_round"] = 2
+    ctx.state.bet_sequence_log = [
+        {"bet_id": "20260324_2_1", "amount": 20_000, "result": "赢", "profit": 19_800},
+    ]
+
+    sent = []
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, *args, **kwargs):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=70126, id=len(sent))
+
+    async def fake_refresh_pause_countdown_notice(client, user_ctx, global_cfg, remaining_rounds=None):
+        return None
+
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+    monkeypatch.setattr(zm, "_refresh_pause_countdown_notice", fake_refresh_pause_countdown_notice)
+
+    result = asyncio.run(zm._handle_goal_pause_after_settle(SimpleNamespace(), ctx, {}))
+
+    assert result is True
+    goal_messages = [message for msg_type, message in sent if msg_type == "goal_pause"]
+    assert goal_messages
+    assert "账户资金：24,315,000" in goal_messages[0]
+    assert "菠菜资金：21,654,000" in goal_messages[0]
+
+
 def test_res_bet_resets_current_chain_reconciliation(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "res_bet_user"
     _write_json(
