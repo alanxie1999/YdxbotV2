@@ -164,6 +164,98 @@ def test_model_manager_call_model_immediately_falls_back_to_next_ranked_model():
     assert result["fallback_used"] is True
 
 
+def test_model_manager_apply_shared_config_detects_nvidia_provider_and_default_rate_limit():
+    mgr = ModelManager()
+    mgr.apply_shared_config(
+        {
+            "ai": {
+                "enabled": True,
+                "api_keys": ["nv-key"],
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "models": {
+                    "1": {"model_id": "qwen/qwen3-next-80b-a3b-instruct", "enabled": True},
+                },
+                "fallback_chain": ["1"],
+            }
+        }
+    )
+
+    model = mgr.get_model("1")
+    assert model is not None
+    assert model["provider"] == "nvidia"
+    assert model["rate_limit_rpm"] == 40
+
+
+def test_model_manager_call_model_routes_nvidia_provider_via_openai_compatible_adapter():
+    mgr = ModelManager()
+    mgr.apply_shared_config(
+        {
+            "ai": {
+                "enabled": True,
+                "provider": "nvidia",
+                "api_keys": ["nv-key"],
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "models": {
+                    "1": {"model_id": "qwen/qwen3-next-80b-a3b-instruct", "enabled": True},
+                },
+                "fallback_chain": ["1"],
+            }
+        }
+    )
+
+    seen = {}
+
+    async def fake_iflow(config, messages, **kwargs):
+        seen["provider"] = config.get("provider")
+        seen["rate_limit_rpm"] = config.get("rate_limit_rpm")
+        return {"success": True, "error": "", "content": '{"prediction": 1}'}
+
+    mgr._call_iflow = fake_iflow
+
+    result = asyncio.run(
+        mgr.call_model("1", [{"role": "user", "content": "ping"}], temperature=0.1, max_tokens=10)
+    )
+
+    assert result["success"] is True
+    assert seen["provider"] == "nvidia"
+    assert seen["rate_limit_rpm"] == 40
+
+
+def test_model_manager_missing_requested_model_falls_back_to_chain_head():
+    mgr = ModelManager()
+    mgr.apply_shared_config(
+        {
+            "ai": {
+                "enabled": True,
+                "provider": "nvidia",
+                "api_keys": ["nv-key"],
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "models": {
+                    "1": {"model_id": "qwen/qwen3-next-80b-a3b-instruct", "enabled": True},
+                    "2": {"model_id": "moonshotai/kimi-k2-instruct", "enabled": True},
+                },
+                "fallback_chain": ["1", "2"],
+            }
+        }
+    )
+
+    seen = []
+
+    async def fake_iflow(config, messages, **kwargs):
+        seen.append(config.get("model_id"))
+        return {"success": True, "error": "", "content": '{"prediction": 1}'}
+
+    mgr._call_iflow = fake_iflow
+
+    result = asyncio.run(
+        mgr.call_model("deepseek-v3", [{"role": "user", "content": "ping"}], temperature=0.1, max_tokens=10)
+    )
+
+    assert result["success"] is True
+    assert result["model_id"] == "qwen/qwen3-next-80b-a3b-instruct"
+    assert seen == ["qwen/qwen3-next-80b-a3b-instruct"]
+
+
 def test_parse_analysis_result_insight_supports_skip_prediction():
     parsed = zm.parse_analysis_result_insight(
         '{"prediction":"SKIP","confidence":66,"reason":"证据冲突"}',
@@ -1666,6 +1758,10 @@ def test_process_bet_on_pause_countdown_completion_restores_flag(tmp_path):
     rt["mode_stop"] = False
     rt["stop_count"] = 1
     rt["flag"] = False
+    rt["pause_countdown_active"] = True
+    rt["pause_countdown_reason"] = "盈利达成暂停"
+    rt["pause_countdown_total_rounds"] = 2
+    rt["pause_countdown_last_remaining"] = 1
 
     event = SimpleNamespace(
         id=60001,
@@ -1679,6 +1775,54 @@ def test_process_bet_on_pause_countdown_completion_restores_flag(tmp_path):
     assert rt["stop_count"] == 0
     assert rt["flag"] is True
     assert rt["bet_on"] is True
+    assert rt["pause_countdown_active"] is False
+    assert rt["pause_countdown_reason"] == ""
+    assert rt["pause_countdown_last_remaining"] == -1
+
+
+def test_process_bet_on_updates_pause_countdown_remaining(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "pause_refresh_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "暂停刷新用户"},
+            "telegram": {"user_id": 5099},
+            "groups": {"admin_chat": 5099},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = False
+    rt["bet_on"] = False
+    rt["mode_stop"] = False
+    rt["stop_count"] = 2
+    rt["flag"] = False
+    rt["pause_countdown_active"] = True
+    rt["pause_countdown_reason"] = "盈利达成暂停"
+    rt["pause_countdown_total_rounds"] = 2
+    rt["pause_countdown_last_remaining"] = 2
+
+    refreshed = {}
+
+    async def fake_refresh_pause_countdown_notice(client, user_ctx, global_cfg, remaining_rounds):
+        refreshed["remaining_rounds"] = remaining_rounds
+
+    monkeypatch.setattr(zm, "_refresh_pause_countdown_notice", fake_refresh_pause_countdown_notice)
+
+    event = SimpleNamespace(
+        id=60002,
+        chat_id=5099,
+        reply_markup=None,
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["stop_count"] == 1
+    assert rt["pause_countdown_last_remaining"] == 1
+    assert refreshed["remaining_rounds"] == 1
 
 
 def test_process_bet_on_force_unlocks_after_repeated_skip(tmp_path, monkeypatch):
@@ -2526,7 +2670,53 @@ def test_predict_next_bet_core_updates_current_model_after_fallback(tmp_path, mo
 
     assert prediction == 1
     assert rt["current_model_id"] == "model-2"
+    assert rt["pending_model_notice"]["type"] == "switch"
+    assert rt["pending_model_notice"]["from_model"] == "model-1"
+    assert rt["pending_model_notice"]["to_model"] == "model-2"
     assert '"model_id": "model-2"' in rt["last_logic_audit"]
+
+
+def test_predict_next_bet_core_queues_failure_notice_when_model_chain_unavailable(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "fallback_fail_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型失败用户"},
+            "telegram": {"user_id": 70125},
+            "groups": {"admin_chat": 70125},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {
+                "enabled": True,
+                "api_keys": ["k1"],
+                "models": {
+                    "1": {"model_id": "model-1", "enabled": True},
+                    "2": {"model_id": "model-2", "enabled": True},
+                },
+                "fallback_chain": ["1", "2"],
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.state.history = [0, 1] * 30
+    rt = ctx.state.runtime
+    rt["current_model_id"] = "model-1"
+
+    class FakeModelManager:
+        async def call_model(self, model_id, messages, **kwargs):
+            return {
+                "success": False,
+                "error": "model-1 调用失败: 超时 | model-2 调用失败: 429",
+                "content": "",
+            }
+
+    monkeypatch.setattr(ctx, "get_model_manager", lambda: FakeModelManager())
+
+    prediction = asyncio.run(zm.predict_next_bet_core(ctx, {}))
+
+    assert prediction in (0, 1)
+    assert rt["pending_model_notice"]["type"] == "failure"
+    assert rt["pending_model_notice"]["from_model"] == "model-1"
+    assert "超时" in rt["pending_model_notice"]["detail"]
 
 
 def test_res_bet_resets_current_chain_reconciliation(tmp_path, monkeypatch):

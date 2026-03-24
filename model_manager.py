@@ -2,6 +2,8 @@ import logging
 import aiohttp
 import asyncio
 import time
+import hashlib
+from collections import deque
 from typing import Dict, List, Any, Optional
 
 try:
@@ -19,6 +21,76 @@ except ImportError:
     HAS_DASHSCOPE = False
 
 logger = logging.getLogger('model_manager')
+
+_OPENAI_COMPATIBLE_RATE_LIMIT_WINDOWS: Dict[str, deque] = {}
+_OPENAI_COMPATIBLE_RATE_LIMIT_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _normalize_base_url(base_url: Any) -> str:
+    return str(base_url or "").rstrip("/")
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _infer_openai_compatible_provider(provider: Any, base_url: Any) -> str:
+    explicit = str(provider or "").strip().lower()
+    if explicit:
+        return explicit
+
+    normalized = _normalize_base_url(base_url).lower()
+    if "integrate.api.nvidia.com" in normalized:
+        return "nvidia"
+    if "apis.iflow.cn" in normalized:
+        return "iflow"
+    return "openai_compatible"
+
+
+def _provider_display_name(provider: Any) -> str:
+    provider_name = str(provider or "").strip().lower()
+    mapping = {
+        "nvidia": "NVIDIA",
+        "iflow": "iFlow",
+        "openai_compatible": "OpenAI Compatible",
+        "openai-compatible": "OpenAI Compatible",
+    }
+    return mapping.get(provider_name, provider_name or "OpenAI Compatible")
+
+
+async def _acquire_openai_compatible_rate_limit(
+    provider: str,
+    base_url: str,
+    api_key: str,
+    rpm: int,
+):
+    if rpm <= 0:
+        return
+
+    key_hash = hashlib.sha256(str(api_key or "").encode("utf-8")).hexdigest()[:12]
+    bucket = f"{provider}:{_normalize_base_url(base_url)}:{key_hash}"
+    lock = _OPENAI_COMPATIBLE_RATE_LIMIT_LOCKS.setdefault(bucket, asyncio.Lock())
+
+    async with lock:
+        now = time.monotonic()
+        window = _OPENAI_COMPATIBLE_RATE_LIMIT_WINDOWS.setdefault(bucket, deque())
+        while window and now - window[0] >= 60:
+            window.popleft()
+
+        if len(window) >= rpm:
+            wait_sec = max(0.05, 60 - (now - window[0]) + 0.05)
+            logger.warning(
+                f"{_provider_display_name(provider)} 达到速率上限，等待 {wait_sec:.1f}s 后继续"
+            )
+            await asyncio.sleep(wait_sec)
+            now = time.monotonic()
+            while window and now - window[0] >= 60:
+                window.popleft()
+
+        window.append(now)
 
 class ModelManager:
     def __init__(self):
@@ -61,23 +133,33 @@ class ModelManager:
             # 2. 加载 SiliconFlow (已移除)
             pass
 
-            # 3. 加载 iFlow 模型
+            # 3. 加载 OpenAI 兼容模型（iFlow / NVIDIA / 其他兼容端点）
             if self.shared_ai_config:
                 iflow_enabled = self.shared_ai_config.get('enabled', True)
                 api_key = self.shared_ai_config.get('api_keys', self.shared_ai_config.get('api_key', ""))
                 base_url = self.shared_ai_config.get('base_url', "https://apis.iflow.cn/v1")
                 iflow_models = self.shared_ai_config.get('models', {})
                 configured_chain = self.shared_ai_config.get('fallback_chain', [])
+                provider = self.shared_ai_config.get('provider', "")
+                timeout_sec = self.shared_ai_config.get('timeout', 30)
+                rate_limit_rpm = self.shared_ai_config.get('rate_limit_rpm')
             else:
                 iflow_enabled = getattr(legacy_config, 'IFLOW_ENABLED', False)
                 api_key = getattr(legacy_config, 'IFLOW_API_KEY', "")
                 base_url = getattr(legacy_config, 'IFLOW_BASE_URL', "https://apis.iflow.cn/v1")
                 iflow_models = getattr(legacy_config, 'IFLOW_MODELS', {})
                 configured_chain = getattr(legacy_config, 'MODEL_FALLBACK_CHAIN', [])
+                provider = "iflow"
+                timeout_sec = 30
+                rate_limit_rpm = None
 
             if iflow_enabled:
                 if not isinstance(iflow_models, dict):
                     iflow_models = {}
+                resolved_provider = _infer_openai_compatible_provider(provider, base_url)
+                resolved_rate_limit_rpm = _safe_int(rate_limit_rpm, 0)
+                if resolved_provider == "nvidia" and resolved_rate_limit_rpm <= 0:
+                    resolved_rate_limit_rpm = 40
                 
                 for idx, info in iflow_models.items():
                     if not isinstance(info, dict):
@@ -85,11 +167,13 @@ class ModelManager:
                     # 新格式：序号作为key，model_id在value中
                     actual_model_id = info.get("model_id", idx)
                     self.models.append({
-                        "provider": "iflow",
+                        "provider": resolved_provider,
                         "model_id": actual_model_id,
                         "name": info.get("name", actual_model_id),
                         "api_key": api_key,
                         "base_url": base_url,
+                        "timeout": _safe_int(timeout_sec, 30),
+                        "rate_limit_rpm": resolved_rate_limit_rpm,
                         "max_tokens": info.get("max_tokens", 8192),
                         "enabled": info.get("enabled", True),
                         "idx": str(idx)  # 保留序号用于选择
@@ -186,18 +270,22 @@ class ModelManager:
             start_idx = fallback_chain.index(target_model_id)
             try_models = fallback_chain[start_idx:]
         else:
-            # 可能是真实的模型ID（如"iflow-rome-30ba3b"）
-            # 先尝试直接调用
-            try_models = [target_model_id]
-            
-            # 如果该模型在降级链中，添加链中后续的模型作为备选
-            for idx_key in fallback_chain:
-                model_cfg = self.get_model(idx_key)
-                if model_cfg and str(model_cfg.get('model_id')) == target_model_id:
-                    # 找到了对应的配置key，添加链中后续的模型
-                    start_idx = fallback_chain.index(idx_key) + 1
-                    try_models.extend(fallback_chain[start_idx:])
-                    break
+            # 可能是真实的模型ID（如"qwen/qwen3-next..."）。
+            if requested_model is None and fallback_chain:
+                # 运行态里残留了旧 provider 的模型名时，直接回退到当前链路的第一个模型。
+                try_models = fallback_chain[:]
+            else:
+                # 先尝试直接调用
+                try_models = [target_model_id]
+                
+                # 如果该模型在降级链中，添加链中后续的模型作为备选
+                for idx_key in fallback_chain:
+                    model_cfg = self.get_model(idx_key)
+                    if model_cfg and str(model_cfg.get('model_id')) == target_model_id:
+                        # 找到了对应的配置key，添加链中后续的模型
+                        start_idx = fallback_chain.index(idx_key) + 1
+                        try_models.extend(fallback_chain[start_idx:])
+                        break
             
         # 记录所有尝试的错误
         errors = []
@@ -223,7 +311,7 @@ class ModelManager:
                     result = await self._call_aliyun(model_config, messages, **kwargs)
                 elif provider == 'google':
                     result = await self._call_google(model_config, messages, **kwargs)
-                elif provider == 'iflow':
+                elif provider in {'iflow', 'nvidia', 'openai_compatible', 'openai-compatible'}:
                     result = await self._call_iflow(model_config, messages, **kwargs)
                 elif provider == 'siliconflow':
                     result = await self._call_siliconflow(model_config, messages, **kwargs)
@@ -252,10 +340,17 @@ class ModelManager:
         return {"success": False, "error": " | ".join(errors), "content": ""}
 
     async def _call_iflow(self, config: Dict[str, Any], messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
-        """iFlow (OpenAI Compatible) API 调用适配"""
+        """OpenAI 兼容 API 调用适配（iFlow / NVIDIA / 其他兼容端点）"""
         api_key = self.get_api_key(config)
-        base_url = config.get('base_url', 'https://apis.iflow.cn/v1')
+        provider = _infer_openai_compatible_provider(config.get('provider'), config.get('base_url'))
+        provider_label = _provider_display_name(provider)
+        base_url = _normalize_base_url(config.get('base_url') or 'https://apis.iflow.cn/v1')
         model_id = config['model_id']
+        timeout_sec = max(1, _safe_int(config.get('timeout', 30), 30))
+        rate_limit_rpm = _safe_int(config.get('rate_limit_rpm', 0), 0)
+        max_retries = max(1, _safe_int(config.get('max_retries', 1), 1))
+        if provider == "nvidia" and rate_limit_rpm <= 0:
+            rate_limit_rpm = 40
         
         url = f"{base_url}/chat/completions"
         
@@ -281,73 +376,90 @@ class ModelManager:
             "stream": False
         }
 
+        await _acquire_openai_compatible_rate_limit(
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+            rpm=rate_limit_rpm,
+        )
+
         async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, headers=headers, json=payload, timeout=30) as response:
-                    if response.status != 200:
-                        text = await response.text()
-                        return {"success": False, "error": f"iFlow API Error {response.status}: {text}", "content": ""}
-                    
-                    data = await response.json()
+            for attempt in range(1, max_retries + 1):
+                try:
+                    async with session.post(url, headers=headers, json=payload, timeout=timeout_sec) as response:
+                        if response.status != 200:
+                            text = await response.text()
+                            error_text = f"{provider_label} API Error {response.status}: {text}"
+                            if response.status in {408, 409, 425, 429, 449, 500, 502, 503, 504} and attempt < max_retries:
+                                await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                                continue
+                            return {"success": False, "error": error_text, "content": ""}
+                        
+                        data = await response.json()
 
-                    if isinstance(data, dict) and data.get("error"):
-                        return {"success": False, "error": f"iFlow API Error: {data.get('error')}", "content": ""}
+                        if isinstance(data, dict) and data.get("error"):
+                            return {"success": False, "error": f"{provider_label} API Error: {data.get('error')}", "content": ""}
 
-                    # 修复：兼容多种响应结构，原因：部分模型不会返回标准 message.content 字符串。
-                    # 兼容 OpenAI 风格 message.content (str/list)
-                    choices = data.get("choices", []) if isinstance(data, dict) else []
-                    if isinstance(choices, list) and choices:
-                        choice = choices[0] if isinstance(choices[0], dict) else {}
-                        message = choice.get("message", {}) if isinstance(choice, dict) else {}
-                        content = message.get("content") if isinstance(message, dict) else None
+                        # 修复：兼容多种响应结构，原因：部分模型不会返回标准 message.content 字符串。
+                        # 兼容 OpenAI 风格 message.content (str/list)
+                        choices = data.get("choices", []) if isinstance(data, dict) else []
+                        if isinstance(choices, list) and choices:
+                            choice = choices[0] if isinstance(choices[0], dict) else {}
+                            message = choice.get("message", {}) if isinstance(choice, dict) else {}
+                            content = message.get("content") if isinstance(message, dict) else None
 
-                        if isinstance(content, str) and content.strip():
-                            return {"success": True, "content": content, "error": ""}
+                            if isinstance(content, str) and content.strip():
+                                return {"success": True, "content": content, "error": ""}
 
-                        if isinstance(content, list):
-                            parts = []
-                            for item in content:
-                                if isinstance(item, str):
-                                    parts.append(item)
-                                elif isinstance(item, dict):
-                                    text = item.get("text") or item.get("content")
-                                    if text:
-                                        parts.append(str(text))
-                            merged = "".join(parts).strip()
-                            if merged:
-                                return {"success": True, "content": merged, "error": ""}
+                            if isinstance(content, list):
+                                parts = []
+                                for item in content:
+                                    if isinstance(item, str):
+                                        parts.append(item)
+                                    elif isinstance(item, dict):
+                                        text = item.get("text") or item.get("content")
+                                        if text:
+                                            parts.append(str(text))
+                                merged = "".join(parts).strip()
+                                if merged:
+                                    return {"success": True, "content": merged, "error": ""}
 
-                        # 某些模型可能只返回 reasoning_content
-                        reasoning_content = message.get("reasoning_content") if isinstance(message, dict) else None
-                        if isinstance(reasoning_content, str) and reasoning_content.strip():
-                            return {"success": True, "content": reasoning_content, "error": ""}
+                            # 某些模型可能只返回 reasoning_content
+                            reasoning_content = message.get("reasoning_content") if isinstance(message, dict) else None
+                            if isinstance(reasoning_content, str) and reasoning_content.strip():
+                                return {"success": True, "content": reasoning_content, "error": ""}
 
-                        # 兼容极少数模型返回 choices[0].text
-                        choice_text = choice.get("text") if isinstance(choice, dict) else None
-                        if isinstance(choice_text, str) and choice_text.strip():
-                            return {"success": True, "content": choice_text, "error": ""}
+                            # 兼容极少数模型返回 choices[0].text
+                            choice_text = choice.get("text") if isinstance(choice, dict) else None
+                            if isinstance(choice_text, str) and choice_text.strip():
+                                return {"success": True, "content": choice_text, "error": ""}
 
-                    # 兼容 output_text 结构
-                    if isinstance(data, dict):
-                        output_text = data.get("output_text")
-                        if isinstance(output_text, str) and output_text.strip():
-                            return {"success": True, "content": output_text, "error": ""}
-                        output = data.get("output")
-                        if isinstance(output, dict):
-                            text = output.get("text")
-                            if isinstance(text, str) and text.strip():
-                                return {"success": True, "content": text, "error": ""}
+                        # 兼容 output_text 结构
+                        if isinstance(data, dict):
+                            output_text = data.get("output_text")
+                            if isinstance(output_text, str) and output_text.strip():
+                                return {"success": True, "content": output_text, "error": ""}
+                            output = data.get("output")
+                            if isinstance(output, dict):
+                                text = output.get("text")
+                                if isinstance(text, str) and text.strip():
+                                    return {"success": True, "content": text, "error": ""}
 
-                    return {
-                        "success": False,
-                        "error": f"iFlow Response Parse Error: {str(data)[:500]}",
-                        "content": ""
-                    }
-            except asyncio.TimeoutError:
-                return {"success": False, "error": "iFlow API Timeout", "content": ""}
-            except Exception as e:
-                # 修复：错误类型命名不准确，原因：解析/序列化异常不应标记为 Connection Error。
-                return {"success": False, "error": f"iFlow Request Error: {str(e)}", "content": ""}
+                        return {
+                            "success": False,
+                            "error": f"{provider_label} Response Parse Error: {str(data)[:500]}",
+                            "content": ""
+                        }
+                except asyncio.TimeoutError:
+                    if attempt < max_retries:
+                        await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                        continue
+                    return {"success": False, "error": f"{provider_label} API Timeout", "content": ""}
+                except Exception as e:
+                    if attempt < max_retries:
+                        await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                        continue
+                    return {"success": False, "error": f"{provider_label} Request Error: {str(e)}", "content": ""}
 
 
     async def _call_aliyun(self, config: Dict[str, Any], messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:

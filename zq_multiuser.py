@@ -773,15 +773,157 @@ def _mark_ai_key_issue(rt: Dict[str, Any], reason: str):
 def _clear_ai_key_issue(rt: Dict[str, Any]):
     rt["ai_key_issue_active"] = False
     rt["ai_key_issue_reason"] = ""
+    rt["last_ai_key_warning_notice_sig"] = ""
 
 
 def _build_ai_key_warning_message(rt: Dict[str, Any]) -> str:
     reason = str(rt.get("ai_key_issue_reason", "")).strip()
-    reason_line = f"\n原因：{reason}" if reason else ""
-    return (
-        f"{AI_KEY_WARNING_TEXT}\n"
-        f"当前模型：{rt.get('current_model_id', 'unknown')}{reason_line}\n"
-        "请在管理员窗口执行：`apikey set <新key>`"
+    return _build_ops_card(
+        "🔑 模型鉴权异常提醒",
+        summary="当前模型鉴权异常，系统可能无法稳定调用模型。",
+        fields=[
+            ("当前模型", rt.get("current_model_id", "unknown")),
+            ("原因", reason or "未返回明确鉴权原因"),
+        ],
+        action="建议在管理员窗口执行 `apikey` 或 `models` 检查当前配置，并准备新的可用 key。",
+        note="若后续整条模型链都不可用，系统会继续发出兜底告警。",
+    )
+
+
+def _summarize_model_error(error_text: str, max_parts: int = 2) -> str:
+    text = str(error_text or "").strip()
+    if not text:
+        return "未返回明确错误"
+
+    text = re.sub(r"^Model Error:\s*", "", text)
+    replacements = [
+        ("NVIDIA API Error", "NVIDIA 接口错误"),
+        ("NVIDIA Request Error", "NVIDIA 请求异常"),
+        ("NVIDIA API Timeout", "NVIDIA 接口超时"),
+        ("OpenAI Compatible API Error", "兼容接口错误"),
+        ("OpenAI Compatible Request Error", "兼容接口请求异常"),
+        ("OpenAI Compatible API Timeout", "兼容接口超时"),
+        ("iFlow API Error", "iFlow 接口错误"),
+        ("iFlow Request Error", "iFlow 请求异常"),
+        ("iFlow API Timeout", "iFlow 接口超时"),
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+
+    parts = [part.strip() for part in text.split(" | ") if part.strip()]
+    if not parts:
+        parts = [text]
+
+    picked: List[str] = []
+    for part in parts[:max_parts]:
+        cleaned = re.sub(r"^[^:]{1,120}? 调用失败:\s*", "", part).strip()
+        picked.append(cleaned[:80])
+
+    if len(parts) > max_parts:
+        picked.append(f"等 {len(parts)} 项")
+    return "；".join(piece for piece in picked if piece)[:180]
+
+
+def _queue_model_notice(
+    rt: Dict[str, Any],
+    notice_type: str,
+    *,
+    signature: str,
+    from_model: str = "",
+    to_model: str = "",
+    detail: str = "",
+) -> None:
+    if not signature:
+        return
+
+    sig_key = f"last_model_notice_sig_{notice_type}"
+    if rt.get(sig_key, "") == signature:
+        return
+
+    rt["pending_model_notice"] = {
+        "type": str(notice_type or "").strip(),
+        "signature": signature,
+        "from_model": str(from_model or "").strip(),
+        "to_model": str(to_model or "").strip(),
+        "detail": str(detail or "").strip(),
+    }
+    rt[sig_key] = signature
+
+
+async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_config: dict) -> None:
+    rt = user_ctx.state.runtime
+    notice = rt.pop("pending_model_notice", None)
+    if not isinstance(notice, dict):
+        return
+
+    notice_type = str(notice.get("type", "")).strip()
+    from_model = str(notice.get("from_model", "")).strip() or "unknown"
+    to_model = str(notice.get("to_model", "")).strip() or "unknown"
+    detail = str(notice.get("detail", "")).strip() or "未返回明确说明"
+
+    if notice_type == "switch":
+        message = _build_ops_card(
+            "🤖 模型已自动切换",
+            summary="当前主模型不可用，系统已自动切到备用模型并继续运行。",
+            fields=[
+                ("原模型", from_model),
+                ("当前模型", to_model),
+                ("说明", detail),
+            ],
+            action="当前已自动续跑，无需立刻处理；如需核对链路，可执行 `status` 或 `models`。",
+        )
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            message,
+            ttl_seconds=180,
+            attr_name="model_switch_notice_message",
+            msg_type="info",
+        )
+        return
+
+    if notice_type == "failure":
+        message = _build_ops_card(
+            "🚨 模型链不可用，已切统计兜底",
+            summary="当前主模型和备用模型都未返回可用结果，本局已改用统计兜底继续运行。",
+            fields=[
+                ("起始模型", from_model),
+                ("失败概况", detail),
+                ("当前动作", "已切到统计兜底"),
+            ],
+            action="建议尽快执行 `status`、`models`、`apikey` 检查模型与 key。",
+            note="如果连续出现，建议优先更换 key 或缩短模型链。",
+        )
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            message,
+            ttl_seconds=240,
+            attr_name="model_failure_notice_message",
+            msg_type="info",
+        )
+
+
+async def _notify_ai_key_warning_if_needed(client, user_ctx: UserContext, global_config: dict) -> None:
+    rt = user_ctx.state.runtime
+    if not rt.get("ai_key_issue_active", False):
+        return
+
+    message = _build_ai_key_warning_message(rt)
+    if rt.get("last_ai_key_warning_notice_sig", "") == message:
+        return
+
+    rt["last_ai_key_warning_notice_sig"] = message
+    await _send_transient_admin_notice(
+        client,
+        user_ctx,
+        global_config,
+        message,
+        ttl_seconds=300,
+        attr_name="ai_key_warning_message",
+        msg_type="info",
     )
 
 
@@ -2211,8 +2353,20 @@ Return JSON only:
                 raise Exception(f"Model Error: {result['error']}")
 
             _clear_ai_key_issue(rt)
+            rt["last_model_notice_sig_failure"] = ""
             actual_model_id = str(result.get("model_id") or current_model_id)
             if actual_model_id != current_model_id:
+                switch_detail = "旧模型已不可用，已切到当前备用模型。"
+                if str(result.get("requested_model_id") or "") != actual_model_id:
+                    switch_detail = "原模型不可用，系统已按当前降级链自动切换。"
+                _queue_model_notice(
+                    rt,
+                    "switch",
+                    signature=f"{current_model_id}->{actual_model_id}",
+                    from_model=current_model_id,
+                    to_model=actual_model_id,
+                    detail=switch_detail,
+                )
                 rt["current_model_id"] = actual_model_id
                 log_event(
                     logging.WARNING,
@@ -2234,6 +2388,13 @@ Return JSON only:
                 _mark_ai_key_issue(rt, "未配置可用 api_keys")
             elif _looks_like_ai_key_issue(err_text):
                 _mark_ai_key_issue(rt, err_text)
+            _queue_model_notice(
+                rt,
+                "failure",
+                signature=f"{current_model_id}|{_summarize_model_error(err_text)}",
+                from_model=current_model_id,
+                detail=_summarize_model_error(err_text),
+            )
             log_event(logging.WARNING, 'predict_core', '模型调用失败，统计兜底', 
                       user_id=user_ctx.user_id, data=err_text)
             final_result = {
@@ -2525,11 +2686,21 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         )
         rt["stop_count"] = max(0, stop_count - 1)
         rt["bet"] = False
+        if rt.get("pause_countdown_active", False):
+            rt["pause_countdown_last_remaining"] = int(rt["stop_count"])
+            if rt["stop_count"] > 0:
+                await _refresh_pause_countdown_notice(
+                    client,
+                    user_ctx,
+                    global_config,
+                    remaining_rounds=int(rt["stop_count"]),
+                )
         if rt["stop_count"] == 0:
             rt["flag"] = True
             rt["bet_on"] = True
             rt["mode_stop"] = True
             rt["pause_reason"] = ""
+            await _clear_pause_countdown_notice(client, user_ctx)
         user_ctx.save_state()
         return
 
@@ -2620,6 +2791,13 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         rt["last_predict_source"] = "timeout_fallback"
         rt["last_predict_tag"] = "TIMEOUT_FALLBACK"
         rt["last_predict_confidence"] = 0
+        _queue_model_notice(
+            rt,
+            "failure",
+            signature=f"timeout|{rt.get('current_model_id', 'unknown')}",
+            from_model=str(rt.get("current_model_id", "unknown")),
+            detail="模型预测超时，已改用统计兜底。",
+        )
 
     if prediction not in (-1, 0, 1):
         prediction = int(fallback_prediction(state.history))
@@ -2627,6 +2805,15 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         rt["last_predict_source"] = "invalid_fallback"
         rt["last_predict_tag"] = "INVALID_FALLBACK"
         rt["last_predict_confidence"] = 0
+        _queue_model_notice(
+            rt,
+            "failure",
+            signature=f"invalid|{rt.get('current_model_id', 'unknown')}",
+            from_model=str(rt.get("current_model_id", "unknown")),
+            detail="模型返回无效结果，已改用统计兜底。",
+        )
+
+    await _flush_model_runtime_notice(client, user_ctx, global_config)
 
     if prediction == -1:
         skip_trigger = _record_hand_stall_block(rt, next_sequence, history_signature, "skip")
@@ -2704,8 +2891,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             )
             return
 
-    if rt.get("ai_key_issue_active", False):
-        await send_to_admin(client, _build_ai_key_warning_message(rt), user_ctx, global_config)
+    await _notify_ai_key_warning_if_needed(client, user_ctx, global_config)
 
     rt["bet_amount"] = int(bet_amount)
     direction = "大" if prediction == 1 else "小"
