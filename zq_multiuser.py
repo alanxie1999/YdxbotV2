@@ -32,7 +32,8 @@ logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
 ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
-_ACCOUNT_NAME_REGISTRY: Dict[str, str] = {}
+ACCOUNT_LOG_BACKUP_DAYS = 3
+_ACCOUNT_SLUG_REGISTRY: Dict[str, str] = {}
 
 
 def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
@@ -45,6 +46,14 @@ def _build_account_label(account_slug: str) -> str:
     return f"ydx-{account_slug}"
 
 
+def _resolve_user_ctx_log_slug(user_ctx: UserContext) -> str:
+    slug = str(getattr(user_ctx, "account_slug", "") or "").strip()
+    if slug:
+        return slug
+    user_id = str(getattr(user_ctx, "user_id", 0) or 0)
+    return _sanitize_account_slug("", fallback=(f"user-{user_id}" if user_id not in {"", "0"} else "unknown"))
+
+
 def _resolve_account_identity(
     user_ctx: Optional[UserContext] = None,
     user_id: Any = 0,
@@ -52,16 +61,20 @@ def _resolve_account_identity(
 ) -> Dict[str, str]:
     user_id_text = str(user_id or 0)
     resolved_name = str(account_name or "").strip()
+    account_slug = _ACCOUNT_SLUG_REGISTRY.get(user_id_text, "").strip()
     if user_ctx is not None:
         user_id_text = str(getattr(user_ctx, "user_id", user_id_text) or user_id_text)
+        if not account_slug:
+            account_slug = _resolve_user_ctx_log_slug(user_ctx)
         if not resolved_name:
             resolved_name = str(getattr(getattr(user_ctx, "config", None), "name", "") or "").strip()
-    if not resolved_name and user_id_text not in {"", "0"}:
-        resolved_name = f"user-{user_id_text}"
-    account_slug = _sanitize_account_slug(
-        resolved_name,
-        fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"),
-    )
+    if not account_slug:
+        if not resolved_name and user_id_text not in {"", "0"}:
+            resolved_name = f"user-{user_id_text}"
+        account_slug = _sanitize_account_slug(
+            resolved_name,
+            fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"),
+        )
     return {
         "user_id": user_id_text,
         "account_name": resolved_name,
@@ -74,11 +87,14 @@ def _resolve_account_identity(
 def register_user_log_identity(user_ctx: UserContext) -> str:
     """注册账号日志标识，供统一日志前缀和分流使用。"""
     user_id = str(getattr(user_ctx, "user_id", 0) or 0)
-    account_name = str(getattr(getattr(user_ctx, "config", None), "name", "") or "").strip()
-    if not account_name:
-        account_name = f"user-{user_id}"
-    _ACCOUNT_NAME_REGISTRY[user_id] = account_name
-    return account_name
+    account_slug = _resolve_user_ctx_log_slug(user_ctx)
+    _ACCOUNT_SLUG_REGISTRY[user_id] = account_slug
+    return account_slug
+
+
+def _verbose_runtime_diag_enabled() -> bool:
+    value = str(os.getenv("YDXBOT_VERBOSE_RUNTIME_LOGS", "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _infer_log_category(level: int, module: str, event: str) -> str:
@@ -118,7 +134,7 @@ class _LogDefaultsFilter(logging.Filter):
 class _AccountCategoryRouterHandler(logging.Handler):
     """按账号+分类分流到独立日志文件：logs/accounts/<账号>/<runtime|warning|business>.log"""
 
-    def __init__(self, root_dir: str, backup_count: int = 7):
+    def __init__(self, root_dir: str, backup_count: int = ACCOUNT_LOG_BACKUP_DAYS):
         super().__init__(level=logging.DEBUG)
         self.root_dir = root_dir
         self.backup_count = backup_count
@@ -187,7 +203,7 @@ console_handler.setFormatter(logging.Formatter(
 console_handler.addFilter(_default_log_filter)
 logger.addHandler(console_handler)
 
-account_category_handler = _AccountCategoryRouterHandler(ACCOUNT_LOG_ROOT, backup_count=7)
+account_category_handler = _AccountCategoryRouterHandler(ACCOUNT_LOG_ROOT, backup_count=ACCOUNT_LOG_BACKUP_DAYS)
 account_category_handler.addFilter(_default_log_filter)
 logger.addHandler(account_category_handler)
 
@@ -289,11 +305,11 @@ def log_event(level, module, event, message=None, **kwargs):
     account_name = str(kwargs.pop("account_name", "")).strip()
     user_id = kwargs.get('user_id', 0)
     user_id_text = str(user_id)
-    if not account_name:
-        account_name = _ACCOUNT_NAME_REGISTRY.get(user_id_text, "")
-    if not account_name and user_id_text not in {"", "0"}:
-        account_name = f"user-{user_id_text}"
-    account_slug = _sanitize_account_slug(account_name, fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"))
+    account_slug = str(kwargs.pop("account_slug", "")).strip()
+    if not account_slug:
+        account_slug = _ACCOUNT_SLUG_REGISTRY.get(user_id_text, "")
+    if not account_slug:
+        account_slug = _sanitize_account_slug(account_name, fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"))
     if category not in {"runtime", "warning", "business"}:
         category = _infer_log_category(level, str(module), str(event))
     data = ', '.join(f'{k}={v}' for k, v in kwargs.items())
@@ -2454,8 +2470,9 @@ Return JSON only:
         # 记录预测
         state.predictions.append(prediction)
         
-        log_event(logging.INFO, 'predict_core', '模型分析完成', 
-                  user_id=user_ctx.user_id, data=f'pred={prediction}, conf={confidence}, pattern={pattern_tag}')
+        if _verbose_runtime_diag_enabled():
+            log_event(logging.INFO, 'predict_core', '模型分析完成', 
+                      user_id=user_ctx.user_id, data=f'pred={prediction}, conf={confidence}, pattern={pattern_tag}')
         
         return prediction
         
@@ -2509,20 +2526,21 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         log_event(logging.WARNING, 'bet_on', '解析历史数据失败', user_id=user_ctx.user_id, data=str(e))
 
     next_bet_amount_snapshot = calculate_bet_amount(rt)
-    log_event(
-        logging.INFO,
-        'bet_on',
-        '下注入口诊断',
-        user_id=user_ctx.user_id,
-        category='runtime',
-        **_build_runtime_chain_diag(
-            rt,
-            state,
-            incoming_history_len=len(incoming_history),
-            history_advanced=bool(incoming_history) and incoming_history != history_before[-len(incoming_history):] if incoming_history else False,
-            next_bet_amount=next_bet_amount_snapshot,
-        ),
-    )
+    if _verbose_runtime_diag_enabled():
+        log_event(
+            logging.INFO,
+            'bet_on',
+            '下注入口诊断',
+            user_id=user_ctx.user_id,
+            category='runtime',
+            **_build_runtime_chain_diag(
+                rt,
+                state,
+                incoming_history_len=len(incoming_history),
+                history_advanced=bool(incoming_history) and incoming_history != history_before[-len(incoming_history):] if incoming_history else False,
+                next_bet_amount=next_bet_amount_snapshot,
+            ),
+        )
 
     if not rt.get("switch", True):
         if rt.get("bet", False):
@@ -2676,14 +2694,15 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     stop_count = int(rt.get("stop_count", 0) or 0)
     if stop_count > 0:
-        log_event(
-            logging.INFO,
-            'bet_on',
-            '暂停倒计时阻止下注',
-            user_id=user_ctx.user_id,
-            category='runtime',
-            **_build_runtime_chain_diag(rt, state, next_bet_amount=next_bet_amount_snapshot),
-        )
+        if _verbose_runtime_diag_enabled():
+            log_event(
+                logging.INFO,
+                'bet_on',
+                '暂停倒计时阻止下注',
+                user_id=user_ctx.user_id,
+                category='runtime',
+                **_build_runtime_chain_diag(rt, state, next_bet_amount=next_bet_amount_snapshot),
+            )
         rt["stop_count"] = max(0, stop_count - 1)
         rt["bet"] = False
         if rt.get("pause_countdown_active", False):
@@ -2853,24 +2872,25 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 msg_type="info",
             )
         else:
-            log_event(
-                logging.INFO,
-                'bet_on',
-                '模型返回观望，本局跳过',
-                user_id=user_ctx.user_id,
-                category='runtime',
-                **_build_runtime_chain_diag(
-                    rt,
-                    state,
-                    predict_source=str(rt.get("last_predict_source", "")),
-                    predict_tag=str(rt.get("last_predict_tag", "")),
-                    predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
-                    next_bet_amount=bet_amount,
-                    next_sequence=next_sequence,
-                    stall_skip_streak=int(skip_trigger.get("skip_streak", 0) or 0),
-                    stall_total=int(skip_trigger.get("no_bet_streak", 0) or 0),
-                ),
-            )
+            if _verbose_runtime_diag_enabled():
+                log_event(
+                    logging.INFO,
+                    'bet_on',
+                    '模型返回观望，本局跳过',
+                    user_id=user_ctx.user_id,
+                    category='runtime',
+                    **_build_runtime_chain_diag(
+                        rt,
+                        state,
+                        predict_source=str(rt.get("last_predict_source", "")),
+                        predict_tag=str(rt.get("last_predict_tag", "")),
+                        predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
+                        next_bet_amount=bet_amount,
+                        next_sequence=next_sequence,
+                        stall_skip_streak=int(skip_trigger.get("skip_streak", 0) or 0),
+                        stall_total=int(skip_trigger.get("no_bet_streak", 0) or 0),
+                    ),
+                )
             rt["bet"] = False
             rt["bet_on"] = True
             rt["mode_stop"] = True
@@ -4707,19 +4727,20 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
         is_big = result_type == "大"
         result = 1 if is_big else 0
 
-        log_event(
-            logging.INFO,
-            'settle',
-            '收到结算并开始回写',
-            user_id=user_ctx.user_id,
-            category='runtime',
-            **_build_runtime_chain_diag(
-                rt,
-                state,
-                settle_msg_id=settle_msg_id,
-                settle_result=result_type,
-            ),
-        )
+        if _verbose_runtime_diag_enabled():
+            log_event(
+                logging.INFO,
+                'settle',
+                '收到结算并开始回写',
+                user_id=user_ctx.user_id,
+                category='runtime',
+                **_build_runtime_chain_diag(
+                    rt,
+                    state,
+                    settle_msg_id=settle_msg_id,
+                    settle_result=result_type,
+                ),
+            )
 
         try:
             rt["account_balance"] = await fetch_balance(user_ctx)
@@ -4834,24 +4855,25 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 )
                 rt["bet_amount"] = int(active_chain_summary.get("last_amount", bet_amount) or bet_amount)
 
-            log_event(
-                logging.INFO,
-                'settle',
-                '结算后链路回写完成',
-                user_id=user_ctx.user_id,
-                category='business',
-                **_build_runtime_chain_diag(
-                    rt,
-                    state,
-                    settle_msg_id=settle_msg_id,
-                    settled_bet_id=str(settled_entry.get("bet_id", "unknown")),
-                    settle_outcome=result_text,
-                    settle_profit=profit,
-                    chain_sequence_after=int(rt.get("bet_sequence_count", 0) or 0),
-                    chain_lose_after=int(rt.get("lose_count", 0) or 0),
-                    next_bet_amount=int(calculate_bet_amount(rt) or 0),
-                ),
-            )
+            if _verbose_runtime_diag_enabled():
+                log_event(
+                    logging.INFO,
+                    'settle',
+                    '结算后链路回写完成',
+                    user_id=user_ctx.user_id,
+                    category='business',
+                    **_build_runtime_chain_diag(
+                        rt,
+                        state,
+                        settle_msg_id=settle_msg_id,
+                        settled_bet_id=str(settled_entry.get("bet_id", "unknown")),
+                        settle_outcome=result_text,
+                        settle_profit=profit,
+                        chain_sequence_after=int(rt.get("bet_sequence_count", 0) or 0),
+                        chain_lose_after=int(rt.get("lose_count", 0) or 0),
+                        next_bet_amount=int(calculate_bet_amount(rt) or 0),
+                    ),
+                )
 
             if not win:
                 if rt.get("lose_count", 0) == 1:

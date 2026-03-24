@@ -25,6 +25,8 @@ file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(mes
 logger.addHandler(file_handler)
 ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
 MAX_BET_SEQUENCE_LOG = 5000
+ACCOUNT_LOG_BACKUP_DAYS = 3
+_USER_LOG_SLUG_REGISTRY: Dict[str, str] = {}
 
 
 def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
@@ -35,6 +37,11 @@ def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
 
 def _build_account_label(account_slug: str) -> str:
     return f"ydx-{account_slug}"
+
+
+def _build_user_dir_slug(user_dir: str, fallback: str = "unknown") -> str:
+    dir_name = os.path.basename(os.path.normpath(str(user_dir or "")))
+    return _sanitize_account_slug(dir_name, fallback=fallback)
 
 
 def _parse_user_id_from_text(*parts: Any) -> str:
@@ -48,12 +55,14 @@ def _parse_user_id_from_text(*parts: Any) -> str:
 def _resolve_user_identity(user_id: Any = 0, account_name: str = "") -> Dict[str, str]:
     user_id_text = str(user_id or 0)
     resolved_name = str(account_name or "").strip()
-    if not resolved_name and user_id_text not in {"", "0"}:
-        resolved_name = f"user-{user_id_text}"
-    account_slug = _sanitize_account_slug(
-        resolved_name,
-        fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"),
-    )
+    account_slug = _USER_LOG_SLUG_REGISTRY.get(user_id_text, "").strip()
+    if not account_slug:
+        if not resolved_name and user_id_text not in {"", "0"}:
+            resolved_name = f"user-{user_id_text}"
+        account_slug = _sanitize_account_slug(
+            resolved_name,
+            fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"),
+        )
     return {
         "user_id": user_id_text,
         "account_slug": account_slug,
@@ -173,7 +182,7 @@ console_handler.setLevel(logging.INFO)
 console_handler.addFilter(_user_manager_log_filter)
 logger.addHandler(console_handler)
 
-account_category_handler = _UserManagerAccountRouterHandler(ACCOUNT_LOG_ROOT, backup_count=7)
+account_category_handler = _UserManagerAccountRouterHandler(ACCOUNT_LOG_ROOT, backup_count=ACCOUNT_LOG_BACKUP_DAYS)
 account_category_handler.addFilter(_user_manager_log_filter)
 logger.addHandler(account_category_handler)
 try:
@@ -448,6 +457,7 @@ class UserContext:
         self.user_dir = user_dir
         self.global_config = global_config or {}
         self.user_id = 0  # 临时值，将在加载配置后更新
+        self.account_slug = _build_user_dir_slug(self.user_dir)
         self.config: Optional[UserConfig] = None
         self.state: Optional[UserState] = None
         self.presets: Dict[str, List] = {}
@@ -540,6 +550,11 @@ class UserContext:
             notification=notification_cfg,
             ai=ai_cfg,
         )
+        self.account_slug = _build_user_dir_slug(
+            self.user_dir,
+            fallback=(f"user-{self.user_id}" if self.user_id else "unknown"),
+        )
+        _USER_LOG_SLUG_REGISTRY[str(self.user_id)] = self.account_slug
         log_event(
             logging.INFO,
             'load_config',

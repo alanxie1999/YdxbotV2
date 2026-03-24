@@ -33,7 +33,7 @@ def test_append_interaction_event_writes_daily_log_and_prunes_old_files(tmp_path
     log_root = tmp_path / "logs" / "accounts"
     monkeypatch.setattr(zm, "ACCOUNT_LOG_ROOT", str(log_root))
 
-    interaction_dir = log_root / "audit-user" / "interactions"
+    interaction_dir = log_root / "8801" / "interactions"
     interaction_dir.mkdir(parents=True, exist_ok=True)
     old_name = (datetime.now().date() - timedelta(days=7)).strftime("%Y-%m-%d") + ".log"
     keep_name = (datetime.now().date() - timedelta(days=6)).strftime("%Y-%m-%d") + ".log"
@@ -99,7 +99,7 @@ def test_send_message_v2_records_outbound_interactions(tmp_path, monkeypatch):
         )
     )
 
-    today_path = log_root / "route-user" / "interactions" / (datetime.now().strftime("%Y-%m-%d") + ".log")
+    today_path = log_root / "5001" / "interactions" / (datetime.now().strftime("%Y-%m-%d") + ".log")
     content = _load_text(today_path)
 
     assert "发送 | admin_chat | 通知 | lose_streak | 成功 | chat_id=5001" in content
@@ -141,7 +141,7 @@ def test_process_user_command_records_masked_apikey_command(tmp_path, monkeypatc
     event = DummyEvent()
     asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
 
-    today_path = log_root / "secret-user" / "interactions" / (datetime.now().strftime("%Y-%m-%d") + ".log")
+    today_path = log_root / "5008" / "interactions" / (datetime.now().strftime("%Y-%m-%d") + ".log")
     content = _load_text(today_path)
 
     assert "接收 | admin_chat | 命令 | apikey | 已脱敏 | chat_id=5008" in content

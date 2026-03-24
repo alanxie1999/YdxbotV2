@@ -28,7 +28,8 @@ logger = logging.getLogger('main_multiuser')
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
-_MAIN_ACCOUNT_NAME_REGISTRY: Dict[str, str] = {}
+ACCOUNT_LOG_BACKUP_DAYS = 3
+_MAIN_ACCOUNT_SLUG_REGISTRY: Dict[str, str] = {}
 MAIN_ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
 
 
@@ -42,13 +43,19 @@ def _build_account_label(account_slug: str) -> str:
     return f"ydx-{account_slug}"
 
 
+def _resolve_user_ctx_log_slug(user_ctx: UserContext) -> str:
+    slug = str(getattr(user_ctx, "account_slug", "") or "").strip()
+    if slug:
+        return slug
+    user_id = str(getattr(user_ctx, "user_id", 0) or 0)
+    return _sanitize_account_slug("", fallback=(f"user-{user_id}" if user_id not in {"", "0"} else "unknown"))
+
+
 def register_main_user_log_identity(user_ctx: UserContext) -> str:
     user_id = str(getattr(user_ctx, "user_id", 0) or 0)
-    account_name = str(getattr(getattr(user_ctx, "config", None), "name", "") or "").strip()
-    if not account_name:
-        account_name = f"user-{user_id}"
-    _MAIN_ACCOUNT_NAME_REGISTRY[user_id] = account_name
-    return account_name
+    account_slug = _resolve_user_ctx_log_slug(user_ctx)
+    _MAIN_ACCOUNT_SLUG_REGISTRY[user_id] = account_slug
+    return account_slug
 
 
 def _infer_main_log_category(level: int, module: str, event: str) -> str:
@@ -82,7 +89,7 @@ class _MainLogDefaultsFilter(logging.Filter):
 
 _main_log_filter = _MainLogDefaultsFilter()
 
-file_handler = TimedRotatingFileHandler('numai.log', when='midnight', interval=1, backupCount=3, encoding='utf-8')
+file_handler = TimedRotatingFileHandler('numai.log', when='midnight', interval=1, backupCount=ACCOUNT_LOG_BACKUP_DAYS, encoding='utf-8')
 file_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(levelname)s | [%(category)s] [%(account_tag)s] [%(custom_module)s:%(event)s] %(message)s | %(data)s',
     datefmt='%Y-%m-%d %H:%M:%S'
@@ -102,7 +109,7 @@ logger.addHandler(console_handler)
 
 
 class _MainAccountCategoryRouterHandler(logging.Handler):
-    def __init__(self, root_dir: str, backup_count: int = 7):
+    def __init__(self, root_dir: str, backup_count: int = ACCOUNT_LOG_BACKUP_DAYS):
         super().__init__(level=logging.DEBUG)
         self.root_dir = root_dir
         self.backup_count = backup_count
@@ -197,11 +204,11 @@ def log_event(level, module, event=None, message='', **kwargs):
     category = str(kwargs.pop("category", "")).strip().lower()
     account_name = str(kwargs.pop("account_name", "")).strip()
     user_id = str(kwargs.get("user_id", 0))
-    if not account_name:
-        account_name = _MAIN_ACCOUNT_NAME_REGISTRY.get(user_id, "")
-    if not account_name and user_id not in {"", "0"}:
-        account_name = f"user-{user_id}"
-    account_slug = _sanitize_account_slug(account_name, fallback=(f"user-{user_id}" if user_id not in {"", "0"} else "unknown"))
+    account_slug = str(kwargs.pop("account_slug", "")).strip()
+    if not account_slug:
+        account_slug = _MAIN_ACCOUNT_SLUG_REGISTRY.get(user_id, "")
+    if not account_slug:
+        account_slug = _sanitize_account_slug(account_name, fallback=(f"user-{user_id}" if user_id not in {"", "0"} else "unknown"))
     if category not in {"runtime", "warning", "business"}:
         category = _infer_main_log_category(level, str(module), str(event))
     data = ', '.join(f'{k}={v}' for k, v in kwargs.items())

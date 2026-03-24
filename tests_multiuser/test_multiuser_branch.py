@@ -48,6 +48,23 @@ def test_user_context_user_id_fallback_hash_dir(tmp_path):
     assert ctx.user_id > 0
 
 
+def test_user_context_prefers_user_dir_slug_for_logs(tmp_path):
+    user_dir = tmp_path / "users" / "shuji"
+    _write_json(
+        user_dir / "shuji_config.json",
+        {
+            "account": {"name": "书记"},
+            "telegram": {"user_id": 6002},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+
+    assert ctx.account_slug == "shuji"
+    assert zm._resolve_account_identity(user_ctx=ctx)["account_slug"] == "shuji"
+    assert mm.register_main_user_log_identity(ctx) == "shuji"
+
+
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
     users_dir = tmp_path / "users"
     config_dir = tmp_path / "config"
@@ -377,7 +394,7 @@ def test_zq_log_event_includes_account_prefix_and_business_category(tmp_path, mo
     zm.log_event(logging.INFO, "user_cmd", "处理用户命令", "ok", user_id=7001)
 
     assert captured["level"] == logging.INFO
-    assert captured["extra"]["account_tag"] == "【ydx-musk-xu】"
+    assert captured["extra"]["account_tag"] == "【ydx-log_user】"
     assert captured["extra"]["category"] == "business"
     assert captured["extra"]["user_id"] == "7001"
 
@@ -494,6 +511,7 @@ def test_main_log_event_includes_account_prefix(monkeypatch):
     fake_ctx = SimpleNamespace(
         user_id=8801,
         config=SimpleNamespace(name="Musk Xu"),
+        account_slug="xu",
     )
     mm.register_main_user_log_identity(fake_ctx)
 
@@ -505,7 +523,7 @@ def test_main_log_event_includes_account_prefix(monkeypatch):
     mm.log_event(logging.INFO, "start", "用户启动成功", "ok", user_id=8801)
 
     assert captured["level"] == logging.INFO
-    assert captured["extra"]["account_tag"] == "【ydx-musk-xu】"
+    assert captured["extra"]["account_tag"] == "【ydx-xu】"
     assert captured["extra"]["category"] in {"runtime", "business"}
 
 
@@ -1997,6 +2015,7 @@ def test_process_settle_writes_chain_diagnostic_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm, "fetch_balance", fake_fetch_balance)
     monkeypatch.setattr(zm, "log_event", fake_log_event)
+    monkeypatch.setenv("YDXBOT_VERBOSE_RUNTIME_LOGS", "1")
 
     class DummyClient:
         async def send_message(self, target, message, parse_mode=None):
