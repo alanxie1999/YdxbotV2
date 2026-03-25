@@ -5214,16 +5214,16 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                         f"⚠️ {int(rt.get('lose_count', 0))} 连输告警",
                         impact="当前链路已进入高关注状态，请重点关注下一手与账户余额变化。",
                         fields=[
-                            ("时间", f"{datetime.now().strftime('%m月%d日')} 第 {settle_round} 轮第 {settle_seq} 次"),
-                            ("预设", rt.get('current_preset_name', 'none')),
-                            ("连续押注", f"{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次"),
-                            ("押注方向", direction),
-                            ("本金", format_number(bet_amount)),
-                            ("累计损失", format_number(total_losses)),
-                            ("账户余额", f"{rt.get('account_balance', 0) / 10000:.2f} 万"),
-                            ("菠菜余额", f"{rt.get('gambling_fund', 0) / 10000:.2f} 万"),
+                            ("🔢 时间", f"{datetime.now().strftime('%m月%d日')} 第 {settle_round} 轮第 {settle_seq} 次"),
+                            ("📋 预设名称", rt.get('current_preset_name', 'none')),
+                            ("😀 连续押注", f"{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次"),
+                            ("⚡ 押注方向", direction),
+                            ("💵 押注本金", format_number(bet_amount)),
+                            ("💰 累计损失", format_number(total_losses)),
+                            ("💰 账户余额", f"{rt.get('account_balance', 0) / 10000:.2f} 万"),
+                            ("💰 菠菜余额", f"{rt.get('gambling_fund', 0) / 10000:.2f} 万"),
                         ],
-                        action="先看 `status`；如不准备继续可执行 `pause`。",
+                        action="建议立即查看 `status`；如不准备继续，可直接执行 `pause`。",
                     )
                     if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
                         await cleanup_message(client, user_ctx.lose_streak_message)
@@ -5365,18 +5365,18 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
             else:
                 range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_round} 轮第 {end_seq} 次"
             rec_msg = _build_success_ops_card(
-                "✅ 连输已结束",
+                f"✅ {lose_count} 连输已终止！ ✅",
                 outcome="本轮回补已经结束，系统已回写收益与当前余额。",
                 fields=[
-                    ("时间", range_text),
-                    ("预设", rt.get('current_preset_name', 'none')),
-                    ("连续押注", f"{lose_end_payload.get('continuous_count', lose_count)} 次"),
-                    ("本段连输", f"{lose_count} 次"),
-                    ("本段收益", format_number(lose_end_payload.get('total_profit', 0))),
-                    ("账户余额", f"{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万"),
-                    ("菠菜余额", f"{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"),
+                    ("🔢 时间", range_text),
+                    ("📋 预设名称", rt.get('current_preset_name', 'none')),
+                    ("😀 连续押注", f"{lose_end_payload.get('continuous_count', lose_count)} 次"),
+                    ("⚠️ 本局连输", f"{lose_count} 次"),
+                    ("💰 本局盈利", format_number(lose_end_payload.get('total_profit', 0))),
+                    ("💰 账户余额", f"{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万"),
+                    ("💰 菠菜资金剩余", f"{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"),
                 ],
-                action="观察是否已回到首注；如需复核执行 `status`。",
+                action="建议关注是否已回到首注，并继续观察下一次盘口。",
             )
             if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
                 await cleanup_message(client, user_ctx.lose_streak_message)

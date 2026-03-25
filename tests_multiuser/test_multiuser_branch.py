@@ -1256,8 +1256,9 @@ def test_process_settle_lose_warning_matches_master_style(tmp_path, monkeypatch)
     assert lose_streak_messages
     assert "⚠️ 1 连输告警" in lose_streak_messages[0]
     assert "第 1 轮第 1 次" in lose_streak_messages[0]
-    assert "预设：yc10" in lose_streak_messages[0]
-    assert "账户余额：" in lose_streak_messages[0]
+    assert "📋 预设名称：yc10" in lose_streak_messages[0]
+    assert "💰 账户余额：" in lose_streak_messages[0]
+    assert "💰 累计损失：" in lose_streak_messages[0]
     assert "🤖 当局 AI 预测提示" not in lose_streak_messages[0]
 
 
@@ -1316,14 +1317,14 @@ def test_process_settle_lose_end_message_contains_balance_lines(tmp_path, monkey
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
     msg = captured["message"]
-    assert "✅ 连输已结束" in msg
+    assert "✅ 3 连输已终止！ ✅" in msg
     assert "第 1 轮第 5 次 至 第 9 次" in msg
-    assert "预设：yc10" in msg
-    assert "连续押注：4 次" in msg
-    assert "本段连输：3 次" in msg
-    assert "本段收益：1,990" in msg
-    assert "账户余额：2463.49 万" in msg
-    assert "菠菜余额：2456.84 万" in msg
+    assert "📋 预设名称：yc10" in msg
+    assert "😀 连续押注：4 次" in msg
+    assert "⚠️ 本局连输：3 次" in msg
+    assert "💰 本局盈利：1,990" in msg
+    assert "💰 账户余额：2463.49 万" in msg
+    assert "💰 菠菜资金剩余：2456.84 万" in msg
 
 
 def test_process_settle_skips_stale_lose_end_when_old_lose_count_zero(tmp_path, monkeypatch):
