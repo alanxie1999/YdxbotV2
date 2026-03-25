@@ -121,6 +121,30 @@ def test_format_dashboard_matches_status_html_layout(tmp_path):
     assert "<code>" not in text
 
 
+def test_format_dashboard_shows_strategy_watch_line_when_skip_streak_active(tmp_path):
+    user_dir = tmp_path / "users" / "status_watch_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态观望用户"},
+            "telegram": {"user_id": 6004},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_on"] = True
+    rt["current_preset_name"] = "yc10"
+    rt["current_model_id"] = "moonshotai/kimi-k2-instruct"
+    rt["model_health_status"] = "ok"
+    rt["stall_guard_sequence"] = 4
+    rt["stall_guard_skip_streak"] = 2
+
+    text = zm.format_dashboard(ctx)
+
+    assert "策略观望：当前手位连续观望 2 次" in text
+
+
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
     users_dir = tmp_path / "users"
     config_dir = tmp_path / "config"
@@ -1981,7 +2005,64 @@ def test_process_bet_on_force_unlocks_after_repeated_skip(tmp_path, monkeypatch)
 
     asyncio.run(zm.process_bet_on(SimpleNamespace(), events[2], ctx, {}))
     assert rt["bet"] is True
-    assert any("连续观望已触发保守解锁" in message for message in sent_messages)
+    assert any("低手位连续观望，已保守解锁" in message for message in sent_messages)
+
+
+def test_process_bet_on_high_step_skip_pauses_instead_of_unlock(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "skip_pause_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "高手位观望用户"},
+            "telegram": {"user_id": 5101},
+            "groups": {"admin_chat": 5101},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = False
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["bet_sequence_count"] = 3
+    rt["bet_amount"] = 328_500
+    ctx.state.history = [0, 1] * 20
+
+    sent_messages = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        return -1
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5101, id=len(sent_messages))
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+
+    class DummyEvent:
+        def __init__(self, history_text, event_id):
+            self.message = SimpleNamespace(message=f"[近 40 次结果][由近及远][0 小 1 大] {history_text}")
+            self.reply_markup = object()
+            self.chat_id = 5101
+            self.id = event_id
+
+    events = [
+        DummyEvent(" ".join((["0", "1"] * 20)), 1),
+        DummyEvent(" ".join((["1", "0"] * 20)), 2),
+    ]
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), events[0], ctx, {}))
+    assert rt["bet"] is False
+    assert rt["stop_count"] == 0
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), events[1], ctx, {}))
+    assert rt["bet"] is False
+    assert rt["bet_on"] is False
+    assert rt["stop_count"] > 0
+    assert rt["pause_countdown_reason"] == "高手位连续观望暂停"
+    assert any("高手位连续观望，已自动暂停" in message for message in sent_messages)
 
 
 def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, monkeypatch):
@@ -3036,6 +3117,72 @@ def test_process_bet_on_timeout_fallback_pauses_after_threshold(tmp_path, monkey
     assert rt["model_health_status"] == "down"
     assert rt["stop_count"] > 0
     assert any(msg_type == "model_pause" for msg_type, _ in sent)
+
+
+def test_model_probe_loop_auto_resumes_after_recovery(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "model_probe_resume_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型恢复用户"},
+            "telegram": {"user_id": 70201},
+            "groups": {"admin_chat": 70201},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["current_model_id"] = "model-1"
+    rt["model_health_status"] = "down"
+    rt["model_fallback_streak"] = 5
+    rt["model_pause_active"] = True
+    rt["bet_on"] = False
+    rt["mode_stop"] = True
+    rt["switch"] = True
+    rt["stop_count"] = 2
+    rt["pause_countdown_active"] = True
+    rt["pause_countdown_reason"] = "模型连续兜底暂停"
+    rt["pause_countdown_total_rounds"] = 2
+    rt["model_probe_index"] = 1
+
+    sent = []
+
+    class FakeModelManager:
+        fallback_chain = ["1", "2"]
+        models = [
+            {"model_id": "model-1", "provider": "iflow", "enabled": True},
+            {"model_id": "model-2", "provider": "iflow", "enabled": True},
+        ]
+
+        def get_model(self, key):
+            mapping = {
+                "1": self.models[0],
+                "2": self.models[1],
+                "model-1": self.models[0],
+                "model-2": self.models[1],
+            }
+            return mapping.get(str(key))
+
+        async def _call_iflow(self, model_cfg, messages, **kwargs):
+            return {"success": True, "content": "OK"}
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", *args, **kwargs):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=70201, id=len(sent))
+
+    monkeypatch.setattr(ctx, "get_model_manager", lambda: FakeModelManager())
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+
+    asyncio.run(zm._run_model_probe_loop(SimpleNamespace(), ctx, {}))
+
+    assert rt["current_model_id"] == "model-2"
+    assert rt["model_pause_active"] is False
+    assert rt["model_fallback_streak"] == 0
+    assert rt["bet_on"] is True
+    assert rt["stop_count"] == 0
+    assert rt["pause_countdown_active"] is False
+    assert rt["model_probe_active"] is False
+    assert any(msg_type == "model_resume" for msg_type, _ in sent)
 
 
 def test_handle_goal_pause_after_settle_includes_account_and_gambling_funds(tmp_path, monkeypatch):

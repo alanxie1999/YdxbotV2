@@ -288,6 +288,9 @@ HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 4.0
 STALL_GUARD_SKIP_MAX = 2
 STALL_GUARD_TIMEOUT_MAX = 2
 STALL_GUARD_TOTAL_MAX = 6
+STALL_GUARD_LOW_STEP_UNLOCK_MAX = 2
+STALL_GUARD_HIGH_STEP_MIN = 3
+STALL_GUARD_HIGH_STEP_PAUSE_ROUNDS = 1
 
 MODEL_FALLBACK_PAUSE_THRESHOLD = 5
 MODEL_FALLBACK_PAUSE_ROUNDS = 2
@@ -298,6 +301,7 @@ COUNTED_MODEL_FALLBACK_SOURCES = {
     "fallback",
     "fallback_skip",
 }
+MODEL_PROBE_INTERVAL_SECONDS = 10
 
 def log_event(level, module, event, message=None, **kwargs):
     # 兼容旧调用: log_event(level, event, message, user_id, data)
@@ -898,6 +902,8 @@ def _build_model_health_lines(rt: Dict[str, Any]) -> List[str]:
         lines = ["🤖 模型状态：🟢 正常"]
     elif status == "switched":
         lines = ["🤖 模型状态：🟡 已切换"]
+    elif status == "recovered":
+        lines = ["🤖 模型状态：🟢 已恢复"]
     elif status == "fallback":
         lines = [f"🤖 模型状态：🟠 连续兜底 {fallback_streak} 次"]
     elif status == "down":
@@ -913,6 +919,152 @@ def _build_model_health_lines(rt: Dict[str, Any]) -> List[str]:
     if last_ok_at:
         lines.append(f"最近成功：{last_ok_at}")
     return lines
+
+
+def _build_strategy_watch_line(rt: Dict[str, Any]) -> str:
+    pause_reason = str(rt.get("pause_countdown_reason", "") or "").strip()
+    if "连续观望暂停" in pause_reason and bool(rt.get("pause_countdown_active", False)):
+        return f"策略观望：{pause_reason}"
+
+    skip_streak = int(rt.get("stall_guard_skip_streak", 0) or 0)
+    sequence = int(rt.get("stall_guard_sequence", -1) or -1)
+    if skip_streak > 0 and sequence > 0:
+        return f"策略观望：当前手位连续观望 {skip_streak} 次"
+    return ""
+
+
+def _get_model_probe_ids(user_ctx: UserContext) -> List[str]:
+    model_mgr = user_ctx.get_model_manager()
+    ids: List[str] = []
+    if model_mgr.fallback_chain:
+        for item in model_mgr.fallback_chain:
+            cfg = model_mgr.get_model(str(item))
+            model_id = str(cfg.get("model_id", "") or "").strip() if cfg else ""
+            if model_id and model_id not in ids:
+                ids.append(model_id)
+    if not ids:
+        for cfg in model_mgr.models:
+            model_id = str(cfg.get("model_id", "") or "").strip()
+            if model_id and model_id not in ids and cfg.get("enabled", True):
+                ids.append(model_id)
+    return ids
+
+
+async def _probe_single_model(user_ctx: UserContext, model_id: str) -> Dict[str, Any]:
+    model_mgr = user_ctx.get_model_manager()
+    model_cfg = model_mgr.get_model(model_id)
+    if not model_cfg:
+        for cfg in model_mgr.models:
+            if str(cfg.get("model_id", "") or "") == str(model_id):
+                model_cfg = cfg
+                break
+    if not model_cfg:
+        return {"success": False, "model_id": model_id, "error": "模型不存在"}
+
+    messages = [{"role": "user", "content": "只回复 OK"}]
+    provider = str(model_cfg.get("provider", "") or "").strip().lower()
+    try:
+        if provider == "aliyun":
+            result = await model_mgr._call_aliyun(model_cfg, messages, temperature=0.0, max_tokens=16)
+        elif provider == "google":
+            result = await model_mgr._call_google(model_cfg, messages, temperature=0.0, max_tokens=16)
+        else:
+            result = await model_mgr._call_iflow(model_cfg, messages, temperature=0.0, max_tokens=16)
+    except Exception as e:
+        return {"success": False, "model_id": model_id, "error": str(e)}
+
+    result["model_id"] = str(model_cfg.get("model_id", model_id) or model_id)
+    return result
+
+
+async def _run_model_probe_loop(client, user_ctx: UserContext, global_config: dict) -> None:
+    rt = user_ctx.state.runtime
+    try:
+        while int(rt.get("model_fallback_streak", 0) or 0) > 0 or bool(rt.get("model_pause_active", False)):
+            probe_ids = _get_model_probe_ids(user_ctx)
+            if not probe_ids:
+                break
+
+            idx = int(rt.get("model_probe_index", 0) or 0) % len(probe_ids)
+            target_model_id = probe_ids[idx]
+            rt["model_probe_index"] = (idx + 1) % len(probe_ids)
+            user_ctx.save_state()
+
+            result = await _probe_single_model(user_ctx, target_model_id)
+            if result.get("success"):
+                previous_model = str(rt.get("current_model_id", "") or "").strip()
+                actual_model_id = str(result.get("model_id", target_model_id) or target_model_id)
+                previous_status = str(rt.get("model_health_status", "") or "").strip().lower()
+                rt["current_model_id"] = actual_model_id
+                _mark_model_success(
+                    rt,
+                    actual_model_id,
+                    switched_from=(previous_model if previous_model and previous_model != actual_model_id else ""),
+                )
+                if previous_status in {"fallback", "down", "warning"} and (not previous_model or previous_model == actual_model_id):
+                    rt["model_health_status"] = "recovered"
+
+                rt["model_probe_active"] = False
+                rt["model_last_fail_reason"] = ""
+                rt["model_pause_notified"] = False
+
+                if rt.get("model_pause_active", False):
+                    rt["model_pause_active"] = False
+                    await _clear_pause_countdown_notice(client, user_ctx)
+                    rt["stop_count"] = 0
+                    rt["bet"] = False
+                    rt["bet_on"] = True
+                    rt["mode_stop"] = True
+                    rt["switch"] = True
+                    _queue_model_notice(
+                        rt,
+                        "resume",
+                        signature=f"resume|{previous_model}->{actual_model_id}",
+                        from_model=previous_model or actual_model_id,
+                        to_model=actual_model_id,
+                        detail="后台探测成功，脚本已自动恢复运行。",
+                    )
+                elif previous_model and previous_model != actual_model_id:
+                    _queue_model_notice(
+                        rt,
+                        "switch",
+                        signature=f"probe|{previous_model}->{actual_model_id}",
+                        from_model=previous_model,
+                        to_model=actual_model_id,
+                        detail="后台探测成功，已切换到可用模型。",
+                    )
+                else:
+                    _queue_model_notice(
+                        rt,
+                        "resume",
+                        signature=f"resume|{actual_model_id}|ok",
+                        from_model=actual_model_id,
+                        to_model=actual_model_id,
+                        detail="后台探测成功，模型已恢复。",
+                    )
+
+                user_ctx.save_state()
+                await _flush_model_runtime_notice(client, user_ctx, global_config)
+                return
+
+            rt["model_last_fail_at"] = _now_text()
+            rt["model_last_fail_reason"] = _summarize_model_error(result.get("error", "探测失败"))
+            user_ctx.save_state()
+            await asyncio.sleep(MODEL_PROBE_INTERVAL_SECONDS)
+    finally:
+        rt["model_probe_active"] = False
+        setattr(user_ctx, "_model_probe_task", None)
+        user_ctx.save_state()
+
+
+def _ensure_model_probe_loop(client, user_ctx: UserContext, global_config: dict) -> None:
+    rt = user_ctx.state.runtime
+    existing = getattr(user_ctx, "_model_probe_task", None)
+    if existing and not existing.done():
+        return
+    rt["model_probe_active"] = True
+    user_ctx.save_state()
+    user_ctx._model_probe_task = asyncio.create_task(_run_model_probe_loop(client, user_ctx, global_config))
 
 
 def _queue_model_notice(
@@ -1012,6 +1164,26 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
             ttl_seconds=240,
             attr_name="model_pause_notice_message",
             msg_type="model_pause",
+        )
+        return
+
+    if notice_type == "resume":
+        message = _build_ops_card(
+            "🟢 模型已恢复，脚本已自动继续运行",
+            summary="后台探测已确认模型恢复可用，系统已自动恢复运行。",
+            fields=[
+                ("当前模型", to_model),
+                ("说明", detail),
+            ],
+        )
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            message,
+            ttl_seconds=240,
+            attr_name="model_resume_notice_message",
+            msg_type="model_resume",
         )
 
 
@@ -1225,6 +1397,7 @@ def _build_status_html_data(user_ctx: UserContext) -> Dict[str, Any]:
         "account_balance_text": _format_account_balance_text(rt),
         "gambling_fund_text": _format_wan_value(rt.get("gambling_fund", 0)),
         "model_health_lines": _build_model_health_lines(rt),
+        "strategy_watch_line": _build_strategy_watch_line(rt),
     }
 
 
@@ -1268,6 +1441,7 @@ def generate_status_html(data: Dict[str, Any]) -> str:
     stop = escape_html(str(data.get("stop", 0) or 0))
     lose_stop = escape_html(str(data.get("lose_stop", 0) or 0))
     model_health_lines = [escape_html(str(line)) for line in data.get("model_health_lines", []) if str(line).strip()]
+    strategy_watch_line = escape_html(str(data.get("strategy_watch_line", "") or "").strip())
 
     if account_balance_text in {"Cookie 失效", "网络异常", "获取中"}:
         account_balance_line = escape_html(account_balance_text)
@@ -1277,6 +1451,8 @@ def generate_status_html(data: Dict[str, Any]) -> str:
     model_health_block = ""
     if model_health_lines:
         model_health_block = "\n".join(model_health_lines) + "\n\n"
+    if strategy_watch_line:
+        model_health_block += f"{strategy_watch_line}\n\n"
 
     html = (
         f"<b>【 状态监控 】</b> {status_line}\n"
@@ -1404,6 +1580,7 @@ MESSAGE_ROUTING_TABLE = {
     "model_switch": {"channels": ["admin", "priority"], "priority": True},
     "model_failure": {"channels": ["admin", "priority"], "priority": True},
     "model_pause": {"channels": ["admin", "priority"], "priority": True},
+    "model_resume": {"channels": ["admin", "priority"], "priority": True},
     "risk_pause": {"channels": ["admin"], "priority": False},
     "risk_summary": {"channels": ["admin", "priority"], "priority": True},
     "pause": {"channels": ["admin"], "priority": False},
@@ -1439,6 +1616,7 @@ PRIORITY_FULL_MESSAGE_TYPES = {
     "model_switch",
     "model_failure",
     "model_pause",
+    "model_resume",
     "risk_summary",
     "error",
 }
@@ -3125,10 +3303,16 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 )
         if rt["stop_count"] == 0:
             rt["flag"] = True
-            rt["bet_on"] = True
-            rt["mode_stop"] = True
-            rt["pause_reason"] = ""
-            await _clear_pause_countdown_notice(client, user_ctx)
+            if rt.get("model_pause_active", False):
+                _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, "模型连续兜底暂停")
+                rt["bet_on"] = False
+                rt["mode_stop"] = True
+                _ensure_model_probe_loop(client, user_ctx, global_config)
+            else:
+                rt["bet_on"] = True
+                rt["mode_stop"] = True
+                rt["pause_reason"] = ""
+                await _clear_pause_countdown_notice(client, user_ctx)
         user_ctx.save_state()
         return
 
@@ -3252,6 +3436,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
         rt["model_health_status"] = "down"
+        rt["model_pause_active"] = True
         if not rt.get("model_pause_notified", False):
             _queue_model_notice(
                 rt,
@@ -3263,6 +3448,8 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             rt["model_pause_notified"] = True
 
     await _flush_model_runtime_notice(client, user_ctx, global_config)
+    if int(rt.get("model_fallback_streak", 0) or 0) > 0 or rt.get("model_pause_active", False):
+        _ensure_model_probe_loop(client, user_ctx, global_config)
 
     if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
         _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, "模型连续兜底暂停")
@@ -3279,7 +3466,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             log_event(
                 logging.WARNING,
                 'bet_on',
-                '连续观望触发防卡死解锁',
+                '低手位连续观望触发保守解锁',
                 user_id=user_ctx.user_id,
                 category='warning',
                 **_build_runtime_chain_diag(
@@ -3296,19 +3483,42 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 user_ctx,
                 global_config,
                 _build_ops_card(
-                    "🔓 连续观望已触发保守解锁",
-                    summary="同一手位已经连续多次观望，系统本局改用统计兜底继续下注，避免长时间停住。",
+                    "🔓 低手位连续观望，已保守解锁",
+                    summary="当前处于低手位，同一手位已连续多次观望，本局改用统计兜底继续下注。",
                     fields=[
                         ("当前手位", f"{next_sequence} 手"),
                         ("连续观望", f"{int(skip_trigger.get('skip_streak', 0) or 0)} 次"),
                         ("兜底方向", "大" if int(prediction) == 1 else "小"),
                     ],
-                    action="建议重点观察这手结果，并执行 `status` 复核链路。",
                 ),
                 ttl_seconds=120,
                 attr_name="skip_reason_message",
                 msg_type="info",
             )
+        elif int(skip_trigger.get("pause_rounds", 0) or 0) > 0:
+            pause_rounds = max(1, int(skip_trigger.get("pause_rounds", 0) or 0))
+            pause_reason = str(skip_trigger.get("pause_reason", "") or "连续观望暂停").strip()
+            _enter_pause(rt, pause_rounds, pause_reason)
+            _clear_hand_stall_guard(rt)
+            user_ctx.save_state()
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                _build_ops_card(
+                    "🟡 高手位连续观望，已自动暂停" if next_sequence >= STALL_GUARD_HIGH_STEP_MIN else "🟡 低手位连续观望，已自动暂停",
+                    summary="为避免在高风险手位强行下注，系统已自动暂停 1 局并等待下一次判断。" if next_sequence >= STALL_GUARD_HIGH_STEP_MIN else "低手位已经保守解锁过一次，本次继续观望后已自动暂停 1 局。",
+                    fields=[
+                        ("当前手位", f"{next_sequence} 手"),
+                        ("连续观望", f"{int(skip_trigger.get('skip_streak', 0) or 0)} 次"),
+                        ("处理结果", f"已自动暂停 {pause_rounds} 局"),
+                    ],
+                ),
+                ttl_seconds=120,
+                attr_name="skip_reason_message",
+                msg_type="info",
+            )
+            return
         else:
             if _verbose_runtime_diag_enabled():
                 log_event(
@@ -3340,8 +3550,11 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 _build_ops_card(
                     "⏭️ 本局策略选择观望",
                     summary="当前模型判断不建议下注，本局已主动跳过。",
-                    fields=[("原因", rt.get("last_predict_info", "模型未给出可执行信号"))],
-                    action="建议继续观察下一次盘口，或执行 `status` 查看当前状态。",
+                    fields=[
+                        ("当前手位", f"{next_sequence} 手"),
+                        ("连续观望", f"{int(skip_trigger.get('skip_streak', 0) or 0)} 次"),
+                        ("原因", rt.get("last_predict_info", "模型未给出可执行信号")),
+                    ],
                 ),
                 ttl_seconds=120,
                 attr_name="skip_reason_message",
@@ -3830,12 +4043,13 @@ def _clear_hand_stall_guard(rt: dict) -> None:
     rt["stall_guard_skip_streak"] = 0
     rt["stall_guard_timeout_streak"] = 0
     rt["stall_guard_gate_streak"] = 0
+    rt["stall_guard_force_unlock_used"] = False
 
 
 def _record_hand_stall_block(rt: dict, next_sequence: int, history_signature: str, reason: str) -> dict:
     """
-    记录同手位“未下单”阻断事件，并判断是否触发防卡死解锁。
-    reason: skip/timeout/gate
+    记录同手位“未下单”阻断事件，并判断是否触发观望解锁或观望暂停。
+    当前主要服务于模型主动观望（skip）。
     """
     reason = str(reason or "gate").strip().lower()
     if reason not in {"skip", "timeout", "gate"}:
@@ -3864,13 +4078,26 @@ def _record_hand_stall_block(rt: dict, next_sequence: int, history_signature: st
     timeout_streak = int(rt.get("stall_guard_timeout_streak", 0))
     gate_streak = int(rt.get("stall_guard_gate_streak", 0))
 
-    force_unlock = (
-        skip_streak > STALL_GUARD_SKIP_MAX
-        or timeout_streak > STALL_GUARD_TIMEOUT_MAX
-        or no_bet_streak > STALL_GUARD_TOTAL_MAX
-    )
+    unlock_used = bool(rt.get("stall_guard_force_unlock_used", False))
+    force_unlock = False
+    pause_rounds = 0
+    pause_reason = ""
+
+    if reason == "skip":
+        if int(next_sequence) <= STALL_GUARD_LOW_STEP_UNLOCK_MAX:
+            if skip_streak > STALL_GUARD_SKIP_MAX and not unlock_used:
+                force_unlock = True
+            elif skip_streak > STALL_GUARD_SKIP_MAX and unlock_used:
+                pause_rounds = STALL_GUARD_HIGH_STEP_PAUSE_ROUNDS
+                pause_reason = "低手位连续观望暂停"
+        elif int(next_sequence) >= STALL_GUARD_HIGH_STEP_MIN and skip_streak >= 2:
+            pause_rounds = STALL_GUARD_HIGH_STEP_PAUSE_ROUNDS
+            pause_reason = "高手位连续观望暂停"
+
     return {
         "force_unlock": force_unlock,
+        "pause_rounds": pause_rounds,
+        "pause_reason": pause_reason,
         "sequence": int(next_sequence),
         "reason": reason,
         "history_signature": current_signature,
@@ -3878,6 +4105,7 @@ def _record_hand_stall_block(rt: dict, next_sequence: int, history_signature: st
         "skip_streak": skip_streak,
         "timeout_streak": timeout_streak,
         "gate_streak": gate_streak,
+        "unlock_used": unlock_used,
     }
 
 
@@ -3887,15 +4115,16 @@ def _prepare_force_unlock_prediction(state, rt: dict, next_sequence: int, trigge
     rt["last_predict_source"] = "unlock_fallback"
     rt["last_predict_tag"] = "UNLOCK"
     rt["last_predict_confidence"] = 0
-    rt["last_predict_reason"] = "同手位连续阻断，强制解锁"
+    rt["last_predict_reason"] = "低手位连续观望，保守解锁"
     rt["last_predict_info"] = (
-        "防卡死解锁 | "
-        f"第{next_sequence}手连续阻断 "
+        "低手位保守解锁 | "
+        f"第{next_sequence}手连续观望 "
         f"(总:{trigger.get('no_bet_streak', 0)}, "
-        f"skip:{trigger.get('skip_streak', 0)}, timeout:{trigger.get('timeout_streak', 0)}) "
+        f"skip:{trigger.get('skip_streak', 0)}) "
         f"| 兜底方向:{'大' if prediction == 1 else '小'}"
     )
     rt["stall_guard_force_unlock_total"] = int(rt.get("stall_guard_force_unlock_total", 0)) + 1
+    rt["stall_guard_force_unlock_used"] = True
     return prediction
 
 

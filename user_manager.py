@@ -414,6 +414,7 @@ def get_default_runtime() -> Dict[str, Any]:
         "stall_guard_timeout_streak": 0,
         "stall_guard_gate_streak": 0,
         "stall_guard_force_unlock_total": 0,
+        "stall_guard_force_unlock_used": False,
         "last_skip_notice_settled": -1,
         "model_monitor_last_settled": 0,
         "fund_pause_notified": False,
@@ -445,6 +446,9 @@ def get_default_runtime() -> Dict[str, Any]:
         "model_last_switch_from": "",
         "model_last_switch_to": "",
         "model_pause_notified": False,
+        "model_probe_active": False,
+        "model_probe_index": 0,
+        "model_pause_active": False,
         
         # 预设相关
         "current_preset_name": "",
