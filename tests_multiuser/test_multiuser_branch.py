@@ -65,7 +65,7 @@ def test_user_context_prefers_user_dir_slug_for_logs(tmp_path):
     assert mm.register_main_user_log_identity(ctx) == "shuji"
 
 
-def test_format_dashboard_matches_v1120_status_style(tmp_path):
+def test_format_dashboard_matches_status_html_layout(tmp_path):
     user_dir = tmp_path / "users" / "status_style_user"
     _write_json(
         user_dir / "config.json",
@@ -100,11 +100,12 @@ def test_format_dashboard_matches_v1120_status_style(tmp_path):
 
     text = zm.format_dashboard(ctx)
 
-    assert "📍 当前概览" in text
-    assert "下一手下注：" in text
-    assert "🎯 策略设定" in text
-    assert "💰 账户余额：" in text
-    assert "模式：" not in text
+    assert "<b>【 状态监控 】</b> 🟢 运行中" in text
+    assert "<b>方案：</b> <code>yc5</code>" in text
+    assert "├ 计划下注：<code>0.50</code> 万" in text
+    assert "<b>💰 资产总览</b>" in text
+    assert "<b>📊 近期 40 次结果（由近及远）</b>" in text
+    assert "<blockquote>" in text
 
 
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
@@ -1225,11 +1226,10 @@ def test_process_settle_lose_warning_matches_master_style(tmp_path, monkeypatch)
     rt["current_preset_name"] = "yc10"
     ctx.state.bet_sequence_log = [{"bet_id": "20260223_1_1", "profit": None}]
 
-    captured = {}
+    captured = []
 
     async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", title=None, desp=None):
-        captured["type"] = msg_type
-        captured["message"] = message
+        captured.append((msg_type, message, parse_mode))
         return None
 
     async def fake_send_to_admin(client, message, user_ctx, global_cfg):
@@ -1252,12 +1252,13 @@ def test_process_settle_lose_warning_matches_master_style(tmp_path, monkeypatch)
     event = SimpleNamespace(message=SimpleNamespace(message="已结算: 结果为 9 大"))
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
-    assert captured["type"] == "lose_streak"
-    assert "⚠️ 1 连输告警" in captured["message"]
-    assert "第 1 轮第 1 次" in captured["message"]
-    assert "预设：yc10" in captured["message"]
-    assert "账户余额：" in captured["message"]
-    assert "🤖 当局 AI 预测提示" not in captured["message"]
+    lose_streak_messages = [message for msg_type, message, _ in captured if msg_type == "lose_streak"]
+    assert lose_streak_messages
+    assert "⚠️ 1 连输告警" in lose_streak_messages[0]
+    assert "第 1 轮第 1 次" in lose_streak_messages[0]
+    assert "预设：yc10" in lose_streak_messages[0]
+    assert "账户余额：" in lose_streak_messages[0]
+    assert "🤖 当局 AI 预测提示" not in lose_streak_messages[0]
 
 
 def test_process_settle_lose_end_message_contains_balance_lines(tmp_path, monkeypatch):
@@ -2643,12 +2644,11 @@ def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monk
     monkeypatch.setattr(zm, "get_current_repo_info", lambda: {"current_tag": "v1.0.10", "nearest_tag": "v1.0.10", "short_commit": "abcd1234"})
 
     msg = zm.format_dashboard(ctx)
-    assert "📍 当前概览" in msg
-    assert "下一手下注：" in msg
-    assert "菠菜余额：" in msg
-    assert "🔢 软件版本：v1.0.10(abcd1234)" in msg
-    assert "📋 预设名称：yc10" in msg
-    assert "🤖 预设参数：1 11 2.8 2.3 2.2 2.05 10000" in msg
+    assert "<b>方案：</b> <code>yc10</code> <code>v1.0.10(abcd1234)</code>" in msg
+    assert "├ 账户余额：" in msg
+    assert "├ 菠菜资金：" in msg
+    assert "<b>大模型：</b> <code>" in msg
+    assert "<b>原始参数：</b> <code>1 11 2.8 2.3 2.2 2.05 10000</code>" in msg
 
 
 def test_st_command_triggers_auto_yc_report(tmp_path, monkeypatch):
@@ -3203,9 +3203,46 @@ def test_format_dashboard_prioritizes_runtime_over_detail_sections(tmp_path):
 
     dashboard = zm.format_dashboard(ctx)
 
-    assert dashboard.index("📍 当前概览") < dashboard.index("📊 近期 40 次结果（由近及远）")
-    assert dashboard.index("📊 近期 40 次结果（由近及远）") < dashboard.index("🎯 策略设定")
+    assert dashboard.index("<b>【 状态监控 】</b>") < dashboard.index("<b>🎯 即时下注</b>")
+    assert dashboard.index("<b>🎯 即时下注</b>") < dashboard.index("<b>💰 资产总览</b>")
+    assert dashboard.index("<b>💰 资产总览</b>") < dashboard.index("<b>📊 近期 40 次结果（由近及远）</b>")
+    assert dashboard.index("<b>📊 近期 40 次结果（由近及远）</b>") < dashboard.index("<b>⚙️ 策略参数</b>")
     assert "模式：追投" not in dashboard
-    assert "下一手下注：" in dashboard
-    assert "💰 账户余额：320.00 万" in dashboard
-    assert "预设参数：" in dashboard
+    assert "├ 计划下注：" in dashboard
+    assert "<pre>" in dashboard
+    assert "<blockquote>" in dashboard
+
+
+def test_status_command_sends_dashboard_with_html_parse_mode(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "status_cmd_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态命令用户"},
+            "telegram": {"user_id": 6010},
+            "groups": {"admin_chat": 6010},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent = {}
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", *args, **kwargs):
+        sent["msg_type"] = msg_type
+        sent["message"] = message
+        sent["parse_mode"] = parse_mode
+        return SimpleNamespace(chat_id=6010, id=1)
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    cmd_event = SimpleNamespace(raw_text="status", chat_id=6010, id=99)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), cmd_event, ctx, {}))
+
+    assert sent["msg_type"] == "dashboard"
+    assert sent["parse_mode"] == "html"
+    assert "<b>【 状态监控 】</b>" in sent["message"]

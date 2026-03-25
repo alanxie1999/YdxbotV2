@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+from html import escape as escape_html
 import requests
 import aiohttp
 from logging.handlers import TimedRotatingFileHandler
@@ -958,64 +959,8 @@ def get_software_version_text() -> str:
 
 # 仪表盘格式化 - 与master版本保持一致
 def format_dashboard(user_ctx: UserContext) -> str:
-    """生成并返回仪表盘信息 - 与master版本format_dashboard一致"""
-    state = user_ctx.state
-    rt = state.runtime
-    
-    mes = _build_dashboard_summary(user_ctx)
-
-    reversed_data = ["✅" if x == 1 else "❌" for x in state.history[-40:][::-1]]
-    mes += f"""———————————————
-📊 近期 40 次结果（由近及远）
-✅：大（1）  ❌：小（0）
-{os.linesep.join(
-        " ".join(map(str, reversed_data[i:i + 10])) 
-        for i in range(0, len(reversed_data), 10)
-    )}
-
-———————————————
-🎯 策略设定
-🔢 软件版本：{get_software_version_text()}
-🤖 模型 API：{rt.get('current_model_id', 'unknown')}
-🚦 当前押注状态：{get_bet_status_text(rt)}
-📋 预设名称：{rt.get('current_preset_name', 'none')}
-🤖 预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}
-💰 初始金额：{rt.get('initial_amount', 500)}
-⏹ 押注 {rt.get('lose_stop', 13)} 次停止
-💥 炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局
-📚 押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}
-
-"""
-    
-    balance_status = rt.get('balance_status', 'ok')
-    account_balance = rt.get('account_balance', 0)
-    
-    if balance_status == "auth_failed":
-        balance_str = "⚠️ Cookie 失效"
-    elif balance_status == "network_error":
-        balance_str = "⚠️ 网络错误"
-    elif account_balance == 0 and balance_status == "unknown":
-        balance_str = "⏳ 获取中..."
-    else:
-        balance_str = f"{account_balance / 10000:.2f} 万"
-        
-    mes += f"""💰 账户余额：{balance_str}
-💰 菠菜余额：{max(0, rt.get('gambling_fund', 0)) / 10000:.2f} 万
-📈 盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局
-📈 本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万
-📈 总盈利：{rt.get('earnings', 0) / 10000:.2f} 万
-
-"""
-    
-    win_total = rt.get('win_total', 0)
-    total = rt.get('total', 0)
-    if win_total > 0 or total > 0:
-        win_rate = (win_total / total * 100) if total > 0 else 0.00
-        mes += f"""🎯 押注次数：{total}
-🏆 胜率：{win_rate:.2f}%
-💰 收益：{format_number(rt.get('earnings', 0))}"""
-    
-    return mes
+    """生成 HTML 版 status 卡片。"""
+    return generate_status_html(_build_status_html_data(user_ctx))
 
 
 def get_bet_status_text(rt: Dict[str, Any]) -> str:
@@ -1068,6 +1013,188 @@ def _format_account_balance_text(rt: Dict[str, Any]) -> str:
     if account_balance <= 0 and balance_status == "unknown":
         return "获取中"
     return format_number(account_balance)
+
+
+def _resolve_pause_remaining_rounds(rt: Dict[str, Any]) -> int:
+    total_rounds = max(0, int(rt.get("pause_countdown_total_rounds", 0) or 0))
+    last_remaining = int(rt.get("pause_countdown_last_remaining", -1) or -1)
+    stop_count = max(0, int(rt.get("stop_count", 0) or 0))
+
+    if total_rounds > 0 and 0 < last_remaining <= total_rounds:
+        return last_remaining
+    if total_rounds > 0 and stop_count > 0:
+        if stop_count > total_rounds:
+            return total_rounds
+        return stop_count
+    if stop_count > 0:
+        return max(0, stop_count - 1)
+    return 0
+
+
+def _resolve_status_html_type(rt: Dict[str, Any]) -> tuple[str, int]:
+    if rt.get("manual_pause", False):
+        return "manual_pause", 0
+    if not rt.get("switch", True):
+        return "stop", 0
+    if bool(rt.get("pause_countdown_active", False)) or int(rt.get("stop_count", 0) or 0) > 0:
+        return "auto_pause", _resolve_pause_remaining_rounds(rt)
+    if rt.get("bet_on", False):
+        return "running", 0
+    return "stop", 0
+
+
+def _get_current_predict_display(rt: Dict[str, Any]) -> str:
+    raw_info = str(rt.get("last_predict_info", "") or "").strip()
+    if any(word in raw_info for word in ("观望", "跳过", "SKIP", "skip")):
+        return "观望"
+
+    bet_type = rt.get("bet_type", None)
+    try:
+        if bet_type is not None:
+            bet_type = int(bet_type)
+            if bet_type == 1:
+                return "大"
+            if bet_type == 0:
+                return "小"
+    except (TypeError, ValueError):
+        pass
+
+    if "大" in raw_info and "小" not in raw_info:
+        return "大"
+    if "小" in raw_info and "大" not in raw_info:
+        return "小"
+    return "等待预测"
+
+
+def _format_wan_value(value: Any, signed: bool = False) -> str:
+    try:
+        number = float(value) / 10000.0
+    except (TypeError, ValueError):
+        number = 0.0
+    if signed:
+        return f"{number:+.2f}"
+    return f"{number:.2f}"
+
+
+def _format_total_profit_value(value: Any) -> str:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 0
+    if number > 0:
+        return f"+{format_number(number)}"
+    return format_number(number)
+
+
+def _build_recent_history_grid(history: List[int], limit: int = 40) -> str:
+    recent = history[-limit:][::-1]
+    if not recent:
+        return "暂无数据"
+    icons = ["✅" if x == 1 else "❌" for x in recent]
+    return os.linesep.join(
+        " ".join(icons[i:i + 10])
+        for i in range(0, len(icons), 10)
+    )
+
+
+def _build_status_html_data(user_ctx: UserContext) -> Dict[str, Any]:
+    state = user_ctx.state
+    rt = state.runtime
+
+    status_type, pause_remain = _resolve_status_html_type(rt)
+    total = int(rt.get("total", 0) or 0)
+    win_total = int(rt.get("win_total", 0) or 0)
+    win_rate = (win_total / total * 100) if total > 0 else 0.0
+    next_bet_amount = int(calculate_bet_amount(rt) or 0)
+
+    return {
+        "status_type": status_type,
+        "pause_remain": pause_remain,
+        "preset_name": str(rt.get("current_preset_name", "") or "").strip() or "未设置",
+        "version": get_software_version_text(),
+        "current_predict": _get_current_predict_display(rt),
+        "next_bet": _format_wan_value(next_bet_amount),
+        "session_target": _format_wan_value(rt.get("profit", 0)),
+        "session_profit": _format_wan_value(rt.get("period_profit", 0), signed=True),
+        "acc_bal": _format_wan_value(rt.get("account_balance", 0)),
+        "bet_bal": _format_wan_value(rt.get("gambling_fund", 0)),
+        "total_profit": _format_wan_value(rt.get("earnings", 0), signed=True),
+        "total_profit_raw": _format_total_profit_value(rt.get("earnings", 0)),
+        "win_rate": f"{win_rate:.2f}",
+        "total_count": total,
+        "history_grid": _build_recent_history_grid(state.history),
+        "api_model": str(rt.get("current_model_id", "unknown") or "unknown"),
+        "ratios": f"{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}",
+        "raw_params": f"{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}",
+        "initial_amount": int(rt.get("initial_amount", 500) or 500),
+        "lose_stop": int(rt.get("lose_stop", 13) or 13),
+        "explode": int(rt.get("explode", 5) or 5),
+        "stop": int(rt.get("stop", 3) or 3),
+        "account_balance_text": _format_account_balance_text(rt),
+        "gambling_fund_text": _format_wan_value(rt.get("gambling_fund", 0)),
+    }
+
+
+def generate_status_html(data: Dict[str, Any]) -> str:
+    status_map = {
+        "running": "🟢 运行中",
+        "auto_pause": f"🟡 自动暂停（剩 {int(data.get('pause_remain', 0) or 0)} 局恢复）",
+        "manual_pause": "⏸ 手动暂停",
+        "stop": "🔴 已停止",
+    }
+    status_line = status_map.get(str(data.get("status_type", "") or "").strip(), "⚪ 未知状态")
+
+    try:
+        current_p = float(data.get("session_profit", 0) or 0)
+        target_p = float(data.get("session_target", 0) or 0)
+        ratio = max(0.0, min(current_p / target_p, 1.0)) if target_p > 0 else 0.0
+        filled = int(10 * ratio)
+        progress_bar = f"<code>[{'▓' * filled}{'░' * (10 - filled)}]</code> {ratio * 100:.1f}%"
+    except Exception:
+        progress_bar = "<code>[░░░░░░░░░░]</code> 0.0%"
+
+    profit_emoji = "📈" if float(data.get("session_profit", 0) or 0) >= 0 else "🚩"
+    current_time = datetime.now().strftime("%m-%d %H:%M:%S")
+
+    account_balance_text = str(data.get("account_balance_text", "") or "").strip()
+    if account_balance_text in {"Cookie 失效", "网络异常", "获取中"}:
+        account_balance_line = account_balance_text
+    else:
+        account_balance_line = f"<code>{escape_html(str(data.get('acc_bal', '0.00')))}</code> 万"
+
+    history_grid = escape_html(str(data.get("history_grid", "暂无数据") or "暂无数据"))
+    html = (
+        f"<b>【 状态监控 】</b> {status_line}\n"
+        f"<b>方案：</b> <code>{escape_html(str(data.get('preset_name', '未设置')))}</code> <code>{escape_html(str(data.get('version', 'unknown')))}</code>\n"
+        f"<b>更新：</b> {current_time}\n\n"
+
+        "<b>🎯 即时下注</b>\n"
+        f"├ 下一预测：<b>{escape_html(str(data.get('current_predict', '等待预测')))}</b>\n"
+        f"├ 计划下注：<code>{escape_html(str(data.get('next_bet', '0.00')))}</code> 万\n"
+        f"├ 单轮目标：<code>{escape_html(str(data.get('session_target', '0.00')))}</code> 万\n"
+        f"├ 本轮损益：<code>{escape_html(str(data.get('session_profit', '0.00')))}</code> 万 {profit_emoji}\n"
+        f"└ 目标进度：{progress_bar}\n\n"
+
+        "<b>💰 资产总览</b>\n"
+        f"├ 账户余额：{account_balance_line}\n"
+        f"├ 菠菜资金：<code>{escape_html(str(data.get('bet_bal', '0.00')))}</code> 万\n"
+        f"├ 累计盈利：<b><code>{escape_html(str(data.get('total_profit', '0.00')))}</code> 万</b> 🏆\n"
+        f"└ 统计数据：<code>{escape_html(str(data.get('win_rate', '0.00')))}%</code> 胜率，<code>{escape_html(str(data.get('total_count', 0)))}</code> 次押注\n\n"
+
+        "<b>📊 近期 40 次结果（由近及远）</b>\n"
+        "✅：大（1）  ❌：小（0）\n"
+        f"<pre>{history_grid}</pre>\n\n"
+
+        "<b>⚙️ 策略参数</b>\n"
+        "<blockquote>\n"
+        f"<b>大模型：</b> <code>{escape_html(str(data.get('api_model', 'unknown')))}</code>\n"
+        f"<b>预设名称：</b> <code>{escape_html(str(data.get('preset_name', '未设置')))}</code>\n"
+        f"<b>押注倍率：</b> <code>{escape_html(str(data.get('ratios', '')))}</code>\n"
+        f"<b>执行规则：</b> <code>炸 {escape_html(str(data.get('explode', 0)))} 停 {escape_html(str(data.get('stop', 0)))} | {escape_html(str(data.get('lose_stop', 0)))} 次止损</code>\n"
+        f"<b>原始参数：</b> <code>{escape_html(str(data.get('raw_params', '')))}</code>\n"
+        "</blockquote>"
+    )
+    return html
 
 
 def _build_dashboard_summary(user_ctx: UserContext) -> str:
@@ -2679,7 +2806,14 @@ async def _refresh_dashboard_message_slim(client, user_ctx: UserContext, global_
     dashboard = format_dashboard(user_ctx)
     if hasattr(user_ctx, "dashboard_message") and user_ctx.dashboard_message:
         await cleanup_message(client, user_ctx.dashboard_message)
-    user_ctx.dashboard_message = await send_to_admin(client, dashboard, user_ctx, global_config)
+    user_ctx.dashboard_message = await send_message_v2(
+        client,
+        "dashboard",
+        dashboard,
+        user_ctx,
+        global_config,
+        parse_mode="html",
+    )
     return user_ctx.dashboard_message
 
 
@@ -5932,7 +6066,14 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         # status - 查看仪表盘 - 与master一致
         if cmd == "status":
             dashboard = format_dashboard(user_ctx)
-            message = await send_to_admin(client, dashboard, user_ctx, global_config)
+            message = await send_message_v2(
+                client,
+                "dashboard",
+                dashboard,
+                user_ctx,
+                global_config,
+                parse_mode="html",
+            )
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             if message:
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 60))
