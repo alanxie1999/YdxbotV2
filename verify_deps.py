@@ -3,6 +3,18 @@
 import sys
 
 
+REQUIRED_DEPENDENCIES = (
+    ("telethon", "telethon"),
+    ("aiohttp", "aiohttp"),
+    ("requests", "requests"),
+    ("socks", "python-socks"),
+)
+
+OPTIONAL_DEPENDENCIES = (
+    ("dashscope", "dashscope"),
+)
+
+
 def check_import(module_name, package_name=None):
     """Return whether a module can be imported."""
     if package_name is None:
@@ -20,11 +32,14 @@ def main():
     """Run dependency checks and return a process exit code."""
     print("Checking dependencies...\n")
     all_ok = True
-    all_ok &= check_import("telethon")
-    all_ok &= check_import("aiohttp")
-    all_ok &= check_import("requests")
-    all_ok &= check_import("socks", "python-socks")
-    all_ok &= check_import("dashscope")
+
+    for module_name, package_name in REQUIRED_DEPENDENCIES:
+        all_ok &= check_import(module_name, package_name)
+
+    print("\nOptional dependencies...")
+    for module_name, package_name in OPTIONAL_DEPENDENCIES:
+        if not check_import(module_name, package_name):
+            print(f"OPTIONAL {package_name}: missing, related provider will stay unavailable.")
 
     print("\n" + "=" * 40)
     if all_ok:

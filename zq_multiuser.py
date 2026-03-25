@@ -961,60 +961,37 @@ def format_dashboard(user_ctx: UserContext) -> str:
     """生成并返回仪表盘信息 - 与master版本format_dashboard一致"""
     state = user_ctx.state
     rt = state.runtime
-    
-    mes = _build_dashboard_summary(user_ctx)
 
-    reversed_data = ["✅" if x == 1 else "❌" for x in state.history[-40:][::-1]]
-    mes += f"""📊 近期 40 次结果（由近及远）
-✅：大（1）  ❌：小（0）
-{os.linesep.join(
-        " ".join(map(str, reversed_data[i:i + 10])) 
-        for i in range(0, len(reversed_data), 10)
-    )}
+    total = int(rt.get('total', 0) or 0)
+    win_total = int(rt.get('win_total', 0) or 0)
+    win_rate = (win_total / total * 100) if total > 0 else 0.00
 
-———————————————
-🎯 策略设定
-🔢 软件版本：{get_software_version_text()}
-🤖 模型 API：{rt.get('current_model_id', 'unknown')}
-🚦 当前押注状态：{get_bet_status_text(rt)}
-📋 预设名称：{rt.get('current_preset_name', 'none')}
-🤖 预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}
-💰 初始金额：{rt.get('initial_amount', 500)}
-⏹ 押注 {rt.get('lose_stop', 13)} 次停止
-💥 炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局
-📚 押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}
-
-"""
-    
-    balance_status = rt.get('balance_status', 'ok')
-    account_balance = rt.get('account_balance', 0)
-    
-    if balance_status == "auth_failed":
-        balance_str = "⚠️ Cookie 失效"
-    elif balance_status == "network_error":
-        balance_str = "⚠️ 网络错误"
-    elif account_balance == 0 and balance_status == "unknown":
-        balance_str = "⏳ 获取中..."
-    else:
-        balance_str = f"{account_balance / 10000:.2f} 万"
-        
-    mes += f"""💰 账户余额：{balance_str}
-💰 菠菜余额：{max(0, rt.get('gambling_fund', 0)) / 10000:.2f} 万
-📈 盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局
-📈 本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万
-📈 总盈利：{rt.get('earnings', 0) / 10000:.2f} 万
-
-"""
-    
-    win_total = rt.get('win_total', 0)
-    total = rt.get('total', 0)
-    if win_total > 0 or total > 0:
-        win_rate = (win_total / total * 100) if total > 0 else 0.00
-        mes += f"""🎯 押注次数：{total}
-🏆 胜率：{win_rate:.2f}%
-💰 收益：{format_number(rt.get('earnings', 0))}"""
-    
-    return mes
+    sections = [
+        _build_dashboard_summary(user_ctx),
+        "———————————————",
+        "🎛️ 策略与风控",
+        f"🔢 软件版本：{get_software_version_text()}",
+        f"模型 API：{rt.get('current_model_id', 'unknown')}",
+        f"📋 预设名称：{rt.get('current_preset_name', 'none')}",
+        f"🤖 预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}",
+        f"首注金额：{rt.get('initial_amount', 500)}",
+        f"止损规则：押注 {rt.get('lose_stop', 13)} 次停止",
+        f"炸号阈值：炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局",
+        f"盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局",
+        f"押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}",
+        "",
+        "📊 近期 40 局结果（由近及远）",
+        "✅：大（1）  ❌：小（0）",
+        _format_recent_results_block(state.history),
+        "",
+        "📈 运行统计",
+        f"本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万",
+        f"总盈利：{rt.get('earnings', 0) / 10000:.2f} 万",
+        f"押注次数：{total}",
+        f"胜率：{win_rate:.2f}%",
+        f"收益：{format_number(rt.get('earnings', 0))}",
+    ]
+    return "\n".join(section for section in sections if section is not None).strip()
 
 
 def get_bet_status_text(rt: Dict[str, Any]) -> str:
@@ -1073,6 +1050,7 @@ def _build_dashboard_summary(user_ctx: UserContext) -> str:
     rt = user_ctx.state.runtime
     status_text = get_bet_status_text(rt)
     preset_name = str(rt.get("current_preset_name", "") or "").strip() or "未设置"
+    mode_text = _get_bet_mode_text(rt)
     next_amount = int(calculate_bet_amount(rt) or 0)
     balance_status = rt.get("balance_status", "unknown")
     account_balance = int(rt.get("account_balance", 0) or 0)
@@ -1091,12 +1069,10 @@ def _build_dashboard_summary(user_ctx: UserContext) -> str:
         "📍 当前概览",
         f"状态：{status_text}",
         f"预设：{preset_name}",
+        f"模式：{mode_text}",
         f"下一手下注：{format_number(next_amount) if next_amount > 0 else '已停止'}",
         f"账户余额：{balance_text}",
         f"菠菜余额：{gambling_fund / 10000:.2f} 万",
-        "",
-        "———————————————",
-        "",
     ]
     return "\n".join(summary_lines)
 
@@ -1262,6 +1238,102 @@ def _build_ops_card(
     return "\n".join(lines).strip()
 
 
+def _build_alert_ops_card(
+    title: str,
+    *,
+    impact: str,
+    fields: Optional[List[tuple[str, Any]]] = None,
+    action: str = "",
+    note: str = "",
+) -> str:
+    return _build_ops_card(title, summary=impact, fields=fields, action=action, note=note)
+
+
+def _build_success_ops_card(
+    title: str,
+    *,
+    outcome: str,
+    fields: Optional[List[tuple[str, Any]]] = None,
+    action: str = "",
+    note: str = "",
+) -> str:
+    return _build_ops_card(title, summary=outcome, fields=fields, action=action, note=note)
+
+
+def _build_error_ops_card(
+    title: str,
+    *,
+    problem: str,
+    fields: Optional[List[tuple[str, Any]]] = None,
+    action: str = "",
+    note: str = "",
+) -> str:
+    return _build_ops_card(title, summary=problem, fields=fields, action=action, note=note)
+
+
+def _build_help_card() -> str:
+    return _build_ops_card(
+        "📘 快速上手",
+        summary="先记住 5 个高频命令：`st`、`status`、`pause`、`resume`、`balance`。",
+        fields=[
+            ("高频命令", "`st [预设名]` 启动 / `status` 查看 / `pause` 暂停 / `resume` 恢复 / `balance` 余额"),
+            ("常用场景", "启动看 `st`，日常看 `status`，遇到异常先 `pause`，恢复用 `resume`。"),
+            ("完整命令分组", "基础控制 / 参数设置 / 模型与策略 / 测算功能 / 数据管理 / 发布更新 / 预设管理 / 多用户管理"),
+            ("基础控制", "`st [预设名]` / `pause` / `resume` / `open` / `off`"),
+            ("参数设置", "`gf [金额]` / `set [炸] [赢] [停] [盈停]` / `warn [次数]` / `wlc [次数]`"),
+            ("模型与策略", "`model [list|select|reload]` / `apikey [show|set|add|del|test]` / `ms [模式]`"),
+            ("测算功能", "`yc [预设名]` / `yc [参数...]`"),
+            ("数据管理", "`res tj` / `res state` / `res bet` / `explain` / `stats` / `balance` / `xx`"),
+            ("发布更新", "`ver` / `update [版本|提交]` / `reback [版本|提交]` / `restart`"),
+            ("预设管理", "`ys [名] ...` / `yss` / `yss dl [名]`"),
+            ("多用户管理", "`users` / `status`"),
+        ],
+        action="如果只是日常使用，优先看 `status`；准备启动时执行 `st [预设名]`。",
+    )
+
+
+def _build_release_ops_card(
+    title: str,
+    *,
+    summary: str,
+    target_version: str = "",
+    current_version: str = "",
+    restart_required: bool | None = None,
+    restart_mode: str = "",
+    service_name: str = "",
+    error: str = "",
+    blocking_files: str = "",
+    extra_fields: Optional[List[tuple[str, Any]]] = None,
+    action: str = "",
+    note: str = "",
+) -> str:
+    fields: List[tuple[str, Any]] = []
+    if target_version:
+        fields.append(("目标版本", target_version))
+    if current_version:
+        fields.append(("当前版本", current_version))
+    if restart_required is not None:
+        fields.append(("是否需要重启", "需要" if restart_required else "不需要"))
+    if restart_mode:
+        fields.append(("重启方式", restart_mode))
+    if service_name:
+        fields.append(("服务名", service_name))
+    if error:
+        fields.append(("错误", error))
+    if blocking_files:
+        fields.append(("阻塞文件", blocking_files))
+    for label, value in extra_fields or []:
+        if value not in (None, ""):
+            fields.append((label, value))
+    return _build_ops_card(
+        title,
+        summary=summary,
+        fields=fields,
+        action=action,
+        note=note,
+    )
+
+
 async def _reply_ops_card(
     event,
     title: str,
@@ -1287,18 +1359,70 @@ def _build_priority_summary(msg_type: str, text: str, account_prefix: str) -> st
     lines = _clean_message_lines(content)
     policy = MESSAGE_POLICY.get(msg_type, {})
     level = policy.get("level", "P2")
-    title = policy.get("title", msg_type)
-    action = policy.get("action", "")
+    default_title = policy.get("title", msg_type)
+    default_action = policy.get("action", "")
 
-    summary_lines: List[str] = [account_prefix, f"[{level}] {title}"]
-    picked = 0
-    for line in lines:
-        if picked >= 3:
+    title = default_title
+    summary = ""
+    action = ""
+    fields: List[tuple[str, str]] = []
+    title_prefixes = ("✅", "⚠️", "❌", "📘", "📌", "♻️", "↩️", "🔄", "💰", "🎯", "📚", "👤", "📉", "📊")
+
+    for idx, line in enumerate(lines):
+        if (
+            idx == 0
+            and not any(line.startswith(prefix) for prefix in ("结论：", "建议动作：", "补充说明："))
+            and (len(lines) > 1 or line.startswith(title_prefixes))
+        ):
+            title = line
+            continue
+        if line.startswith("结论：") and not summary:
+            summary = line.removeprefix("结论：").strip()
+            continue
+        if line.startswith("建议动作：") and not action:
+            action = line.removeprefix("建议动作：").strip()
+            continue
+        if line.startswith("补充说明："):
+            continue
+        if "：" in line:
+            label, value = line.split("：", 1)
+            label = label.strip()
+            value = value.strip()
+            if label and value:
+                fields.append((label, value))
+            continue
+        if not summary:
+            summary = line
+
+    if not summary:
+        summary = lines[0] if lines else default_title
+    if not action:
+        action = default_action
+
+    preferred_labels = ["状态", "当前状态", "预设", "下一手下注", "账户余额", "菠菜余额", "目标", "当前", "收益", "损失"]
+    picked_fields: List[str] = []
+    seen_labels = set()
+    for wanted in preferred_labels:
+        for label, value in fields:
+            if label == wanted and label not in seen_labels:
+                picked_fields.append(f"{label}：{value}")
+                seen_labels.add(label)
+                break
+        if len(picked_fields) >= 2:
             break
-        summary_lines.append(line)
-        picked += 1
+    if len(picked_fields) < 2:
+        for label, value in fields:
+            if label in seen_labels:
+                continue
+            picked_fields.append(f"{label}：{value}")
+            seen_labels.add(label)
+            if len(picked_fields) >= 2:
+                break
+
+    summary_lines: List[str] = [account_prefix, f"[{level}] {title}", summary]
+    summary_lines.extend(picked_fields)
     if action:
-        summary_lines.append(f"建议：{action}")
+        summary_lines.append(f"操作：{action}")
     return "\n".join(summary_lines)
 
 
@@ -1308,6 +1432,25 @@ def _ensure_account_prefix(text: str, account_prefix: str) -> str:
     if not content:
         return account_prefix
     return f"{account_prefix}\n{content}"
+
+
+def _get_bet_mode_text(rt: Dict[str, Any]) -> str:
+    try:
+        mode_code = int(rt.get("bet_mode", rt.get("mode", 1)) or 1)
+    except (TypeError, ValueError):
+        mode_code = 1
+    return {0: "反投", 1: "预测", 2: "追投"}.get(mode_code, "未知")
+
+
+def _format_recent_results_block(history: List[int], limit: int = 40) -> str:
+    recent_history = history[-limit:][::-1]
+    if not recent_history:
+        return "暂无数据"
+    reversed_data = ["✅" if x == 1 else "❌" for x in recent_history]
+    return os.linesep.join(
+        " ".join(reversed_data[i:i + 10])
+        for i in range(0, len(reversed_data), 10)
+    )
 
 
 def _iter_targets(target):
@@ -1501,9 +1644,9 @@ async def send_message_v2(
     account_name = user_ctx.config.name.strip()
     account_prefix = f"【账号：{account_name}】"
     admin_message = _strip_account_prefix(message)
-    # 重点通道保留完整详细内容，并统一补充账号前缀，方便多账号并行查看。
-    priority_message = _ensure_account_prefix(message, account_prefix)
-    priority_desp = _ensure_account_prefix(desp if desp is not None else message, account_prefix)
+    priority_source = desp if desp is not None else message
+    priority_message = _build_priority_summary(msg_type, priority_source, account_prefix)
+    priority_desp = priority_message
 
     sent_message = None
     admin_chat = None
@@ -4376,10 +4519,11 @@ async def _handle_goal_pause_after_settle(
             1 for entry in state.bet_sequence_log
             if str(entry.get("bet_id", "")).startswith(current_round_str)
         )
-        win_msg = _build_ops_card(
-            f"😄📈 {date_str}第 {rt.get('current_round', 1)} 轮 赢了",
-            summary="本轮已达到盈利条件，系统会按设定进入暂停观察。",
+        win_msg = _build_success_ops_card(
+            "✅ 本轮盈利达成",
+            outcome="本轮已达到盈利条件，系统会按设定进入暂停观察。",
             fields=[
+                ("轮次", f"{date_str} 第 {rt.get('current_round', 1)} 轮"),
                 ("收益", f"{period_profit / 10000:.2f} 万"),
                 ("共下注", f"{round_bet_count} 次"),
             ],
@@ -4387,11 +4531,14 @@ async def _handle_goal_pause_after_settle(
         )
         await send_message_v2(client, "win", win_msg, user_ctx, global_config)
     else:
-        explode_msg = _build_ops_card(
-            "💥 本轮炸了",
-            summary="当前轮次触发炸号保护，系统会立即暂停观察。",
-            fields=[("收益", f"{period_profit / 10000:.2f} 万")],
-            action="建议先看 `status`，确认暂停局数与当前资金状态。",
+        explode_msg = _build_alert_ops_card(
+            "⚠️ 炸号保护已触发",
+            impact="当前轮次触发炸号保护，系统会立即暂停观察。",
+            fields=[
+                ("当前轮次", f"第 {rt.get('current_round', 1)} 轮"),
+                ("本轮收益", f"{period_profit / 10000:.2f} 万"),
+            ],
+            action="先看 `status`，确认暂停局数与当前资金状态。",
         )
         await send_message_v2(client, "explode", explode_msg, user_ctx, global_config)
 
@@ -4414,9 +4561,9 @@ async def _handle_goal_pause_after_settle(
     resume_hint = _build_pause_resume_hint(rt)
     account_balance_text = _format_account_balance_text(rt)
     gambling_fund_text = format_number(max(0, int(rt.get("gambling_fund", 0) or 0)))
-    pause_msg = _build_ops_card(
-        f"⛔ {'被炸保护暂停' if notify_type == 'explode' else '盈利达成暂停'} ⛔",
-        summary="系统已进入目标暂停，当前策略状态会被保留，不会重置首注。",
+    pause_msg = _build_alert_ops_card(
+        f"⛔ {'炸号保护暂停' if notify_type == 'explode' else '盈利达成暂停'}",
+        impact="系统已进入目标暂停，当前策略状态会被保留，不会重置首注。",
         fields=[
             ("原因", "被炸保护" if notify_type == 'explode' else "盈利达成"),
             ("本次暂停", f"{configured_stop_rounds} 局"),
@@ -4424,7 +4571,7 @@ async def _handle_goal_pause_after_settle(
             ("账户资金", account_balance_text),
             ("菠菜资金", gambling_fund_text),
         ],
-        action="建议等待倒计时结束，或执行 `status` 查看剩余暂停局数。",
+        action="等待倒计时结束；如需复核可执行 `status`。",
     )
     log_event(
         logging.INFO,
@@ -4645,14 +4792,14 @@ def generate_mobile_pause_report(
 
 
 def _build_fund_pause_message(current_fund: int) -> str:
-    return _build_ops_card(
-        "⛔ 菠菜资金不足，已暂停押注",
-        summary="当前资金无法覆盖下一手下注，系统已自动暂停以避免继续扩大风险。",
+    return _build_alert_ops_card(
+        "⛔ 资金不足，已暂停押注",
+        impact="当前资金无法覆盖下一手下注，系统已自动暂停以避免继续扩大风险。",
         fields=[
             ("当前剩余", f"{max(0, int(current_fund or 0)) / 10000:.2f} 万"),
             ("恢复方式", "`gf [金额]`"),
         ],
-        action="补充资金后，建议先执行 `status`，确认状态正常再继续。",
+        action="补充资金后执行 `gf [金额]`，再用 `status` 确认恢复情况。",
     )
 
 
@@ -4904,20 +5051,20 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 if rt.get("lose_count", 0) >= warning_lose_count:
                     rt["lose_notify_pending"] = True
                     total_losses = int(active_chain_summary.get("total_losses", abs(profit)))
-                    warn_msg = _build_ops_card(
-                        f"⚠️ {int(rt.get('lose_count', 0))} 连输告警 ⚠️",
-                        summary="当前链路已进入高关注状态，请重点关注下一手与账户余额变化。",
+                    warn_msg = _build_alert_ops_card(
+                        f"⚠️ {int(rt.get('lose_count', 0))} 连输告警",
+                        impact="当前链路已进入高关注状态，请重点关注下一手与账户余额变化。",
                         fields=[
-                            ("🔢 时间", f"{datetime.now().strftime('%m月%d日')} 第 {settle_round} 轮第 {settle_seq} 次"),
-                            ("📋 预设名称", rt.get('current_preset_name', 'none')),
-                            ("😀 连续押注", f"{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次"),
-                            ("⚡ 押注方向", direction),
-                            ("💵 押注本金", format_number(bet_amount)),
-                            ("💰 累计损失", format_number(total_losses)),
-                            ("💰 账户余额", f"{rt.get('account_balance', 0) / 10000:.2f} 万"),
-                            ("💰 菠菜余额", f"{rt.get('gambling_fund', 0) / 10000:.2f} 万"),
+                            ("时间", f"{datetime.now().strftime('%m月%d日')} 第 {settle_round} 轮第 {settle_seq} 次"),
+                            ("预设", rt.get('current_preset_name', 'none')),
+                            ("连续押注", f"{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次"),
+                            ("押注方向", direction),
+                            ("本金", format_number(bet_amount)),
+                            ("累计损失", format_number(total_losses)),
+                            ("账户余额", f"{rt.get('account_balance', 0) / 10000:.2f} 万"),
+                            ("菠菜余额", f"{rt.get('gambling_fund', 0) / 10000:.2f} 万"),
                         ],
-                        action="建议立即查看 `status`；如不准备继续，可直接执行 `pause`。",
+                        action="先看 `status`；如不准备继续可执行 `pause`。",
                     )
                     if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
                         await cleanup_message(client, user_ctx.lose_streak_message)
@@ -5058,19 +5205,19 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_seq} 次"
             else:
                 range_text = f"{date_str} 第 {start_round} 轮第 {start_seq} 次 至 第 {end_round} 轮第 {end_seq} 次"
-            rec_msg = _build_ops_card(
-                f"✅ {lose_count} 连输已终止！ ✅",
-                summary="本轮回补已经结束，系统已回写收益与当前余额。",
+            rec_msg = _build_success_ops_card(
+                "✅ 连输已结束",
+                outcome="本轮回补已经结束，系统已回写收益与当前余额。",
                 fields=[
-                    ("🔢 时间", range_text),
-                    ("📋 预设名称", rt.get('current_preset_name', 'none')),
-                    ("😀 连续押注", f"{lose_end_payload.get('continuous_count', lose_count)} 次"),
-                    ("⚠️本局连输", f" {lose_count} 次"),
-                    ("💰 本局盈利", f" {format_number(lose_end_payload.get('total_profit', 0))}"),
-                    ("💰 账户余额", f"{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万"),
-                    ("💰 菠菜资金剩余", f"{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"),
+                    ("时间", range_text),
+                    ("预设", rt.get('current_preset_name', 'none')),
+                    ("连续押注", f"{lose_end_payload.get('continuous_count', lose_count)} 次"),
+                    ("本段连输", f"{lose_count} 次"),
+                    ("本段收益", format_number(lose_end_payload.get('total_profit', 0))),
+                    ("账户余额", f"{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万"),
+                    ("菠菜余额", f"{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"),
                 ],
-                action="建议关注是否已回到首注，并继续观察下一次盘口。",
+                action="观察是否已回到首注；如需复核执行 `status`。",
             )
             if hasattr(user_ctx, "lose_streak_message") and user_ctx.lose_streak_message:
                 await cleanup_message(client, user_ctx.lose_streak_message)
@@ -5503,21 +5650,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
     try:
         # ========== help命令 ==========
         if cmd == "help":
-            mes = _build_ops_card(
-                "📘 命令列表",
-                summary="新手建议先掌握 5 个高频命令：`st`、`status`、`pause`、`resume`、`balance`。",
-                fields=[
-                    ("基础控制", "`st [预设名]` / `pause` / `resume` / `open` / `off`"),
-                    ("参数设置", "`gf [金额]` / `set [炸] [赢] [停] [盈停]` / `warn [次数]` / `wlc [次数]`"),
-                    ("模型与策略", "`model [list|select|reload]` / `apikey [show|set|add|del|test]` / `ms [模式]`"),
-                    ("测算功能", "`yc [预设名]` / `yc [参数...]`"),
-                    ("数据管理", "`res tj` / `res state` / `res bet` / `explain` / `stats` / `balance` / `xx`"),
-                    ("发布更新", "`ver` / `update [版本|提交]` / `reback [版本|提交]` / `restart`"),
-                    ("预设管理", "`ys [名] ...` / `yss` / `yss dl [名]`"),
-                    ("多用户管理", "`users` / `status`"),
-                ],
-                action="如果只是日常使用，优先看 `status`，启动用 `st`，遇到异常先 `pause`。",
-            )
+            mes = _build_help_card()
             log_event(logging.INFO, 'user_cmd', '显示帮助', user_id=user_ctx.user_id)
             message = await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -5966,11 +6099,12 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             target_ref = my[1].strip() if len(my) > 1 else ""
             await send_to_admin(
                 client,
-                _build_ops_card(
-                    "🔄 开始更新",
-                    summary="系统已经开始拉取并切换到目标版本。",
-                    fields=[("目标", target_ref or "latest")],
-                    action="请等待结果通知，更新完成后再执行 `restart`。",
+                _build_release_ops_card(
+                    "🔄 更新任务已开始",
+                    summary="系统已经开始拉取并切换到目标版本，请先不要重复执行更新。",
+                    target_version=target_ref or "latest",
+                    restart_required=True,
+                    action="请等待结果通知；完成后再执行 `restart`。",
                 ),
                 user_ctx,
                 global_config,
@@ -5980,9 +6114,10 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 if result.get("no_change"):
                     await send_to_admin(
                         client,
-                        _build_ops_card(
+                        _build_release_ops_card(
                             "✅ 无需更新",
-                            summary=result.get('message', '当前已是目标版本'),
+                            summary=result.get('message', '当前已是目标版本，无需重复切换。'),
+                            restart_required=False,
                             action="如需确认当前状态，可执行 `ver` 或 `status`。",
                         ),
                         user_ctx,
@@ -5991,13 +6126,12 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 else:
                     after = result.get("after", {})
                     resolved = result.get("resolved_target", "") or result.get("target_ref", target_ref or "latest")
-                    mes = _build_ops_card(
+                    mes = _build_release_ops_card(
                         "✅ 更新成功",
                         summary="代码已经切换到目标版本，但需要重启后才会实际生效。",
-                        fields=[
-                            ("目标", resolved),
-                            ("当前", after.get('display_version', after.get('short_commit', 'unknown'))),
-                        ],
+                        target_version=resolved,
+                        current_version=after.get('display_version', after.get('short_commit', 'unknown')),
+                        restart_required=True,
                         action="请执行 `restart` 让新版本正式生效。",
                     )
                     await send_to_admin(client, mes, user_ctx, global_config)
@@ -6007,13 +6141,12 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 blocking_text = " / ".join(blocking_paths[:5]) if blocking_paths else ""
                 await send_to_admin(
                     client,
-                    _build_ops_card(
+                    _build_release_ops_card(
                         "❌ 更新失败",
                         summary="本次更新没有完成，当前版本保持不变。",
-                        fields=[
-                            ("错误", result.get('error', 'unknown')),
-                            ("阻塞文件", blocking_text),
-                        ],
+                        target_version=target_ref or "latest",
+                        error=result.get('error', 'unknown'),
+                        blocking_files=blocking_text,
                         action="建议先处理阻塞文件，再重新执行 `update`。",
                         note=detail[:200] if detail else "",
                     ),
@@ -6040,11 +6173,12 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
 
             await send_to_admin(
                 client,
-                _build_ops_card(
-                    "↩️ 开始回退",
-                    summary="系统已经开始切换到指定历史版本。",
-                    fields=[("目标", target_ref)],
-                    action="请等待结果通知，回退完成后再执行 `restart`。",
+                _build_release_ops_card(
+                    "↩️ 回退任务已开始",
+                    summary="系统已经开始切换到指定历史版本，请先不要重复执行回退。",
+                    target_version=target_ref,
+                    restart_required=True,
+                    action="请等待结果通知；完成后再执行 `restart`。",
                 ),
                 user_ctx,
                 global_config,
@@ -6053,21 +6187,21 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             if result.get("success"):
                 after = result.get("after", {})
                 resolved = result.get("resolved_target", target_ref)
-                mes = _build_ops_card(
+                mes = _build_release_ops_card(
                     "✅ 回退成功",
                     summary="代码已经切换到目标历史版本，但需要重启后才会正式生效。",
-                    fields=[
-                        ("目标", resolved),
-                        ("当前", after.get('display_version', after.get('short_commit', 'unknown'))),
-                    ],
+                    target_version=resolved,
+                    current_version=after.get('display_version', after.get('short_commit', 'unknown')),
+                    restart_required=True,
                     action="请执行 `restart` 让回退版本正式生效。",
                 )
                 await send_to_admin(client, mes, user_ctx, global_config)
             else:
-                mes = _build_ops_card(
+                mes = _build_release_ops_card(
                     "❌ 回退失败",
                     summary="本次回退没有完成，当前版本保持不变。",
-                    fields=[("错误", result.get('error', 'unknown'))],
+                    target_version=target_ref,
+                    error=result.get('error', 'unknown'),
                     action="请确认目标版本或提交是否正确，再重新执行 `reback`。",
                     note=str(result.get('detail'))[:200] if result.get("detail") else "",
                 )
@@ -6078,16 +6212,22 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         if cmd in ("restart", "reboot"):
             service_name = resolve_systemd_service_name()
             if service_name:
-                mes = _build_ops_card(
-                    "♻️ 已接收重启指令",
+                mes = _build_release_ops_card(
+                    "♻️ 重启任务已接收",
                     summary="系统会在 2 秒后通过 systemd 重启服务。",
-                    fields=[("服务名", service_name)],
+                    restart_required=True,
+                    restart_mode="systemd",
+                    service_name=service_name,
+                    extra_fields=[("是否需要等待", "需要")],
                     action="重启期间消息可能短暂中断，建议稍后执行 `status` 确认恢复情况。",
                 )
             else:
-                mes = _build_ops_card(
-                    "♻️ 已接收重启指令",
+                mes = _build_release_ops_card(
+                    "♻️ 重启任务已接收",
                     summary="系统会在 2 秒后自动重启当前进程。",
+                    restart_required=True,
+                    restart_mode="当前进程",
+                    extra_fields=[("是否需要等待", "需要")],
                     action="重启期间消息可能短暂中断，建议稍后执行 `status` 确认恢复情况。",
                 )
             await send_to_admin(client, mes, user_ctx, global_config)
@@ -6440,9 +6580,9 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         log_event(logging.ERROR, 'user_cmd', '命令执行出错', user_id=user_ctx.user_id, error=str(e))
         await send_to_admin(
             client,
-            _build_ops_card(
+            _build_error_ops_card(
                 "❌ 命令执行出错",
-                summary="本次命令没有执行完成。",
+                problem="本次命令没有执行完成。",
                 fields=[("错误", str(e)[:180])],
                 action="建议稍后重试；若持续失败，可执行 `status` 确认当前状态。",
             ),
@@ -6466,11 +6606,11 @@ async def check_bet_status(client, user_ctx: UserContext, global_config: dict):
             lose_stop = int(rt.get("lose_stop", 13))
             await send_to_admin(
                 client,
-                _build_ops_card(
+                _build_alert_ops_card(
                     "⚠️ 已达到预设连投上限",
-                    summary="当前链路已经到达设定的最大连投次数，系统将保持暂停。",
+                    impact="当前链路已经到达设定的最大连投次数，系统将保持暂停。",
                     fields=[("当前上限", f"{lose_stop} 手")],
-                    action="如需继续，可切换预设、重置策略，或等待新一轮开始。",
+                    action="如需继续，可切换预设，或执行 `res bet` 后重新启动。",
                 ),
                 user_ctx,
                 global_config,

@@ -815,6 +815,10 @@ def run_health_check(repo_root: Optional[str] = None) -> Dict[str, Any]:
         "zq.py",
         "zq_multiuser.py",
         "user_manager.py",
+        "model_manager.py",
+        "update_manager.py",
+        "verify_deps.py",
+        "constants.py",
     ]
     compile_targets = [path for path in compile_candidates if (root / path).exists()]
     if compile_targets:

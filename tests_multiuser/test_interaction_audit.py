@@ -78,7 +78,10 @@ def test_send_message_v2_records_outbound_interactions(tmp_path, monkeypatch):
     log_root = tmp_path / "logs" / "accounts"
     monkeypatch.setattr(zm, "ACCOUNT_LOG_ROOT", str(log_root))
 
+    outbound_payloads = []
+
     def fake_post(url, data=None, json=None, timeout=5):
+        outbound_payloads.append({"url": url, "data": data, "json": json, "timeout": timeout})
         return SimpleNamespace(status_code=200, url=url, data=data, json=json, timeout=timeout)
 
     monkeypatch.setattr(zm.requests, "post", fake_post)
@@ -101,12 +104,17 @@ def test_send_message_v2_records_outbound_interactions(tmp_path, monkeypatch):
 
     today_path = log_root / "5001" / "interactions" / (datetime.now().strftime("%Y-%m-%d") + ".log")
     content = _load_text(today_path)
+    tg_payload = next(item["json"] for item in outbound_payloads if "api.telegram.org" in item["url"])
+    iyuu_payload = next(item["data"] for item in outbound_payloads if "iyuu.test" in item["url"])
 
     assert "发送 | admin_chat | 通知 | lose_streak | 成功 | chat_id=5001" in content
     assert "发送 | iyuu | 通知 | lose_streak | 成功" in content
     assert "发送 | tg_bot | 通知 | lose_streak | 成功 | chat_id=chat" in content
     assert "\n测试告警\n" in content
-    assert "【账号：Route User】\n测试告警" in content
+    assert "【账号：Route User】\n[P1] 连输告警" in content
+    assert tg_payload["text"].startswith("【账号：Route User】\n[P1] 连输告警")
+    assert "操作：" in tg_payload["text"]
+    assert iyuu_payload["desp"].startswith("【账号：Route User】\n[P1] 连输告警")
 
 
 def test_process_user_command_records_masked_apikey_command(tmp_path, monkeypatch):
@@ -184,3 +192,24 @@ def test_user_manager_logs_route_into_account_directory(tmp_path):
     assert account_log.exists()
     content = account_log.read_text(encoding="utf-8")
     assert "保存用户状态成功" in content
+
+
+def test_build_priority_summary_preserves_key_fields():
+    card = zm._build_ops_card(
+        "⚠️ 连输告警",
+        summary="当前已经触发连续亏损阈值。",
+        fields=[
+            ("状态", "自动暂停（剩3局）"),
+            ("预设", "yc05"),
+            ("账户余额", "12.00 万"),
+        ],
+        action="建议立即执行 `status`。",
+    )
+
+    summary = zm._build_priority_summary("lose_streak", card, "【账号：Route User】")
+
+    assert summary.startswith("【账号：Route User】\n[P1] ⚠️ 连输告警")
+    assert "当前已经触发连续亏损阈值。" in summary
+    assert "状态：自动暂停（剩3局）" in summary
+    assert "预设：yc05" in summary
+    assert "操作：建议立即执行 `status`。" in summary

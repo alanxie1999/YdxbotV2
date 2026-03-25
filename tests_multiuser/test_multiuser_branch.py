@@ -1211,10 +1211,10 @@ def test_process_settle_lose_warning_matches_master_style(tmp_path, monkeypatch)
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
     assert captured["type"] == "lose_streak"
-    assert "⚠️ 1 连输告警 ⚠️" in captured["message"]
+    assert "⚠️ 1 连输告警" in captured["message"]
     assert "第 1 轮第 1 次" in captured["message"]
-    assert "📋 预设名称：yc10" in captured["message"]
-    assert "💰 账户余额：" in captured["message"]
+    assert "预设：yc10" in captured["message"]
+    assert "账户余额：" in captured["message"]
     assert "🤖 当局 AI 预测提示" not in captured["message"]
 
 
@@ -1273,14 +1273,14 @@ def test_process_settle_lose_end_message_contains_balance_lines(tmp_path, monkey
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
     msg = captured["message"]
-    assert "✅ 3 连输已终止！ ✅" in msg
-    assert "🔢 " in msg and "第 1 轮第 5 次 至 第 9 次" in msg
-    assert "📋 预设名称：yc10" in msg
-    assert "😀 连续押注：4 次" in msg
-    assert "⚠️本局连输： 3 次" in msg
-    assert "💰 本局盈利： 1,990" in msg
-    assert "💰 账户余额：2463.49 万" in msg
-    assert "💰 菠菜资金剩余：2456.84 万" in msg
+    assert "✅ 连输已结束" in msg
+    assert "第 1 轮第 5 次 至 第 9 次" in msg
+    assert "预设：yc10" in msg
+    assert "连续押注：4 次" in msg
+    assert "本段连输：3 次" in msg
+    assert "本段收益：1,990" in msg
+    assert "账户余额：2463.49 万" in msg
+    assert "菠菜余额：2456.84 万" in msg
 
 
 def test_process_settle_skips_stale_lose_end_when_old_lose_count_zero(tmp_path, monkeypatch):
@@ -1976,9 +1976,10 @@ def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, mon
     asyncio.run(zm.process_settle(DummyClient(), event, ctx, {}))
 
     msg = captured["message"]
-    assert "⚠️ 3 连输告警 ⚠️" in msg
-    assert "😀 连续押注：3 次" in msg
-    assert "💰 累计损失：2,420,500" in msg
+    assert "⚠️ 3 连输告警" in msg
+    assert "结论：当前链路已进入高关注状态" in msg
+    assert "连续押注：3 次" in msg
+    assert "累计损失：2,420,500" in msg
 
 
 def test_process_settle_writes_chain_diagnostic_logs(tmp_path, monkeypatch):
@@ -2069,7 +2070,8 @@ def test_process_bet_on_insufficient_fund_sends_pause_notice_even_without_pendin
     event = SimpleNamespace(reply_markup=object(), message=SimpleNamespace(message="unused"))
     asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
 
-    assert any("菠菜资金不足，已暂停押注" in m for m in sent_messages)
+    assert any("资金不足，已暂停押注" in m for m in sent_messages)
+    assert any("恢复方式：`gf [金额]`" in m for m in sent_messages)
     assert rt["fund_pause_notified"] is True
     assert rt["bet"] is False
     assert rt["bet_on"] is False
@@ -2110,6 +2112,7 @@ def test_check_bet_status_does_not_resume_when_next_bet_amount_is_zero(tmp_path,
     asyncio.run(zm.check_bet_status(SimpleNamespace(), ctx, {}))
 
     assert any("已达到预设连投上限" in m for m in sent_messages)
+    assert any("执行 `res bet` 后重新启动" in m for m in sent_messages)
     assert rt["limit_stop_notified"] is True
     assert rt["bet"] is False
     assert rt["bet_on"] is False
@@ -2236,7 +2239,7 @@ def test_process_settle_keeps_pending_bet_settlement_before_fund_pause(tmp_path,
     assert rt["gambling_fund"] == 12_559
     assert rt["bet"] is False
     assert "fund_pause" in sent_types
-    assert any("菠菜资金不足，已暂停押注" in m for m in sent_messages)
+    assert any("资金不足，已暂停押注" in m for m in sent_messages)
 
 
 def test_process_settle_only_consumes_pending_bet_once(tmp_path, monkeypatch):
@@ -2402,6 +2405,174 @@ def test_process_user_command_users_uses_ops_card(tmp_path, monkeypatch):
     assert "账号：用户信息用户 (ID: 70153)" in sent_messages[-1]
     assert "模型：model-x" in sent_messages[-1]
     assert "胜率：12/20" in sent_messages[-1]
+
+
+def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "help_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "帮助用户"},
+            "telegram": {"user_id": 70154},
+            "groups": {"admin_chat": 70154},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70154, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="help", chat_id=70154, id=11)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    message = sent_messages[-1]
+    assert "📘 快速上手" in message
+    assert "高频命令" in message
+    assert "常用场景" in message
+    assert "完整命令分组" in message
+    assert "`st [预设名]`" in message
+    assert "`status`" in message
+
+
+def test_process_user_command_update_uses_release_card_fields(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "update_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "更新用户"},
+            "telegram": {"user_id": 70155},
+            "groups": {"admin_chat": 70155},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70155, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(
+        zm,
+        "update_to_version",
+        lambda repo_root=None, target_ref=None: {
+            "success": True,
+            "resolved_target": target_ref or "v1.2.0",
+            "after": {"display_version": "v1.2.0"},
+        },
+    )
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="update v1.2.0", chat_id=70155, id=12)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert "🔄 更新任务已开始" in sent_messages[0]
+    assert "目标版本：v1.2.0" in sent_messages[0]
+    success_message = sent_messages[-1]
+    assert "✅ 更新成功" in success_message
+    assert "目标版本：v1.2.0" in success_message
+    assert "当前版本：v1.2.0" in success_message
+    assert "是否需要重启：需要" in success_message
+
+
+def test_process_user_command_reback_uses_release_card_fields(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "reback_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "回退用户"},
+            "telegram": {"user_id": 70156},
+            "groups": {"admin_chat": 70156},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70156, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(
+        zm,
+        "reback_to_version",
+        lambda repo_root=None, target_ref=None: {
+            "success": True,
+            "resolved_target": target_ref or "v1.1.0",
+            "after": {"display_version": "v1.1.0"},
+        },
+    )
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="reback v1.1.0", chat_id=70156, id=13)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert "↩️ 回退任务已开始" in sent_messages[0]
+    success_message = sent_messages[-1]
+    assert "✅ 回退成功" in success_message
+    assert "目标版本：v1.1.0" in success_message
+    assert "当前版本：v1.1.0" in success_message
+    assert "是否需要重启：需要" in success_message
+
+
+def test_process_user_command_restart_uses_release_card_fields(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "restart_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "重启用户"},
+            "telegram": {"user_id": 70157},
+            "groups": {"admin_chat": 70157},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70157, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    async def fake_restart_process():
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "resolve_systemd_service_name", lambda: "ydxbot.service")
+    monkeypatch.setattr(zm, "restart_process", fake_restart_process)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="restart", chat_id=70157, id=14)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    message = sent_messages[-1]
+    assert "♻️ 重启任务已接收" in message
+    assert "重启方式：systemd" in message
+    assert "服务名：ydxbot.service" in message
+    assert "是否需要等待：需要" in message
 
 
 def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monkeypatch):
@@ -2783,6 +2954,17 @@ def test_handle_goal_pause_after_settle_includes_account_and_gambling_funds(tmp_
     assert goal_messages
     assert "账户资金：24,315,000" in goal_messages[0]
     assert "菠菜资金：21,654,000" in goal_messages[0]
+    assert "本次暂停：2 局" in goal_messages[0]
+    assert "结论：系统已进入目标暂停" in goal_messages[0]
+
+
+def test_build_fund_pause_message_uses_compact_alert_structure():
+    message = zm._build_fund_pause_message(320000)
+
+    assert "⛔ 资金不足，已暂停押注" in message
+    assert "结论：当前资金无法覆盖下一手下注" in message
+    assert "当前剩余：32.00 万" in message
+    assert "恢复方式：`gf [金额]`" in message
 
 
 def test_res_bet_resets_current_chain_reconciliation(tmp_path, monkeypatch):
@@ -2945,3 +3127,44 @@ def test_predict_next_bet_core_prompt_contains_rhythm_layer(tmp_path, monkeypatc
     assert "pair_score" in captured["prompt"]
     assert "pair_would_form_double" in captured["prompt"]
     assert "PAIR_FORMATION" in captured["prompt"]
+
+
+def test_format_dashboard_prioritizes_runtime_over_detail_sections(tmp_path):
+    user_dir = tmp_path / "users" / "dashboard_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "仪表盘用户"},
+            "telegram": {"user_id": 8808},
+            "groups": {"admin_chat": 8808},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    ctx.state.history = [1, 0, 1, 1, 0, 0, 1, 1]
+    ctx.state.runtime.update(
+        {
+            "bet_on": True,
+            "current_preset_name": "yc05",
+            "bet_mode": 2,
+            "bet_amount": 2000,
+            "account_balance": 3200000,
+            "balance_status": "success",
+            "gambling_fund": 2800000,
+            "current_model_id": "model-1",
+            "total": 18,
+            "win_total": 10,
+            "earnings": 360000,
+            "period_profit": 120000,
+        }
+    )
+
+    dashboard = zm.format_dashboard(ctx)
+
+    assert dashboard.index("📍 当前概览") < dashboard.index("🎛️ 策略与风控")
+    assert dashboard.index("🎛️ 策略与风控") < dashboard.index("📊 近期 40 局结果（由近及远）")
+    assert dashboard.index("📊 近期 40 局结果（由近及远）") < dashboard.index("📈 运行统计")
+    assert "模式：追投" in dashboard
+    assert "下一手下注：" in dashboard
+    assert "账户余额：320.00 万" in dashboard
+    assert "预设参数：" in dashboard

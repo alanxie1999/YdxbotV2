@@ -170,6 +170,9 @@ def test_run_health_check_skips_missing_legacy_files(monkeypatch, tmp_path):
     (tmp_path / "main_multiuser.py").write_text("x=1\n", encoding="utf-8")
     (tmp_path / "zq_multiuser.py").write_text("x=1\n", encoding="utf-8")
     (tmp_path / "user_manager.py").write_text("x=1\n", encoding="utf-8")
+    (tmp_path / "model_manager.py").write_text("x=1\n", encoding="utf-8")
+    (tmp_path / "update_manager.py").write_text("x=1\n", encoding="utf-8")
+    (tmp_path / "constants.py").write_text("x=1\n", encoding="utf-8")
 
     recorded = {"verify": 0, "compile_args": []}
 
@@ -191,3 +194,7 @@ def test_run_health_check_skips_missing_legacy_files(monkeypatch, tmp_path):
     assert "zq.py" not in recorded["compile_args"]
     assert "main_multiuser.py" in recorded["compile_args"]
     assert "zq_multiuser.py" in recorded["compile_args"]
+    assert "model_manager.py" in recorded["compile_args"]
+    assert "update_manager.py" in recorded["compile_args"]
+    assert "verify_deps.py" in recorded["compile_args"]
+    assert "constants.py" in recorded["compile_args"]
