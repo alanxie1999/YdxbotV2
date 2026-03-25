@@ -1295,7 +1295,7 @@ MESSAGE_ROUTING_TABLE = {
     "lose_streak": {"channels": ["admin", "priority"], "priority": True},
     "lose_end": {"channels": ["admin", "priority"], "priority": True},
     "fund_pause": {"channels": ["admin", "priority"], "priority": True},
-    "goal_pause": {"channels": ["admin", "priority"], "priority": True},
+    "goal_pause": {"channels": ["admin"], "priority": False},
     "risk_pause": {"channels": ["admin"], "priority": False},
     "risk_summary": {"channels": ["admin", "priority"], "priority": True},
     "pause": {"channels": ["admin"], "priority": False},
@@ -1361,13 +1361,11 @@ def _build_ops_card(
 ) -> str:
     lines = [str(title or "").strip()]
     if summary:
-        lines.extend(["", f"结论：{summary}"])
+        lines.extend(["", summary])
     for label, value in fields or []:
         if value in (None, ""):
             continue
         lines.append(f"{label}：{value}")
-    if action:
-        lines.extend(["", f"建议动作：{action}"])
     if note:
         lines.extend(["", f"补充说明：{note}"])
     return "\n".join(lines).strip()
@@ -1588,7 +1586,7 @@ def _ensure_account_prefix(text: str, account_prefix: str) -> str:
     content = _strip_account_prefix(text)
     if not content:
         return account_prefix
-    return f"{account_prefix}\n{content}"
+    return f"{account_prefix}\n\n{content}"
 
 
 def _iter_targets(target):

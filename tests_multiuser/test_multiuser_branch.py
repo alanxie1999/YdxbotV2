@@ -954,11 +954,11 @@ def test_send_message_v2_routes_and_account_prefix(tmp_path, monkeypatch):
         zm.send_message_v2(
             client,
             "lose_streak",
-            "⚠️ 3 连输告警 ⚠️\n\n结论：当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万\n\n建议动作：建议立即查看 `status`；如不准备继续，可直接执行 `pause`。",
+            "⚠️ 3 连输告警 ⚠️\n\n当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万",
             ctx,
             {},
             title="标题",
-            desp="⚠️ 3 连输告警 ⚠️\n\n结论：当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万\n\n建议动作：建议立即查看 `status`；如不准备继续，可直接执行 `pause`。",
+            desp="⚠️ 3 连输告警 ⚠️\n\n当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万",
         )
     )
 
@@ -967,8 +967,8 @@ def test_send_message_v2_routes_and_account_prefix(tmp_path, monkeypatch):
     assert len(requests_payloads) == 2
     iyuu_payload = next(item for item in requests_payloads if "iyuu" in item["url"])
     tg_payload = next(item for item in requests_payloads if "api.telegram.org" in item["url"])
-    assert iyuu_payload["data"]["desp"].startswith("【账号：路由用户】")
-    assert tg_payload["json"]["text"].startswith("【账号：路由用户】")
+    assert iyuu_payload["data"]["desp"].startswith("【账号：路由用户】\n\n")
+    assert tg_payload["json"]["text"].startswith("【账号：路由用户】\n\n")
     assert "💰 累计损失：207,500" in tg_payload["json"]["text"]
 
 
@@ -1009,11 +1009,11 @@ def test_send_message_v2_lose_end_priority_keeps_account_prefix(tmp_path, monkey
         zm.send_message_v2(
             client,
             "lose_end",
-            "✅ 3 连输已终止！ ✅\n\n结论：本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万\n\n建议动作：建议关注是否已回到首注，并继续观察下一次盘口。",
+            "✅ 3 连输已终止！ ✅\n\n本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万",
             ctx,
             {},
             title="标题",
-            desp="✅ 3 连输已终止！ ✅\n\n结论：本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万\n\n建议动作：建议关注是否已回到首注，并继续观察下一次盘口。",
+            desp="✅ 3 连输已终止！ ✅\n\n本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万",
         )
     )
 
@@ -1021,8 +1021,8 @@ def test_send_message_v2_lose_end_priority_keeps_account_prefix(tmp_path, monkey
     assert "✅ 3 连输已终止！ ✅" in client.messages[0][1]
     iyuu_payload = next(item for item in requests_payloads if "iyuu" in item["url"])
     tg_payload = next(item for item in requests_payloads if "api.telegram.org" in item["url"])
-    assert iyuu_payload["data"]["desp"].startswith("【账号：回补用户】")
-    assert tg_payload["json"]["text"].startswith("【账号：回补用户】")
+    assert iyuu_payload["data"]["desp"].startswith("【账号：回补用户】\n\n")
+    assert tg_payload["json"]["text"].startswith("【账号：回补用户】\n\n")
     assert "💰 菠菜资金剩余：1140.05 万" in tg_payload["json"]["text"]
 
 
@@ -2032,7 +2032,7 @@ def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, mon
 
     msg = captured["message"]
     assert "⚠️ 3 连输告警" in msg
-    assert "结论：当前链路已进入高关注状态" in msg
+    assert "当前链路已进入高关注状态" in msg
     assert "连续押注：3 次" in msg
     assert "累计损失：2,420,500" in msg
 
@@ -2167,7 +2167,7 @@ def test_check_bet_status_does_not_resume_when_next_bet_amount_is_zero(tmp_path,
     asyncio.run(zm.check_bet_status(SimpleNamespace(), ctx, {}))
 
     assert any("已达到预设连投上限" in m for m in sent_messages)
-    assert any("执行 `res bet` 后重新启动" in m for m in sent_messages)
+    assert any("当前上限：3 手" in m for m in sent_messages)
     assert rt["limit_stop_notified"] is True
     assert rt["bet"] is False
     assert rt["bet_on"] is False
@@ -3007,19 +3007,20 @@ def test_handle_goal_pause_after_settle_includes_account_and_gambling_funds(tmp_
     result = asyncio.run(zm._handle_goal_pause_after_settle(SimpleNamespace(), ctx, {}))
 
     assert result is True
+    assert all(msg_type != "priority" for msg_type, _ in sent)
     goal_messages = [message for msg_type, message in sent if msg_type == "goal_pause"]
     assert goal_messages
     assert "账户资金：24,315,000" in goal_messages[0]
     assert "菠菜资金：21,654,000" in goal_messages[0]
     assert "本次暂停：2 局" in goal_messages[0]
-    assert "结论：系统已进入目标暂停" in goal_messages[0]
+    assert "系统已进入目标暂停" in goal_messages[0]
 
 
 def test_build_fund_pause_message_uses_compact_alert_structure():
     message = zm._build_fund_pause_message(320000)
 
     assert "⛔ 资金不足，已暂停押注" in message
-    assert "结论：当前资金无法覆盖下一手下注" in message
+    assert "当前资金无法覆盖下一手下注" in message
     assert "当前剩余：32.00 万" in message
     assert "恢复方式：`gf [金额]`" in message
 

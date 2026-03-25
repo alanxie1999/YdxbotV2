@@ -114,9 +114,9 @@ def test_send_message_v2_records_outbound_interactions(tmp_path, monkeypatch):
     assert "发送 | iyuu | 通知 | lose_streak | 成功" in content
     assert "发送 | tg_bot | 通知 | lose_streak | 成功 | chat_id=chat" in content
     assert "\n测试告警\n" in content
-    assert "【账号：Route User】\n测试告警" in content
-    assert tg_payload["text"].startswith("【账号：Route User】\n测试告警")
-    assert iyuu_payload["desp"].startswith("【账号：Route User】\n测试告警")
+    assert "【账号：Route User】\n\n测试告警" in content
+    assert tg_payload["text"].startswith("【账号：Route User】\n\n测试告警")
+    assert iyuu_payload["desp"].startswith("【账号：Route User】\n\n测试告警")
 
 
 def test_process_user_command_records_masked_apikey_command(tmp_path, monkeypatch):
@@ -214,4 +214,4 @@ def test_build_priority_summary_preserves_key_fields():
     assert "当前已经触发连续亏损阈值。" in summary
     assert "状态：自动暂停（剩3局）" in summary
     assert "预设：yc05" in summary
-    assert "操作：建议立即执行 `status`。" in summary
+    assert "操作：建议立即查看 `status`，如需止损可执行 `pause`。" in summary
