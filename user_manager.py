@@ -437,6 +437,14 @@ def get_default_runtime() -> Dict[str, Any]:
         "last_predict_info": "等待本局预测",
         "api_key_index": 0,
         "current_model_id": "qwen3-coder-plus",
+        "model_health_status": "unknown",
+        "model_fallback_streak": 0,
+        "model_last_ok_at": "",
+        "model_last_fail_at": "",
+        "model_last_fail_reason": "",
+        "model_last_switch_from": "",
+        "model_last_switch_to": "",
+        "model_pause_notified": False,
         
         # 预设相关
         "current_preset_name": "",

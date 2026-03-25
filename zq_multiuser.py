@@ -289,6 +289,16 @@ STALL_GUARD_SKIP_MAX = 2
 STALL_GUARD_TIMEOUT_MAX = 2
 STALL_GUARD_TOTAL_MAX = 6
 
+MODEL_FALLBACK_PAUSE_THRESHOLD = 5
+MODEL_FALLBACK_PAUSE_ROUNDS = 2
+COUNTED_MODEL_FALLBACK_SOURCES = {
+    "timeout_fallback",
+    "invalid_fallback",
+    "hard_fallback",
+    "fallback",
+    "fallback_skip",
+}
+
 def log_event(level, module, event, message=None, **kwargs):
     # 兼容旧调用: log_event(level, event, message, user_id, data)
     if message is None:
@@ -834,6 +844,77 @@ def _summarize_model_error(error_text: str, max_parts: int = 2) -> str:
     return "；".join(piece for piece in picked if piece)[:180]
 
 
+def _now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_event_time_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(raw[:19], fmt).strftime("%H:%M:%S")
+        except Exception:
+            continue
+    return raw[-8:] if len(raw) >= 8 else raw
+
+
+def _mark_model_success(rt: Dict[str, Any], model_id: str, switched_from: str = "") -> None:
+    rt["model_last_ok_at"] = _now_text()
+    rt["model_fallback_streak"] = 0
+    rt["model_pause_notified"] = False
+    if switched_from and switched_from != model_id:
+        rt["model_health_status"] = "switched"
+        rt["model_last_switch_from"] = switched_from
+        rt["model_last_switch_to"] = model_id
+    else:
+        rt["model_health_status"] = "ok"
+        rt["model_last_switch_from"] = ""
+        rt["model_last_switch_to"] = ""
+
+
+def _mark_model_failure(rt: Dict[str, Any], source: str, reason: str) -> int:
+    rt["model_last_fail_at"] = _now_text()
+    rt["model_last_fail_reason"] = _summarize_model_error(reason)
+    if source in COUNTED_MODEL_FALLBACK_SOURCES:
+        rt["model_fallback_streak"] = int(rt.get("model_fallback_streak", 0) or 0) + 1
+        rt["model_health_status"] = "down" if int(rt["model_fallback_streak"]) >= MODEL_FALLBACK_PAUSE_THRESHOLD else "fallback"
+    else:
+        rt["model_fallback_streak"] = 0
+        rt["model_health_status"] = "warning"
+    return int(rt.get("model_fallback_streak", 0) or 0)
+
+
+def _build_model_health_lines(rt: Dict[str, Any]) -> List[str]:
+    status = str(rt.get("model_health_status", "unknown") or "unknown").strip().lower()
+    fallback_streak = int(rt.get("model_fallback_streak", 0) or 0)
+    current_model = str(rt.get("current_model_id", "unknown") or "unknown")
+    last_fail_reason = str(rt.get("model_last_fail_reason", "") or "").strip()
+    last_ok_at = _format_event_time_text(rt.get("model_last_ok_at", ""))
+    switch_from = str(rt.get("model_last_switch_from", "") or "").strip()
+
+    if status == "ok":
+        lines = ["🤖 模型状态：🟢 正常"]
+    elif status == "switched":
+        lines = ["🤖 模型状态：🟡 已切换"]
+    elif status == "fallback":
+        lines = [f"🤖 模型状态：🟠 连续兜底 {fallback_streak} 次"]
+    elif status == "down":
+        lines = ["🤖 模型状态：🔴 不可用（已自动暂停）"]
+    else:
+        lines = ["🤖 模型状态：⚪ 未知"]
+
+    lines.append(f"当前模型：{current_model}")
+    if status == "switched" and switch_from:
+        lines.append(f"最近异常：{switch_from} 不可用")
+    elif status in {"fallback", "down", "warning"} and last_fail_reason:
+        lines.append(f"最近异常：{last_fail_reason}")
+    if last_ok_at:
+        lines.append(f"最近成功：{last_ok_at}")
+    return lines
+
+
 def _queue_model_notice(
     rt: Dict[str, Any],
     notice_type: str,
@@ -878,9 +959,8 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
             fields=[
                 ("原模型", from_model),
                 ("当前模型", to_model),
-                ("说明", detail),
+                ("原因", detail),
             ],
-            action="当前已自动续跑，无需立刻处理；如需核对链路，可执行 `status` 或 `models`。",
         )
         await _send_transient_admin_notice(
             client,
@@ -889,7 +969,7 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
             message,
             ttl_seconds=180,
             attr_name="model_switch_notice_message",
-            msg_type="info",
+            msg_type="model_switch",
         )
         return
 
@@ -898,12 +978,10 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
             "🚨 模型链不可用，已切统计兜底",
             summary="当前主模型和备用模型都未返回可用结果，本局已改用统计兜底继续运行。",
             fields=[
-                ("起始模型", from_model),
-                ("失败概况", detail),
-                ("当前动作", "已切到统计兜底"),
+                ("连续兜底", f"{int(rt.get('model_fallback_streak', 0) or 0)} 次"),
+                ("当前模型", from_model),
+                ("最近异常", detail),
             ],
-            action="建议尽快执行 `status`、`models`、`apikey` 检查模型与 key。",
-            note="如果连续出现，建议优先更换 key 或缩短模型链。",
         )
         await _send_transient_admin_notice(
             client,
@@ -912,7 +990,28 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
             message,
             ttl_seconds=240,
             attr_name="model_failure_notice_message",
-            msg_type="info",
+            msg_type="model_failure",
+        )
+        return
+
+    if notice_type == "pause":
+        message = _build_ops_card(
+            "🔴 模型连续异常，已自动暂停",
+            summary=f"当前已连续 {int(rt.get('model_fallback_streak', 0) or 0)} 次使用统计兜底，系统已自动暂停。",
+            fields=[
+                ("处理结果", f"已自动暂停 {MODEL_FALLBACK_PAUSE_ROUNDS} 局"),
+                ("当前模型", from_model),
+                ("最近异常", detail),
+            ],
+        )
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            message,
+            ttl_seconds=240,
+            attr_name="model_pause_notice_message",
+            msg_type="model_pause",
         )
 
 
@@ -1125,6 +1224,7 @@ def _build_status_html_data(user_ctx: UserContext) -> Dict[str, Any]:
         "stop": int(rt.get("stop", 3) or 3),
         "account_balance_text": _format_account_balance_text(rt),
         "gambling_fund_text": _format_wan_value(rt.get("gambling_fund", 0)),
+        "model_health_lines": _build_model_health_lines(rt),
     }
 
 
@@ -1167,17 +1267,23 @@ def generate_status_html(data: Dict[str, Any]) -> str:
     explode = escape_html(str(data.get("explode", 0) or 0))
     stop = escape_html(str(data.get("stop", 0) or 0))
     lose_stop = escape_html(str(data.get("lose_stop", 0) or 0))
+    model_health_lines = [escape_html(str(line)) for line in data.get("model_health_lines", []) if str(line).strip()]
 
     if account_balance_text in {"Cookie 失效", "网络异常", "获取中"}:
         account_balance_line = escape_html(account_balance_text)
     else:
         account_balance_line = f"{escape_html(str(data.get('acc_bal', '0.00')))} 万"
 
+    model_health_block = ""
+    if model_health_lines:
+        model_health_block = "\n".join(model_health_lines) + "\n\n"
+
     html = (
         f"<b>【 状态监控 】</b> {status_line}\n"
         f"<b>更新：</b> {current_time}\n"
         f"<b>版本：</b>{version}\n"
         f"<b>方案：</b> {preset_name}\n\n"
+        f"{model_health_block}"
 
         "<b>🎯 即时下注</b>\n"
         f"├ 下一预测：{current_predict}\n"
@@ -1197,7 +1303,6 @@ def generate_status_html(data: Dict[str, Any]) -> str:
         f"{history_grid}\n\n"
 
         "<b>⚙️ 策略参数</b>\n"
-        f"<b>大模型：</b> {api_model}\n"
         f"<b>预设名称：</b> {preset_name}\n"
         f"<b>押注倍率：</b> {ratios}\n"
         f"<b>执行规则：</b> 炸 {explode} 停 {stop} | {lose_stop} 次止损\n"
@@ -1296,6 +1401,9 @@ MESSAGE_ROUTING_TABLE = {
     "lose_end": {"channels": ["admin", "priority"], "priority": True},
     "fund_pause": {"channels": ["admin", "priority"], "priority": True},
     "goal_pause": {"channels": ["admin"], "priority": False},
+    "model_switch": {"channels": ["admin", "priority"], "priority": True},
+    "model_failure": {"channels": ["admin", "priority"], "priority": True},
+    "model_pause": {"channels": ["admin", "priority"], "priority": True},
     "risk_pause": {"channels": ["admin"], "priority": False},
     "risk_summary": {"channels": ["admin", "priority"], "priority": True},
     "pause": {"channels": ["admin"], "priority": False},
@@ -1328,6 +1436,9 @@ PRIORITY_FULL_MESSAGE_TYPES = {
     "lose_end",
     "fund_pause",
     "goal_pause",
+    "model_switch",
+    "model_failure",
+    "model_pause",
     "risk_summary",
     "error",
 }
@@ -1965,19 +2076,10 @@ async def _send_transient_admin_notice(
     old_message = getattr(user_ctx, attr_name, None)
     if old_message:
         await cleanup_message(client, old_message)
-    sent = await send_to_admin(client, message, user_ctx, global_config)
-    if msg_type != "info":
-        try:
-            await send_message(
-                client,
-                "priority",
-                message,
-                user_ctx,
-                global_config,
-                notify_type=msg_type,
-            )
-        except Exception:
-            pass
+    if msg_type != "info" and msg_type in MESSAGE_ROUTING_TABLE:
+        sent = await send_message_v2(client, msg_type, message, user_ctx, global_config)
+    else:
+        sent = await send_to_admin(client, message, user_ctx, global_config)
     if sent:
         setattr(user_ctx, attr_name, sent)
         chat_id = getattr(sent, "chat_id", None)
@@ -2680,6 +2782,7 @@ Return JSON only:
                     detail=switch_detail,
                 )
                 rt["current_model_id"] = actual_model_id
+                _mark_model_success(rt, actual_model_id, switched_from=current_model_id)
                 log_event(
                     logging.WARNING,
                     'predict_core',
@@ -2689,6 +2792,8 @@ Return JSON only:
                 )
                 user_ctx.save_state()
                 current_model_id = actual_model_id
+            else:
+                _mark_model_success(rt, actual_model_id)
             
             default_pred = trend_gap['regression_target']
             final_result = parse_analysis_result_insight(result['content'], default_prediction=default_pred)
@@ -2707,6 +2812,7 @@ Return JSON only:
                 from_model=current_model_id,
                 detail=_summarize_model_error(err_text),
             )
+            _mark_model_failure(rt, "fallback", err_text)
             log_event(logging.WARNING, 'predict_core', '模型调用失败，统计兜底', 
                       user_id=user_ctx.user_id, data=err_text)
             final_result = {
@@ -3135,7 +3241,36 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             detail="模型返回无效结果，已改用统计兜底。",
         )
 
+    current_predict_source = str(rt.get("last_predict_source", "") or "").strip()
+    if current_predict_source in {"timeout_fallback", "invalid_fallback", "hard_fallback"}:
+        _mark_model_failure(rt, current_predict_source, rt.get("last_predict_info", "模型已改用统计兜底。"))
+    elif current_predict_source and current_predict_source not in {"unlock_fallback"}:
+        if str(rt.get("model_health_status", "")).strip().lower() not in {"switched"}:
+            rt["model_health_status"] = "ok"
+        rt["model_fallback_streak"] = 0
+        rt["model_pause_notified"] = False
+
+    if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
+        rt["model_health_status"] = "down"
+        if not rt.get("model_pause_notified", False):
+            _queue_model_notice(
+                rt,
+                "pause",
+                signature=f"pause|{rt.get('current_model_id', 'unknown')}|{rt.get('model_fallback_streak', 0)}",
+                from_model=str(rt.get("current_model_id", "unknown")),
+                detail=str(rt.get("model_last_fail_reason", "") or "连续多次统计兜底"),
+            )
+            rt["model_pause_notified"] = True
+
     await _flush_model_runtime_notice(client, user_ctx, global_config)
+
+    if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
+        _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, "模型连续兜底暂停")
+        rt["bet"] = False
+        rt["bet_on"] = False
+        rt["mode_stop"] = True
+        user_ctx.save_state()
+        return
 
     if prediction == -1:
         skip_trigger = _record_hand_stall_block(rt, next_sequence, history_signature, "skip")
@@ -4602,8 +4737,12 @@ async def _handle_goal_pause_after_settle(
     _clear_lose_recovery_tracking(rt)
 
     resume_hint = _build_pause_resume_hint(rt)
-    account_balance_text = _format_account_balance_text(rt)
-    gambling_fund_text = format_number(max(0, int(rt.get("gambling_fund", 0) or 0)))
+    account_balance_raw = max(0, int(rt.get("account_balance", 0) or 0))
+    if str(rt.get("balance_status", "") or "").strip() in {"auth_failed", "network_error", "unknown"} and account_balance_raw <= 0:
+        account_balance_text = _format_account_balance_text(rt)
+    else:
+        account_balance_text = f"{account_balance_raw / 10000:.2f} 万"
+    gambling_fund_text = f"{max(0, int(rt.get('gambling_fund', 0) or 0)) / 10000:.2f} 万"
     pause_msg = _build_alert_ops_card(
         f"⛔ {'炸号保护暂停' if notify_type == 'explode' else '盈利达成暂停'}",
         impact="系统已进入目标暂停，当前策略状态会被保留，不会重置首注。",

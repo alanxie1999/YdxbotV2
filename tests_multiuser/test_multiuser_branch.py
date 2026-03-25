@@ -83,6 +83,8 @@ def test_format_dashboard_matches_status_html_layout(tmp_path):
     rt["bet_on"] = True
     rt["current_preset_name"] = "yc5"
     rt["current_model_id"] = "deepseek-v3.2"
+    rt["model_health_status"] = "ok"
+    rt["model_last_ok_at"] = "2026-03-26 10:17:58"
     rt["account_balance"] = 2_411_500
     rt["balance_status"] = "success"
     rt["gambling_fund"] = 2_103_100
@@ -107,10 +109,13 @@ def test_format_dashboard_matches_status_html_layout(tmp_path):
     assert "<b>更新：</b>" in text
     assert "<b>版本：</b>" in text
     assert "<b>方案：</b> yc5" in text
+    assert "🤖 模型状态：🟢 正常" in text
+    assert "当前模型：deepseek-v3.2" in text
     assert "├ 计划下注：0.50 万" in text
     assert "<b>💰 资产总览</b>" in text
     assert "<b>📊 近期 40 次结果（由近及远）</b>" in text
     assert "<b>⚙️ 策略参数</b>" in text
+    assert "<b>大模型：</b>" not in text
     assert "<pre>" not in text
     assert "<blockquote>" not in text
     assert "<code>" not in text
@@ -1645,7 +1650,12 @@ def test_process_bet_on_skips_duplicate_trigger_when_previous_bet_pending(tmp_pa
         sent_messages.append(message)
         return SimpleNamespace(chat_id=5092, id=1)
 
+    async def fake_transient_notice(client, user_ctx, global_cfg, message, **kwargs):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5092, id=1)
+
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "_send_transient_admin_notice", fake_transient_notice)
 
     class DummyClient:
         async def send_message(self, target, message, parse_mode=None):
@@ -1707,6 +1717,10 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
         sent_messages.append(message)
         return SimpleNamespace(chat_id=5096, id=len(sent_messages))
 
+    async def fake_transient_notice(client, user_ctx, global_cfg, message, **kwargs):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5096, id=len(sent_messages))
+
     async def fake_sleep(*args, **kwargs):
         return None
 
@@ -1719,6 +1733,7 @@ def test_process_bet_on_runtime_heals_pending_bet_when_history_has_advanced(tmp_
 
     monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "_send_transient_admin_notice", fake_transient_notice)
     monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
     monkeypatch.setattr(zm, "log_event", fake_log_event)
@@ -2662,7 +2677,6 @@ def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monk
     assert "<b>方案：</b> yc10" in msg
     assert "├ 账户余额：" in msg
     assert "├ 菠菜资金：" in msg
-    assert "<b>大模型：</b> " in msg
     assert "<b>原始参数：</b> 1 11 2.8 2.3 2.2 2.05 10000" in msg
 
 
@@ -2920,6 +2934,7 @@ def test_predict_next_bet_core_updates_current_model_after_fallback(tmp_path, mo
     assert rt["pending_model_notice"]["type"] == "switch"
     assert rt["pending_model_notice"]["from_model"] == "model-1"
     assert rt["pending_model_notice"]["to_model"] == "model-2"
+    assert rt["model_health_status"] == "switched"
     assert '"model_id": "model-2"' in rt["last_logic_audit"]
 
 
@@ -2964,6 +2979,63 @@ def test_predict_next_bet_core_queues_failure_notice_when_model_chain_unavailabl
     assert rt["pending_model_notice"]["type"] == "failure"
     assert rt["pending_model_notice"]["from_model"] == "model-1"
     assert "超时" in rt["pending_model_notice"]["detail"]
+    assert rt["model_fallback_streak"] >= 1
+
+
+def test_process_bet_on_timeout_fallback_pauses_after_threshold(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "model_pause_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型暂停用户"},
+            "telegram": {"user_id": 70200},
+            "groups": {"admin_chat": 70200},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["manual_pause"] = False
+    rt["initial_amount"] = 50000
+    rt["bet_amount"] = 50000
+    rt["lose_count"] = 0
+    rt["model_fallback_streak"] = 4
+    rt["current_model_id"] = "qwen/qwen3-next-80b-a3b-instruct"
+    ctx.state.history = [0, 1] * 20
+
+    sent = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        raise asyncio.TimeoutError()
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", *args, **kwargs):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=70200, id=len(sent))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(
+        id=99001,
+        chat_id=70200,
+        reply_markup=SimpleNamespace(rows=[]),
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["model_fallback_streak"] >= 5
+    assert rt["model_health_status"] == "down"
+    assert rt["stop_count"] > 0
+    assert any(msg_type == "model_pause" for msg_type, _ in sent)
 
 
 def test_handle_goal_pause_after_settle_includes_account_and_gambling_funds(tmp_path, monkeypatch):
@@ -3010,8 +3082,8 @@ def test_handle_goal_pause_after_settle_includes_account_and_gambling_funds(tmp_
     assert all(msg_type != "priority" for msg_type, _ in sent)
     goal_messages = [message for msg_type, message in sent if msg_type == "goal_pause"]
     assert goal_messages
-    assert "账户资金：24,315,000" in goal_messages[0]
-    assert "菠菜资金：21,654,000" in goal_messages[0]
+    assert "账户资金：2431.50 万" in goal_messages[0]
+    assert "菠菜资金：2165.40 万" in goal_messages[0]
     assert "本次暂停：2 局" in goal_messages[0]
     assert "系统已进入目标暂停" in goal_messages[0]
 
