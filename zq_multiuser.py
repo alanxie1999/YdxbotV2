@@ -1149,50 +1149,66 @@ def generate_status_html(data: Dict[str, Any]) -> str:
         target_p = float(data.get("session_target", 0) or 0)
         ratio = max(0.0, min(current_p / target_p, 1.0)) if target_p > 0 else 0.0
         filled = int(10 * ratio)
-        progress_bar = f"<code>[{'▓' * filled}{'░' * (10 - filled)}]</code> {ratio * 100:.1f}%"
+        progress_bar = f"[{'▓' * filled}{'░' * (10 - filled)}] {ratio * 100:.1f}%"
     except Exception:
-        progress_bar = "<code>[░░░░░░░░░░]</code> 0.0%"
+        progress_bar = "[░░░░░░░░░░] 0.0%"
 
     profit_emoji = "📈" if float(data.get("session_profit", 0) or 0) >= 0 else "🚩"
     current_time = datetime.now().strftime("%m-%d %H:%M:%S")
 
     account_balance_text = str(data.get("account_balance_text", "") or "").strip()
-    if account_balance_text in {"Cookie 失效", "网络异常", "获取中"}:
-        account_balance_line = account_balance_text
-    else:
-        account_balance_line = f"<code>{escape_html(str(data.get('acc_bal', '0.00')))}</code> 万"
-
     history_grid = escape_html(str(data.get("history_grid", "暂无数据") or "暂无数据"))
+    next_bet = escape_html(str(data.get("next_bet", "0.00") or "0.00"))
+    session_target = escape_html(str(data.get("session_target", "0.00") or "0.00"))
+    session_profit = escape_html(str(data.get("session_profit", "0.00") or "0.00"))
+    total_profit = escape_html(str(data.get("total_profit", "0.00") or "0.00"))
+    win_rate = escape_html(str(data.get("win_rate", "0.00") or "0.00"))
+    total_count = escape_html(str(data.get("total_count", 0) or 0))
+    preset_name = escape_html(str(data.get("preset_name", "未设置") or "未设置"))
+    version = escape_html(str(data.get("version", "unknown") or "unknown"))
+    current_predict = escape_html(str(data.get("current_predict", "等待预测") or "等待预测"))
+    bet_bal = escape_html(str(data.get("bet_bal", "0.00") or "0.00"))
+    api_model = escape_html(str(data.get("api_model", "unknown") or "unknown"))
+    ratios = escape_html(str(data.get("ratios", "") or ""))
+    raw_params = escape_html(str(data.get("raw_params", "") or ""))
+    explode = escape_html(str(data.get("explode", 0) or 0))
+    stop = escape_html(str(data.get("stop", 0) or 0))
+    lose_stop = escape_html(str(data.get("lose_stop", 0) or 0))
+
+    if account_balance_text in {"Cookie 失效", "网络异常", "获取中"}:
+        account_balance_line = escape_html(account_balance_text)
+    else:
+        account_balance_line = f"{escape_html(str(data.get('acc_bal', '0.00')))} 万"
+
     html = (
         f"<b>【 状态监控 】</b> {status_line}\n"
-        f"<b>方案：</b> <code>{escape_html(str(data.get('preset_name', '未设置')))}</code> <code>{escape_html(str(data.get('version', 'unknown')))}</code>\n"
-        f"<b>更新：</b> {current_time}\n\n"
+        f"<b>更新：</b> {current_time}\n"
+        f"<b>版本：</b>{version}\n"
+        f"<b>方案：</b> {preset_name}\n\n"
 
         "<b>🎯 即时下注</b>\n"
-        f"├ 下一预测：<b>{escape_html(str(data.get('current_predict', '等待预测')))}</b>\n"
-        f"├ 计划下注：<code>{escape_html(str(data.get('next_bet', '0.00')))}</code> 万\n"
-        f"├ 单轮目标：<code>{escape_html(str(data.get('session_target', '0.00')))}</code> 万\n"
-        f"├ 本轮损益：<code>{escape_html(str(data.get('session_profit', '0.00')))}</code> 万 {profit_emoji}\n"
+        f"├ 下一预测：{current_predict}\n"
+        f"├ 计划下注：{next_bet} 万\n"
+        f"├ 单轮目标：{session_target} 万\n"
+        f"├ 本轮损益：{session_profit} 万 {profit_emoji}\n"
         f"└ 目标进度：{progress_bar}\n\n"
 
         "<b>💰 资产总览</b>\n"
         f"├ 账户余额：{account_balance_line}\n"
-        f"├ 菠菜资金：<code>{escape_html(str(data.get('bet_bal', '0.00')))}</code> 万\n"
-        f"├ 累计盈利：<b><code>{escape_html(str(data.get('total_profit', '0.00')))}</code> 万</b> 🏆\n"
-        f"└ 统计数据：<code>{escape_html(str(data.get('win_rate', '0.00')))}%</code> 胜率，<code>{escape_html(str(data.get('total_count', 0)))}</code> 次押注\n\n"
+        f"├ 菠菜资金：{bet_bal} 万\n"
+        f"├ 累计盈利：{total_profit} 万 🏆\n"
+        f"└ 统计数据：{win_rate}% 胜率，{total_count} 次押注\n\n"
 
         "<b>📊 近期 40 次结果（由近及远）</b>\n"
         "✅：大（1）  ❌：小（0）\n"
-        f"<pre>{history_grid}</pre>\n\n"
+        f"{history_grid}\n\n"
 
         "<b>⚙️ 策略参数</b>\n"
-        "<blockquote>\n"
-        f"<b>大模型：</b> <code>{escape_html(str(data.get('api_model', 'unknown')))}</code>\n"
-        f"<b>预设名称：</b> <code>{escape_html(str(data.get('preset_name', '未设置')))}</code>\n"
-        f"<b>押注倍率：</b> <code>{escape_html(str(data.get('ratios', '')))}</code>\n"
-        f"<b>执行规则：</b> <code>炸 {escape_html(str(data.get('explode', 0)))} 停 {escape_html(str(data.get('stop', 0)))} | {escape_html(str(data.get('lose_stop', 0)))} 次止损</code>\n"
-        f"<b>原始参数：</b> <code>{escape_html(str(data.get('raw_params', '')))}</code>\n"
-        "</blockquote>"
+        f"<b>大模型：</b> {api_model}\n"
+        f"<b>预设名称：</b> {preset_name}\n"
+        f"<b>押注倍率：</b> {ratios}\n"
+        f"<b>执行规则：</b> 炸 {explode} 停 {stop} | {lose_stop} 次止损\n"
+        f"<b>原始参数：</b> {raw_params}"
     )
     return html
 

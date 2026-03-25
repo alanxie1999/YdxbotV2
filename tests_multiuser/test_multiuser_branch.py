@@ -101,11 +101,16 @@ def test_format_dashboard_matches_status_html_layout(tmp_path):
     text = zm.format_dashboard(ctx)
 
     assert "<b>【 状态监控 】</b> 🟢 运行中" in text
-    assert "<b>方案：</b> <code>yc5</code>" in text
-    assert "├ 计划下注：<code>0.50</code> 万" in text
+    assert "<b>更新：</b>" in text
+    assert "<b>版本：</b>" in text
+    assert "<b>方案：</b> yc5" in text
+    assert "├ 计划下注：0.50 万" in text
     assert "<b>💰 资产总览</b>" in text
     assert "<b>📊 近期 40 次结果（由近及远）</b>" in text
-    assert "<blockquote>" in text
+    assert "<b>⚙️ 策略参数</b>" in text
+    assert "<pre>" not in text
+    assert "<blockquote>" not in text
+    assert "<code>" not in text
 
 
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
@@ -2645,11 +2650,12 @@ def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monk
     monkeypatch.setattr(zm, "get_current_repo_info", lambda: {"current_tag": "v1.0.10", "nearest_tag": "v1.0.10", "short_commit": "abcd1234"})
 
     msg = zm.format_dashboard(ctx)
-    assert "<b>方案：</b> <code>yc10</code> <code>v1.0.10(abcd1234)</code>" in msg
+    assert "<b>版本：</b>v1.0.10(abcd1234)" in msg
+    assert "<b>方案：</b> yc10" in msg
     assert "├ 账户余额：" in msg
     assert "├ 菠菜资金：" in msg
-    assert "<b>大模型：</b> <code>" in msg
-    assert "<b>原始参数：</b> <code>1 11 2.8 2.3 2.2 2.05 10000</code>" in msg
+    assert "<b>大模型：</b> " in msg
+    assert "<b>原始参数：</b> 1 11 2.8 2.3 2.2 2.05 10000" in msg
 
 
 def test_st_command_triggers_auto_yc_report(tmp_path, monkeypatch):
@@ -3210,8 +3216,8 @@ def test_format_dashboard_prioritizes_runtime_over_detail_sections(tmp_path):
     assert dashboard.index("<b>📊 近期 40 次结果（由近及远）</b>") < dashboard.index("<b>⚙️ 策略参数</b>")
     assert "模式：追投" not in dashboard
     assert "├ 计划下注：" in dashboard
-    assert "<pre>" in dashboard
-    assert "<blockquote>" in dashboard
+    assert "<pre>" not in dashboard
+    assert "<blockquote>" not in dashboard
 
 
 def test_status_command_sends_dashboard_with_html_parse_mode(tmp_path, monkeypatch):
