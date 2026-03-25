@@ -145,6 +145,36 @@ def test_format_dashboard_shows_strategy_watch_line_when_skip_streak_active(tmp_
     assert "策略观望：当前手位连续观望 2 次" in text
 
 
+def test_format_dashboard_shows_model_probe_progress(tmp_path):
+    user_dir = tmp_path / "users" / "status_probe_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态探测用户"},
+            "telegram": {"user_id": 6005},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_on"] = False
+    rt["current_preset_name"] = "yc10"
+    rt["current_model_id"] = "qwen/qwen3-next-80b-a3b-instruct"
+    rt["model_health_status"] = "down"
+    rt["model_probe_active"] = True
+    rt["model_probe_current_target"] = "moonshotai/kimi-k2-instruct"
+    rt["model_probe_total"] = 5
+    rt["model_probe_position"] = 2
+    rt["model_last_fail_reason"] = "NVIDIA 接口超时"
+
+    text = zm.format_dashboard(ctx)
+
+    assert "🤖 模型状态：🟡 恢复探测中" in text
+    assert "当前尝试：moonshotai/kimi-k2-instruct" in text
+    assert "探测进度：2 / 5" in text
+    assert "下次重试：约 3 秒后" in text
+
+
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
     users_dir = tmp_path / "users"
     config_dir = tmp_path / "config"
@@ -3183,6 +3213,67 @@ def test_model_probe_loop_auto_resumes_after_recovery(tmp_path, monkeypatch):
     assert rt["pause_countdown_active"] is False
     assert rt["model_probe_active"] is False
     assert any(msg_type == "model_resume" for msg_type, _ in sent)
+
+
+def test_model_probe_loop_notifies_priority_only_after_full_cycle_failure(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "model_probe_fail_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型探测失败用户"},
+            "telegram": {"user_id": 70202},
+            "groups": {"admin_chat": 70202},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["current_model_id"] = "model-1"
+    rt["model_health_status"] = "down"
+    rt["model_fallback_streak"] = 5
+    rt["model_pause_active"] = True
+    rt["model_probe_last_notify_at"] = 0
+
+    sent = []
+    sleep_calls = {"count": 0}
+
+    class FakeModelManager:
+        fallback_chain = ["1", "2"]
+        models = [
+            {"model_id": "model-1", "provider": "iflow", "enabled": True},
+            {"model_id": "model-2", "provider": "iflow", "enabled": True},
+        ]
+
+        def get_model(self, key):
+            mapping = {
+                "1": self.models[0],
+                "2": self.models[1],
+                "model-1": self.models[0],
+                "model-2": self.models[1],
+            }
+            return mapping.get(str(key))
+
+        async def _call_iflow(self, model_cfg, messages, **kwargs):
+            raise RuntimeError(f"{model_cfg['model_id']} timeout")
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", *args, **kwargs):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=70202, id=len(sent))
+
+    async def fake_sleep(_seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] >= 2:
+            rt["model_pause_active"] = False
+            rt["model_fallback_streak"] = 0
+        return None
+
+    monkeypatch.setattr(ctx, "get_model_manager", lambda: FakeModelManager())
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(zm._run_model_probe_loop(SimpleNamespace(), ctx, {}))
+
+    assert any(msg_type == "model_failure" and "模型链仍不可用" in message for msg_type, message in sent)
 
 
 def test_handle_goal_pause_after_settle_includes_account_and_gambling_funds(tmp_path, monkeypatch):

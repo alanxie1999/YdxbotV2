@@ -449,6 +449,11 @@ def get_default_runtime() -> Dict[str, Any]:
         "model_probe_active": False,
         "model_probe_index": 0,
         "model_pause_active": False,
+        "model_probe_current_target": "",
+        "model_probe_total": 0,
+        "model_probe_position": 0,
+        "model_probe_round_failures": 0,
+        "model_probe_last_notify_at": 0,
         
         # 预设相关
         "current_preset_name": "",

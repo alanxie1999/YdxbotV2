@@ -301,7 +301,8 @@ COUNTED_MODEL_FALLBACK_SOURCES = {
     "fallback",
     "fallback_skip",
 }
-MODEL_PROBE_INTERVAL_SECONDS = 10
+MODEL_PROBE_INTERVAL_SECONDS = 3
+MODEL_PROBE_FAILURE_NOTIFY_INTERVAL_SECONDS = 60
 
 def log_event(level, module, event, message=None, **kwargs):
     # 兼容旧调用: log_event(level, event, message, user_id, data)
@@ -868,6 +869,11 @@ def _mark_model_success(rt: Dict[str, Any], model_id: str, switched_from: str = 
     rt["model_last_ok_at"] = _now_text()
     rt["model_fallback_streak"] = 0
     rt["model_pause_notified"] = False
+    rt["model_probe_current_target"] = ""
+    rt["model_probe_total"] = 0
+    rt["model_probe_position"] = 0
+    rt["model_probe_round_failures"] = 0
+    rt["model_probe_last_notify_at"] = 0
     if switched_from and switched_from != model_id:
         rt["model_health_status"] = "switched"
         rt["model_last_switch_from"] = switched_from
@@ -897,8 +903,14 @@ def _build_model_health_lines(rt: Dict[str, Any]) -> List[str]:
     last_fail_reason = str(rt.get("model_last_fail_reason", "") or "").strip()
     last_ok_at = _format_event_time_text(rt.get("model_last_ok_at", ""))
     switch_from = str(rt.get("model_last_switch_from", "") or "").strip()
+    probe_active = bool(rt.get("model_probe_active", False))
+    probe_target = str(rt.get("model_probe_current_target", "") or "").strip()
+    probe_total = int(rt.get("model_probe_total", 0) or 0)
+    probe_position = int(rt.get("model_probe_position", 0) or 0)
 
-    if status == "ok":
+    if probe_active:
+        lines = ["🤖 模型状态：🟡 恢复探测中"]
+    elif status == "ok":
         lines = ["🤖 模型状态：🟢 正常"]
     elif status == "switched":
         lines = ["🤖 模型状态：🟡 已切换"]
@@ -912,6 +924,11 @@ def _build_model_health_lines(rt: Dict[str, Any]) -> List[str]:
         lines = ["🤖 模型状态：⚪ 未知"]
 
     lines.append(f"当前模型：{current_model}")
+    if probe_active and probe_target:
+        lines.append(f"当前尝试：{probe_target}")
+        if probe_total > 0 and probe_position > 0:
+            lines.append(f"探测进度：{probe_position} / {probe_total}")
+        lines.append(f"下次重试：约 {MODEL_PROBE_INTERVAL_SECONDS} 秒后")
     if status == "switched" and switch_from:
         lines.append(f"最近异常：{switch_from} 不可用")
     elif status in {"fallback", "down", "warning"} and last_fail_reason:
@@ -977,6 +994,37 @@ async def _probe_single_model(user_ctx: UserContext, model_id: str) -> Dict[str,
     return result
 
 
+def _should_notify_model_probe_failure(rt: Dict[str, Any]) -> bool:
+    last_notify_at = int(rt.get("model_probe_last_notify_at", 0) or 0)
+    now_ts = int(datetime.now().timestamp())
+    return last_notify_at <= 0 or (now_ts - last_notify_at) >= MODEL_PROBE_FAILURE_NOTIFY_INTERVAL_SECONDS
+
+
+async def _refresh_model_probe_notice(client, user_ctx: UserContext, global_config: dict) -> None:
+    rt = user_ctx.state.runtime
+    target = str(rt.get("model_probe_current_target", "") or "").strip() or "unknown"
+    total = int(rt.get("model_probe_total", 0) or 0)
+    position = int(rt.get("model_probe_position", 0) or 0)
+    message = _build_ops_card(
+        "⏳ 模型恢复探测中",
+        summary=f"当前已连续 {int(rt.get('model_fallback_streak', 0) or 0)} 次统计兜底，系统正在后台轮询可用模型。",
+        fields=[
+            ("当前尝试", target),
+            ("探测进度", f"{position} / {total}" if total > 0 and position > 0 else "准备中"),
+            ("下次重试", f"约 {MODEL_PROBE_INTERVAL_SECONDS} 秒后"),
+        ],
+    )
+    await _send_transient_admin_notice(
+        client,
+        user_ctx,
+        global_config,
+        message,
+        ttl_seconds=max(10, MODEL_PROBE_INTERVAL_SECONDS + 6),
+        attr_name="model_probe_notice_message",
+        msg_type="info",
+    )
+
+
 async def _run_model_probe_loop(client, user_ctx: UserContext, global_config: dict) -> None:
     rt = user_ctx.state.runtime
     try:
@@ -987,8 +1035,12 @@ async def _run_model_probe_loop(client, user_ctx: UserContext, global_config: di
 
             idx = int(rt.get("model_probe_index", 0) or 0) % len(probe_ids)
             target_model_id = probe_ids[idx]
+            rt["model_probe_total"] = len(probe_ids)
+            rt["model_probe_position"] = idx + 1
+            rt["model_probe_current_target"] = target_model_id
             rt["model_probe_index"] = (idx + 1) % len(probe_ids)
             user_ctx.save_state()
+            await _refresh_model_probe_notice(client, user_ctx, global_config)
 
             result = await _probe_single_model(user_ctx, target_model_id)
             if result.get("success"):
@@ -1047,12 +1099,30 @@ async def _run_model_probe_loop(client, user_ctx: UserContext, global_config: di
                 await _flush_model_runtime_notice(client, user_ctx, global_config)
                 return
 
+            rt["model_probe_round_failures"] = int(rt.get("model_probe_round_failures", 0) or 0) + 1
             rt["model_last_fail_at"] = _now_text()
             rt["model_last_fail_reason"] = _summarize_model_error(result.get("error", "探测失败"))
+            if int(rt.get("model_probe_round_failures", 0) or 0) >= len(probe_ids):
+                rt["model_probe_round_failures"] = 0
+                if _should_notify_model_probe_failure(rt):
+                    rt["model_probe_last_notify_at"] = int(datetime.now().timestamp())
+                    _queue_model_notice(
+                        rt,
+                        "probe_failed",
+                        signature=f"probe_failed|{rt.get('current_model_id', 'unknown')}|{rt.get('model_probe_last_notify_at', 0)}",
+                        from_model=str(rt.get("current_model_id", "unknown")),
+                        detail=str(rt.get("model_last_fail_reason", "") or "本轮探测全部失败"),
+                    )
+                    user_ctx.save_state()
+                    await _flush_model_runtime_notice(client, user_ctx, global_config)
             user_ctx.save_state()
             await asyncio.sleep(MODEL_PROBE_INTERVAL_SECONDS)
     finally:
         rt["model_probe_active"] = False
+        rt["model_probe_current_target"] = ""
+        rt["model_probe_total"] = 0
+        rt["model_probe_position"] = 0
+        rt["model_probe_round_failures"] = 0
         setattr(user_ctx, "_model_probe_task", None)
         user_ctx.save_state()
 
@@ -1164,6 +1234,26 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
             ttl_seconds=240,
             attr_name="model_pause_notice_message",
             msg_type="model_pause",
+        )
+        return
+
+    if notice_type == "probe_failed":
+        message = _build_ops_card(
+            "🔴 模型链仍不可用",
+            summary="当前模型链已完成一整轮探测，仍未找到可用模型，系统会继续暂停并后台重试。",
+            fields=[
+                ("当前模型", from_model),
+                ("最近异常", detail),
+            ],
+        )
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            message,
+            ttl_seconds=240,
+            attr_name="model_probe_failed_message",
+            msg_type="model_failure",
         )
         return
 
@@ -2871,7 +2961,7 @@ You are a quantitative trading analyst for a binary big/small game. First identi
 2. If pair_score is clearly stronger than alternation_score and the history hit rate supports it, treat the board as PAIR_FORMATION. Favor pair_expected_next only when it is trying to form the next double.
 3. If pair_would_chase_triple is true, reduce confidence sharply. Pair logic is mainly for forming the next 2-streak, not for aggressively chasing 3-streak.
 4. If recent_seq is a long pure alternation chain and no real double has appeared yet, be very cautious about betting against alternation. Pair bets need clearly better evidence.
-5. If alternation_score and pair_score are close, or rhythm_tag is CHAOS_NOISE, prefer SKIP.
+5. If alternation_score and pair_score are close, or rhythm_tag is CHAOS_NOISE, lower confidence first. Only output SKIP when neither side has a usable edge.
 
 [Double Streak Rule]
 - side: {double_streak_stats['current_side']}
@@ -2887,11 +2977,11 @@ Interpretation:
 - If DOUBLE_STREAK already exists and the next hand would directly chase a triple, lower its weight.
 
 [Hard Risk Rules]
-1. If martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} and confidence < {HIGH_PRESSURE_SKIP_MIN_CONF}, output SKIP.
-2. If pattern tag is CHAOS_SWITCH / SINGLE_JUMP / SYMMETRIC_WRAP and martingale_step >= 3, default to SKIP.
-3. DRAGON_CANDIDATE is not enough by itself in high-pressure hands.
-4. If long_term_gap is near neutral [{NEUTRAL_LONG_TERM_GAP_LOW:.2f}, {NEUTRAL_LONG_TERM_GAP_HIGH:.2f}], do not use long-term distribution as a strong betting reason.
-5. If trend evidence and reversal evidence conflict, output SKIP.
+1. If martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} and confidence < {HIGH_PRESSURE_SKIP_MIN_CONF}, do not rush to SKIP. First check whether one side still has clearer rhythm support; if yes, you may still bet with reduced confidence.
+2. If pattern tag is CHAOS_SWITCH / SINGLE_JUMP / SYMMETRIC_WRAP and martingale_step >= 3, be conservative but do not default to SKIP. Only SKIP when the board is both unstable and direction evidence is clearly conflicting.
+3. DRAGON_CANDIDATE is not enough by itself in high-pressure hands, but it can still support a bet when rhythm evidence points in the same direction.
+4. If long_term_gap is near neutral [{NEUTRAL_LONG_TERM_GAP_LOW:.2f}, {NEUTRAL_LONG_TERM_GAP_HIGH:.2f}], treat long-term distribution as weak evidence, not zero evidence.
+5. If trend evidence and reversal evidence conflict sharply, output SKIP. If one side still has a slight but usable edge, keep prediction 0 or 1 and lower confidence.
 
 [Data Evidence]
 short_term_20: {short_str}
@@ -2908,7 +2998,8 @@ entropy_tag: {entropy_tag}
 - Decide the dominant board rhythm first: dragon / alternation / pair / chaos.
 - If alternation rhythm dominates, prefer the alternation continuation side.
 - If pair rhythm dominates, prefer the side that forms the next double.
-- If neither rhythm is clearly dominant, or if the dominant rhythm is unsupported by history hit rate, output SKIP.
+- Prefer giving prediction 0 or 1 whenever one side still has a usable edge.
+- Only output SKIP when the board is truly unreadable, evidence is sharply conflicting, or both directions lack usable support.
 
 [Language Rules]
 - reasoning 必须使用简体中文，面向普通用户，避免英文术语和标签名。
