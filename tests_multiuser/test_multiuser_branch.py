@@ -65,6 +65,48 @@ def test_user_context_prefers_user_dir_slug_for_logs(tmp_path):
     assert mm.register_main_user_log_identity(ctx) == "shuji"
 
 
+def test_format_dashboard_matches_v1120_status_style(tmp_path):
+    user_dir = tmp_path / "users" / "status_style_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态样式用户"},
+            "telegram": {"user_id": 6003},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_on"] = True
+    rt["current_preset_name"] = "yc5"
+    rt["current_model_id"] = "deepseek-v3.2"
+    rt["account_balance"] = 2_411_500
+    rt["balance_status"] = "success"
+    rt["gambling_fund"] = 2_103_100
+    rt["profit"] = 1_000_000
+    rt["profit_stop"] = 2
+    rt["period_profit"] = -5_875_900
+    rt["earnings"] = -1_594_870
+    rt["total"] = 1099
+    rt["win_total"] = 491
+    rt["continuous"] = 1
+    rt["lose_stop"] = 12
+    rt["lose_once"] = 2.8
+    rt["lose_twice"] = 2.3
+    rt["lose_three"] = 2.2
+    rt["lose_four"] = 2.05
+    rt["initial_amount"] = 5000
+    ctx.state.history = [1, 0] * 20
+
+    text = zm.format_dashboard(ctx)
+
+    assert "📍 当前概览" in text
+    assert "下一手预计下注：" in text
+    assert "🎯 **策略设定**" in text
+    assert "💰 **账户余额：" in text
+    assert "模式：" not in text
+
+
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
     users_dir = tmp_path / "users"
     config_dir = tmp_path / "config"
@@ -2602,11 +2644,11 @@ def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monk
 
     msg = zm.format_dashboard(ctx)
     assert "📍 当前概览" in msg
-    assert "下一手下注：" in msg
+    assert "下一手预计下注：" in msg
     assert "菠菜余额：" in msg
-    assert "🔢 软件版本：v1.0.10(abcd1234)" in msg
-    assert "📋 预设名称：yc10" in msg
-    assert "🤖 预设参数：1 11 2.8 2.3 2.2 2.05 10000" in msg
+    assert "🔢 **软件版本：v1.0.10(abcd1234)**" in msg
+    assert "📋 **预设名称：yc10**" in msg
+    assert "🤖 **预设参数：1 11 2.8 2.3 2.2 2.05 10000**" in msg
 
 
 def test_st_command_triggers_auto_yc_report(tmp_path, monkeypatch):
@@ -3161,10 +3203,9 @@ def test_format_dashboard_prioritizes_runtime_over_detail_sections(tmp_path):
 
     dashboard = zm.format_dashboard(ctx)
 
-    assert dashboard.index("📍 当前概览") < dashboard.index("🎛️ 策略与风控")
-    assert dashboard.index("🎛️ 策略与风控") < dashboard.index("📊 近期 40 局结果（由近及远）")
-    assert dashboard.index("📊 近期 40 局结果（由近及远）") < dashboard.index("📈 运行统计")
-    assert "模式：追投" in dashboard
-    assert "下一手下注：" in dashboard
+    assert dashboard.index("📍 当前概览") < dashboard.index("📊 **近期 40 次结果**（由近及远）")
+    assert dashboard.index("📊 **近期 40 次结果**（由近及远）") < dashboard.index("🎯 **策略设定**")
+    assert "模式：追投" not in dashboard
+    assert "下一手预计下注：" in dashboard
     assert "账户余额：320.00 万" in dashboard
     assert "预设参数：" in dashboard

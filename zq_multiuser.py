@@ -961,37 +961,60 @@ def format_dashboard(user_ctx: UserContext) -> str:
     """生成并返回仪表盘信息 - 与master版本format_dashboard一致"""
     state = user_ctx.state
     rt = state.runtime
+    
+    mes = _build_dashboard_summary(user_ctx)
 
-    total = int(rt.get('total', 0) or 0)
-    win_total = int(rt.get('win_total', 0) or 0)
-    win_rate = (win_total / total * 100) if total > 0 else 0.00
+    reversed_data = ["✅" if x == 1 else "❌" for x in state.history[-40:][::-1]]
+    mes += f"""📊 **近期 40 次结果**（由近及远）
+✅：大（1）  ❌：小（0）
+{os.linesep.join(
+        " ".join(map(str, reversed_data[i:i + 10])) 
+        for i in range(0, len(reversed_data), 10)
+    )}
 
-    sections = [
-        _build_dashboard_summary(user_ctx),
-        "———————————————",
-        "🎛️ 策略与风控",
-        f"🔢 软件版本：{get_software_version_text()}",
-        f"模型 API：{rt.get('current_model_id', 'unknown')}",
-        f"📋 预设名称：{rt.get('current_preset_name', 'none')}",
-        f"🤖 预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}",
-        f"首注金额：{rt.get('initial_amount', 500)}",
-        f"止损规则：押注 {rt.get('lose_stop', 13)} 次停止",
-        f"炸号阈值：炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局",
-        f"盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局",
-        f"押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}",
-        "",
-        "📊 近期 40 局结果（由近及远）",
-        "✅：大（1）  ❌：小（0）",
-        _format_recent_results_block(state.history),
-        "",
-        "📈 运行统计",
-        f"本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万",
-        f"总盈利：{rt.get('earnings', 0) / 10000:.2f} 万",
-        f"押注次数：{total}",
-        f"胜率：{win_rate:.2f}%",
-        f"收益：{format_number(rt.get('earnings', 0))}",
-    ]
-    return "\n".join(section for section in sections if section is not None).strip()
+———————————————
+🎯 **策略设定**
+🔢 **软件版本：{get_software_version_text()}**
+🤖 **模型 API：{rt.get('current_model_id', 'unknown')}**
+🚦 **当前押注状态：{get_bet_status_text(rt)}**
+📋 **预设名称：{rt.get('current_preset_name', 'none')}**
+🤖 **预设参数：{rt.get('continuous', 1)} {rt.get('lose_stop', 13)} {rt.get('lose_once', 3.0)} {rt.get('lose_twice', 2.1)} {rt.get('lose_three', 2.05)} {rt.get('lose_four', 2.0)} {rt.get('initial_amount', 500)}**
+💰 **初始金额：{rt.get('initial_amount', 500)}**
+⏹ **押注 {rt.get('lose_stop', 13)} 次停止**
+💥 **炸 {rt.get('explode', 5)} 次，暂停 {rt.get('stop', 3)} 局**
+📚 **押注倍率：{rt.get('lose_once', 3.0)} / {rt.get('lose_twice', 2.1)} / {rt.get('lose_three', 2.05)} / {rt.get('lose_four', 2.0)}**
+
+"""
+    
+    balance_status = rt.get('balance_status', 'ok')
+    account_balance = rt.get('account_balance', 0)
+    
+    if balance_status == "auth_failed":
+        balance_str = "⚠️ Cookie 失效"
+    elif balance_status == "network_error":
+        balance_str = "⚠️ 网络错误"
+    elif account_balance == 0 and balance_status == "unknown":
+        balance_str = "⏳ 获取中..."
+    else:
+        balance_str = f"{account_balance / 10000:.2f} 万"
+        
+    mes += f"""💰 **账户余额：{balance_str}**
+💰 **菠菜余额：{max(0, rt.get('gambling_fund', 0)) / 10000:.2f} 万**
+📈 **盈利目标：{rt.get('profit', 1000000) / 10000:.2f} 万，暂停 {rt.get('profit_stop', 5)} 局**
+📈 **本轮盈利：{rt.get('period_profit', 0) / 10000:.2f} 万**
+📈 **总盈利：{rt.get('earnings', 0) / 10000:.2f} 万**
+
+"""
+    
+    win_total = rt.get('win_total', 0)
+    total = rt.get('total', 0)
+    if win_total > 0 or total > 0:
+        win_rate = (win_total / total * 100) if total > 0 else 0.00
+        mes += f"""🎯 **押注次数：{total}**
+🏆 **胜率：{win_rate:.2f}%**
+💰 **收益：{format_number(rt.get('earnings', 0))}**"""
+    
+    return mes
 
 
 def get_bet_status_text(rt: Dict[str, Any]) -> str:
@@ -1050,11 +1073,9 @@ def _build_dashboard_summary(user_ctx: UserContext) -> str:
     rt = user_ctx.state.runtime
     status_text = get_bet_status_text(rt)
     preset_name = str(rt.get("current_preset_name", "") or "").strip() or "未设置"
-    mode_text = _get_bet_mode_text(rt)
     next_amount = int(calculate_bet_amount(rt) or 0)
     balance_status = rt.get("balance_status", "unknown")
     account_balance = int(rt.get("account_balance", 0) or 0)
-    gambling_fund = max(0, int(rt.get("gambling_fund", 0) or 0))
 
     if balance_status == "auth_failed":
         balance_text = "Cookie 失效"
@@ -1069,10 +1090,9 @@ def _build_dashboard_summary(user_ctx: UserContext) -> str:
         "📍 当前概览",
         f"状态：{status_text}",
         f"预设：{preset_name}",
-        f"模式：{mode_text}",
-        f"下一手下注：{format_number(next_amount) if next_amount > 0 else '已停止'}",
+        f"下一手预计下注：{format_number(next_amount) if next_amount > 0 else '已停止'}",
         f"账户余额：{balance_text}",
-        f"菠菜余额：{gambling_fund / 10000:.2f} 万",
+        "",
     ]
     return "\n".join(summary_lines)
 
