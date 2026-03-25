@@ -1835,6 +1835,7 @@ def _build_release_ops_card(
     restart_required: bool | None = None,
     restart_mode: str = "",
     service_name: str = "",
+    restart_command: str = "",
     error: str = "",
     blocking_files: str = "",
     extra_fields: Optional[List[tuple[str, Any]]] = None,
@@ -1846,12 +1847,8 @@ def _build_release_ops_card(
         fields.append(("目标版本", target_version))
     if current_version:
         fields.append(("当前版本", current_version))
-    if restart_required is not None:
-        fields.append(("是否需要重启", "需要" if restart_required else "不需要"))
-    if restart_mode:
-        fields.append(("重启方式", restart_mode))
-    if service_name:
-        fields.append(("服务名", service_name))
+    if restart_required:
+        fields.append(("重启命令", restart_command or "`restart`"))
     if error:
         fields.append(("错误", error))
     if blocking_files:
@@ -6499,11 +6496,9 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             await send_to_admin(
                 client,
                 _build_release_ops_card(
-                    "🔄 更新任务已开始",
-                    summary="系统已经开始拉取并切换到目标版本，请先不要重复执行更新。",
+                    "🔄 开始更新",
+                    summary="系统已开始拉取并切换版本。",
                     target_version=target_ref or "latest",
-                    restart_required=True,
-                    action="请等待结果通知；完成后再执行 `restart`。",
                 ),
                 user_ctx,
                 global_config,
@@ -6515,9 +6510,8 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                         client,
                         _build_release_ops_card(
                             "✅ 无需更新",
-                            summary=result.get('message', '当前已是目标版本，无需重复切换。'),
+                            summary=result.get('message', '当前已是目标版本。'),
                             restart_required=False,
-                            action="如需确认当前状态，可执行 `ver` 或 `status`。",
                         ),
                         user_ctx,
                         global_config,
@@ -6527,11 +6521,11 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     resolved = result.get("resolved_target", "") or result.get("target_ref", target_ref or "latest")
                     mes = _build_release_ops_card(
                         "✅ 更新成功",
-                        summary="代码已经切换到目标版本，但需要重启后才会实际生效。",
+                        summary="代码已切到目标版本。",
                         target_version=resolved,
                         current_version=after.get('display_version', after.get('short_commit', 'unknown')),
                         restart_required=True,
-                        action="请执行 `restart` 让新版本正式生效。",
+                        restart_command="`restart`",
                     )
                     await send_to_admin(client, mes, user_ctx, global_config)
             else:
@@ -6542,11 +6536,10 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     client,
                     _build_release_ops_card(
                         "❌ 更新失败",
-                        summary="本次更新没有完成，当前版本保持不变。",
+                        summary="本次更新没有完成。",
                         target_version=target_ref or "latest",
                         error=result.get('error', 'unknown'),
                         blocking_files=blocking_text,
-                        action="建议先处理阻塞文件，再重新执行 `update`。",
                         note=detail[:200] if detail else "",
                     ),
                     user_ctx,
@@ -6573,11 +6566,9 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             await send_to_admin(
                 client,
                 _build_release_ops_card(
-                    "↩️ 回退任务已开始",
-                    summary="系统已经开始切换到指定历史版本，请先不要重复执行回退。",
+                    "↩️ 开始回退",
+                    summary="系统已开始切换到指定历史版本。",
                     target_version=target_ref,
-                    restart_required=True,
-                    action="请等待结果通知；完成后再执行 `restart`。",
                 ),
                 user_ctx,
                 global_config,
@@ -6588,20 +6579,19 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 resolved = result.get("resolved_target", target_ref)
                 mes = _build_release_ops_card(
                     "✅ 回退成功",
-                    summary="代码已经切换到目标历史版本，但需要重启后才会正式生效。",
+                    summary="代码已回退到目标版本。",
                     target_version=resolved,
                     current_version=after.get('display_version', after.get('short_commit', 'unknown')),
                     restart_required=True,
-                    action="请执行 `restart` 让回退版本正式生效。",
+                    restart_command="`restart`",
                 )
                 await send_to_admin(client, mes, user_ctx, global_config)
             else:
                 mes = _build_release_ops_card(
                     "❌ 回退失败",
-                    summary="本次回退没有完成，当前版本保持不变。",
+                    summary="本次回退没有完成。",
                     target_version=target_ref,
                     error=result.get('error', 'unknown'),
-                    action="请确认目标版本或提交是否正确，再重新执行 `reback`。",
                     note=str(result.get('detail'))[:200] if result.get("detail") else "",
                 )
                 await send_to_admin(client, mes, user_ctx, global_config)
@@ -6612,22 +6602,15 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             service_name = resolve_systemd_service_name()
             if service_name:
                 mes = _build_release_ops_card(
-                    "♻️ 重启任务已接收",
+                    "♻️ 开始重启",
                     summary="系统会在 2 秒后通过 systemd 重启服务。",
-                    restart_required=True,
-                    restart_mode="systemd",
-                    service_name=service_name,
-                    extra_fields=[("是否需要等待", "需要")],
-                    action="重启期间消息可能短暂中断，建议稍后执行 `status` 确认恢复情况。",
+                    extra_fields=[("服务名", service_name)],
                 )
             else:
                 mes = _build_release_ops_card(
-                    "♻️ 重启任务已接收",
+                    "♻️ 开始重启",
                     summary="系统会在 2 秒后自动重启当前进程。",
-                    restart_required=True,
-                    restart_mode="当前进程",
-                    extra_fields=[("是否需要等待", "需要")],
-                    action="重启期间消息可能短暂中断，建议稍后执行 `status` 确认恢复情况。",
+                    extra_fields=[("重启方式", "当前进程")],
                 )
             await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 3))

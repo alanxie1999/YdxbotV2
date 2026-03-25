@@ -2664,13 +2664,13 @@ def test_process_user_command_update_uses_release_card_fields(tmp_path, monkeypa
     event = SimpleNamespace(raw_text="update v1.2.0", chat_id=70155, id=12)
     asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
 
-    assert "🔄 更新任务已开始" in sent_messages[0]
+    assert "🔄 开始更新" in sent_messages[0]
     assert "目标版本：v1.2.0" in sent_messages[0]
     success_message = sent_messages[-1]
     assert "✅ 更新成功" in success_message
     assert "目标版本：v1.2.0" in success_message
     assert "当前版本：v1.2.0" in success_message
-    assert "是否需要重启：需要" in success_message
+    assert "重启命令：`restart`" in success_message
 
 
 def test_process_user_command_reback_uses_release_card_fields(tmp_path, monkeypatch):
@@ -2710,12 +2710,12 @@ def test_process_user_command_reback_uses_release_card_fields(tmp_path, monkeypa
     event = SimpleNamespace(raw_text="reback v1.1.0", chat_id=70156, id=13)
     asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
 
-    assert "↩️ 回退任务已开始" in sent_messages[0]
+    assert "↩️ 开始回退" in sent_messages[0]
     success_message = sent_messages[-1]
     assert "✅ 回退成功" in success_message
     assert "目标版本：v1.1.0" in success_message
     assert "当前版本：v1.1.0" in success_message
-    assert "是否需要重启：需要" in success_message
+    assert "重启命令：`restart`" in success_message
 
 
 def test_process_user_command_restart_uses_release_card_fields(tmp_path, monkeypatch):
@@ -2752,10 +2752,10 @@ def test_process_user_command_restart_uses_release_card_fields(tmp_path, monkeyp
     asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
 
     message = sent_messages[-1]
-    assert "♻️ 重启任务已接收" in message
-    assert "重启方式：systemd" in message
+    assert "♻️ 开始重启" in message
     assert "服务名：ydxbot.service" in message
-    assert "是否需要等待：需要" in message
+    assert "重启方式：" not in message
+    assert "是否需要等待：" not in message
 
 
 def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monkeypatch):
