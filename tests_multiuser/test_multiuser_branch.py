@@ -15,6 +15,9 @@ import main_multiuser as mm
 
 def _write_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.name == "config.json" and path.parent.parent.name == "users":
+        canonical = path.parent / f"{path.parent.name}_config.json"
+        canonical.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -166,7 +169,8 @@ def test_user_context_merges_global_common_and_user_private_config(tmp_path):
 
     ctx = mgr.get_user(6001)
     assert ctx is not None
-    assert ctx.config.groups["admin_chat"] == 6001
+    assert ctx.config.notification["admin_chat"] == 6001
+    assert "admin_chat" not in ctx.config.groups
     assert ctx.config.zhuque["api_url"] == "https://zhuque.in/api/user/getInfo?"
     assert ctx.config.zhuque["cookie"] == "c1"
     assert ctx.config.notification["iyuu"]["enable"] is True
@@ -413,7 +417,7 @@ def test_user_context_supports_hash_comments_in_config(tmp_path):
     "account": {"name": "注释用户"} # 行尾注释
 }
 """
-    (user_dir / "config.json").write_text(config_text, encoding="utf-8")
+    (user_dir / "comment_user_config.json").write_text(config_text, encoding="utf-8")
     ctx = UserContext(str(user_dir))
     assert ctx.user_id == 778899
     assert ctx.config.name == "注释用户"
@@ -950,20 +954,22 @@ def test_send_message_v2_routes_and_account_prefix(tmp_path, monkeypatch):
         zm.send_message_v2(
             client,
             "lose_streak",
-            "【账号：路由用户】\n测试告警",
+            "⚠️ 3 连输告警 ⚠️\n\n结论：当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万\n\n建议动作：建议立即查看 `status`；如不准备继续，可直接执行 `pause`。",
             ctx,
             {},
             title="标题",
-            desp="测试告警",
+            desp="⚠️ 3 连输告警 ⚠️\n\n结论：当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万\n\n建议动作：建议立即查看 `status`；如不准备继续，可直接执行 `pause`。",
         )
     )
 
-    assert client.messages == [(5001, "测试告警")]
+    assert client.messages
+    assert "⚠️ 3 连输告警 ⚠️" in client.messages[0][1]
     assert len(requests_payloads) == 2
     iyuu_payload = next(item for item in requests_payloads if "iyuu" in item["url"])
     tg_payload = next(item for item in requests_payloads if "api.telegram.org" in item["url"])
     assert iyuu_payload["data"]["desp"].startswith("【账号：路由用户】")
     assert tg_payload["json"]["text"].startswith("【账号：路由用户】")
+    assert "💰 累计损失：207,500" in tg_payload["json"]["text"]
 
 
 def test_send_message_v2_lose_end_priority_keeps_account_prefix(tmp_path, monkeypatch):
@@ -1003,21 +1009,21 @@ def test_send_message_v2_lose_end_priority_keeps_account_prefix(tmp_path, monkey
         zm.send_message_v2(
             client,
             "lose_end",
-            "【账号：回补用户】\n连输已终止",
+            "✅ 3 连输已终止！ ✅\n\n结论：本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万\n\n建议动作：建议关注是否已回到首注，并继续观察下一次盘口。",
             ctx,
             {},
             title="标题",
-            desp="连输已终止",
+            desp="✅ 3 连输已终止！ ✅\n\n结论：本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万\n\n建议动作：建议关注是否已回到首注，并继续观察下一次盘口。",
         )
     )
 
-    # 管理员通道不带账号前缀
-    assert client.messages == [(5011, "连输已终止")]
-    # 重点通道必须带账号前缀
+    assert client.messages
+    assert "✅ 3 连输已终止！ ✅" in client.messages[0][1]
     iyuu_payload = next(item for item in requests_payloads if "iyuu" in item["url"])
     tg_payload = next(item for item in requests_payloads if "api.telegram.org" in item["url"])
     assert iyuu_payload["data"]["desp"].startswith("【账号：回补用户】")
     assert tg_payload["json"]["text"].startswith("【账号：回补用户】")
+    assert "💰 菠菜资金剩余：1140.05 万" in tg_payload["json"]["text"]
 
 
 def test_build_yc_result_message_uses_codeblock_table():
@@ -2470,27 +2476,29 @@ def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch
     ctx = UserContext(str(user_dir))
     sent_messages = []
 
-    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
-        sent_messages.append(message)
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", *args, **kwargs):
+        sent_messages.append((msg_type, message, parse_mode))
         return SimpleNamespace(chat_id=70154, id=len(sent_messages))
 
     def fake_create_task(coro):
         coro.close()
         return None
 
-    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
     monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
 
     event = SimpleNamespace(raw_text="help", chat_id=70154, id=11)
     asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
 
-    message = sent_messages[-1]
-    assert "📘 快速上手" in message
-    assert "高频命令" in message
-    assert "常用场景" in message
-    assert "完整命令分组" in message
-    assert "`st [预设名]`" in message
-    assert "`status`" in message
+    msg_type, message, parse_mode = sent_messages[-1]
+    assert msg_type == "info"
+    assert parse_mode == "html"
+    assert "<b>📘 脚本命令指南</b>" in message
+    assert "⚡ 基础控制（最常用）" in message
+    assert "<code>/st [预设名]</code>" in message
+    assert "<code>/set [炸] [赢] [停] [盈停]</code>" in message
+    assert "<code>/model select [编号/ID]</code>" in message
+    assert "<code>/res state</code>" in message
 
 
 def test_process_user_command_update_uses_release_card_fields(tmp_path, monkeypatch):

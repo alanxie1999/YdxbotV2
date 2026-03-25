@@ -6,11 +6,6 @@ import hashlib
 from collections import deque
 from typing import Dict, List, Any, Optional
 
-try:
-    import config as legacy_config
-except Exception:
-    legacy_config = None
-
 # 尝试导入 DashScope SDK
 try:
     import dashscope
@@ -108,50 +103,20 @@ class ModelManager:
         self.load_models_from_config()
 
     def load_models_from_config(self):
-        """从 shared 配置（优先）或 legacy config.py（回退）加载并标准化模型配置"""
+        """从共享 AI 配置加载并标准化模型配置。"""
         self.models = []
         self.api_key_indices = {}
         self.fallback_chain = []
         try:
-            # 1. 加载 Google 模型
-            if getattr(legacy_config, 'GOOGLE_ENABLED', False):
-                api_key = getattr(legacy_config, 'GOOGLE_API_KEY', "")
-                base_url = getattr(legacy_config, 'GOOGLE_BASE_URL', "")
-                google_models = getattr(legacy_config, 'GOOGLE_MODELS', {})
-                
-                for model_id, info in google_models.items():
-                    self.models.append({
-                        "provider": "google",
-                        "model_id": model_id,
-                        "name": info.get("name", model_id),
-                        "api_key": api_key,
-                        "base_url": base_url,
-                        "max_tokens": info.get("max_tokens", 8192),
-                        "enabled": info.get("enabled", True)
-                    })
-
-            # 2. 加载 SiliconFlow (已移除)
-            pass
-
-            # 3. 加载 OpenAI 兼容模型（iFlow / NVIDIA / 其他兼容端点）
-            if self.shared_ai_config:
-                iflow_enabled = self.shared_ai_config.get('enabled', True)
-                api_key = self.shared_ai_config.get('api_keys', self.shared_ai_config.get('api_key', ""))
-                base_url = self.shared_ai_config.get('base_url', "https://apis.iflow.cn/v1")
-                iflow_models = self.shared_ai_config.get('models', {})
-                configured_chain = self.shared_ai_config.get('fallback_chain', [])
-                provider = self.shared_ai_config.get('provider', "")
-                timeout_sec = self.shared_ai_config.get('timeout', 30)
-                rate_limit_rpm = self.shared_ai_config.get('rate_limit_rpm')
-            else:
-                iflow_enabled = getattr(legacy_config, 'IFLOW_ENABLED', False)
-                api_key = getattr(legacy_config, 'IFLOW_API_KEY', "")
-                base_url = getattr(legacy_config, 'IFLOW_BASE_URL', "https://apis.iflow.cn/v1")
-                iflow_models = getattr(legacy_config, 'IFLOW_MODELS', {})
-                configured_chain = getattr(legacy_config, 'MODEL_FALLBACK_CHAIN', [])
-                provider = "iflow"
-                timeout_sec = 30
-                rate_limit_rpm = None
+            ai_cfg = self.shared_ai_config if isinstance(self.shared_ai_config, dict) else {}
+            iflow_enabled = ai_cfg.get('enabled', True)
+            api_key = ai_cfg.get('api_keys', ai_cfg.get('api_key', ""))
+            base_url = ai_cfg.get('base_url', "https://apis.iflow.cn/v1")
+            iflow_models = ai_cfg.get('models', {})
+            configured_chain = ai_cfg.get('fallback_chain', [])
+            provider = ai_cfg.get('provider', "")
+            timeout_sec = ai_cfg.get('timeout', 30)
+            rate_limit_rpm = ai_cfg.get('rate_limit_rpm')
 
             if iflow_enabled:
                 if not isinstance(iflow_models, dict):
@@ -160,11 +125,10 @@ class ModelManager:
                 resolved_rate_limit_rpm = _safe_int(rate_limit_rpm, 0)
                 if resolved_provider == "nvidia" and resolved_rate_limit_rpm <= 0:
                     resolved_rate_limit_rpm = 40
-                
+
                 for idx, info in iflow_models.items():
                     if not isinstance(info, dict):
                         continue
-                    # 新格式：序号作为key，model_id在value中
                     actual_model_id = info.get("model_id", idx)
                     self.models.append({
                         "provider": resolved_provider,
@@ -176,29 +140,13 @@ class ModelManager:
                         "rate_limit_rpm": resolved_rate_limit_rpm,
                         "max_tokens": info.get("max_tokens", 8192),
                         "enabled": info.get("enabled", True),
-                        "idx": str(idx)  # 保留序号用于选择
+                        "idx": str(idx)
                     })
 
                 if isinstance(configured_chain, list) and configured_chain:
                     self.fallback_chain = [str(x) for x in configured_chain]
                 else:
                     self.fallback_chain = [str(x) for x in iflow_models.keys()]
-
-            # 4. 加载 Aliyun 模型 (兼容旧配置)
-            if getattr(legacy_config, 'ALIYUN_ENABLED', False):
-                api_key = getattr(legacy_config, 'ALIYUN_API_KEY', "")
-                aliyun_models = getattr(legacy_config, 'ALIYUN_MODELS', {})
-                
-                for model_id, info in aliyun_models.items():
-                    self.models.append({
-                        "provider": "aliyun",
-                        "model_id": model_id,
-                        "name": info.get("name", model_id),
-                        "api_key": api_key,
-                        "base_url": None, # Aliyun SDK 不需要 base_url
-                        "max_tokens": info.get("max_tokens", 8192),
-                        "enabled": info.get("enabled", True)
-                    })
             
             logger.info(f"成功从 config 加载 {len(self.models)} 个模型配置")
             
@@ -252,7 +200,7 @@ class ModelManager:
         返回格式: {"success": bool, "content": str, "error": str, "usage": dict}
         """
         # 获取降级链
-        fallback_chain = [str(x) for x in (self.fallback_chain or getattr(legacy_config, 'MODEL_FALLBACK_CHAIN', []))]
+        fallback_chain = [str(x) for x in (self.fallback_chain or [])]
         target_model_id = str(model_id)
         requested_model = self.get_model(target_model_id)
         requested_actual_model_id = (

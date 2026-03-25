@@ -414,15 +414,6 @@ def get_default_runtime() -> Dict[str, Any]:
         "stall_guard_timeout_streak": 0,
         "stall_guard_gate_streak": 0,
         "stall_guard_force_unlock_total": 0,
-        "shadow_probe_active": False,
-        "shadow_probe_origin_reason": "",
-        "shadow_probe_target_rounds": 0,
-        "shadow_probe_pass_required": 0,
-        "shadow_probe_checked": 0,
-        "shadow_probe_hits": 0,
-        "shadow_probe_pending_prediction": None,
-        "shadow_probe_last_history_len": -1,
-        "shadow_probe_rearm": False,
         "last_skip_notice_settled": -1,
         "model_monitor_last_settled": 0,
         "fund_pause_notified": False,
@@ -476,12 +467,10 @@ class UserContext:
 
     def _resolve_user_config_path(self) -> str:
         """
-        优先读取 <账号目录名>_config.json；
-        兼容旧版 config.json（便于平滑迁移）。
+        仅读取 <账号目录名>_config.json。
         """
         dir_name = os.path.basename(os.path.normpath(self.user_dir))
         preferred = os.path.join(self.user_dir, f"{dir_name}_config.json")
-        legacy = os.path.join(self.user_dir, "config.json")
 
         if os.path.exists(preferred):
             return preferred
@@ -498,11 +487,8 @@ class UserContext:
         except Exception:
             pass
 
-        if os.path.exists(legacy):
-            return legacy
-
         raise FileNotFoundError(
-            f"配置文件不存在，期望: {preferred} 或 {legacy}"
+            f"配置文件不存在，期望: {preferred}"
         )
     
     def _load_config(self):
@@ -521,14 +507,6 @@ class UserContext:
         notification_cfg = data.get("notification", {}) if isinstance(data.get("notification", {}), dict) else {}
         ai_cfg = data.get("ai", {}) if isinstance(data.get("ai", {}), dict) else {}
 
-        # 规范化：admin_chat 统一归类到 notification；兼容旧 groups.admin_chat 读取。
-        admin_chat = notification_cfg.get("admin_chat")
-        if admin_chat in (None, ""):
-            admin_chat = groups_cfg.get("admin_chat")
-        if admin_chat not in (None, ""):
-            notification_cfg["admin_chat"] = admin_chat
-            groups_cfg["admin_chat"] = admin_chat
-        
         # 从配置中读取user_id，如果没有则使用目录名的哈希值
         self.user_id = telegram_cfg.get("user_id", 0)
         if self.user_id == 0:
@@ -587,11 +565,7 @@ class UserContext:
             if not isinstance(data, dict):
                 data = {}
 
-            # 统一使用 api_keys 字段，兼容迁移旧字段 api_key。
             ai_data = dict(new_ai_config)
-            if "api_key" in ai_data and "api_keys" not in ai_data:
-                ai_data["api_keys"] = ai_data.pop("api_key")
-            ai_data.pop("api_key", None)
             data["ai"] = ai_data
 
             with open(config_path, 'w', encoding='utf-8') as f:
@@ -920,96 +894,3 @@ class UserManager:
     def get_iflow_config(self) -> Dict:
         # 兼容：通用配置仍可定义 ai（例如旧版 global/global_config 配置）
         return self.global_config.get("ai") or self.global_config.get("iflow", {})
-
-
-def migrate_from_legacy(config_module, variable_module) -> UserContext:
-    """
-    从旧版config.py和variable.py迁移到新结构
-    """
-    user_id = config_module.user
-    user_dir = os.path.join("users", str(user_id))
-    os.makedirs(user_dir, exist_ok=True)
-    
-    config_data = {
-        "user_id": user_id,
-        "name": config_module.name,
-        "telegram": {
-            "api_id": config_module.api_id,
-            "api_hash": config_module.api_hash,
-            "session_name": config_module.user_session
-        },
-        "groups": {
-            "zq_group": config_module.zq_group,
-            "zq_bot": config_module.zq_bot
-        },
-        "zhuque": {
-            "cookie": config_module.ZHUQUE_COOKIE,
-            "csrf_token": config_module.ZHUQUE_X_CSRF
-        },
-        "notification": {
-            "admin_chat": config_module.user,
-            "iyuu": {
-                "enable": config_module.iyuu_config.get("enable", False),
-                "token": config_module.iyuu_config.get("token", ""),
-                "notify_types": config_module.iyuu_config.get("notify_types", [])
-            },
-            "tg_bot": {
-                "enable": config_module.tg_bot_config.get("enable", False),
-                "bot_token": config_module.tg_bot_config.get("bot_token", ""),
-                "chat_id": config_module.tg_bot_config.get("chat_id", "")
-            }
-        }
-    }
-    
-    dir_name = os.path.basename(os.path.normpath(user_dir))
-    config_path = os.path.join(user_dir, f"{dir_name}_config.json")
-    with open(config_path, 'w', encoding='utf-8') as f:
-        json.dump(config_data, f, indent=4, ensure_ascii=False)
-    
-    state_data = {
-        "history": variable_module.history[-2000:],
-        "bet_type_history": variable_module.bet_type_history[-2000:],
-        "predictions": variable_module.predictions[-2000:],
-        "bet_sequence_log": variable_module.bet_sequence_log[-5000:],
-        "runtime": {
-            "current_round": variable_module.current_round,
-            "current_bet_seq": variable_module.current_bet_seq,
-            "win_count": variable_module.win_count,
-            "lose_count": variable_module.lose_count,
-            "bet_amount": variable_module.bet_amount,
-            "bet_sequence_count": variable_module.bet_sequence_count,
-            "win_total": variable_module.win_total,
-            "total": variable_module.total,
-            "earnings": variable_module.earnings,
-            "period_profit": variable_module.period_profit,
-            "explode_count": variable_module.explode_count,
-            "stop_count": variable_module.stop_count,
-            "gambling_fund": variable_module.gambling_fund,
-            "account_balance": variable_module.account_balance,
-            "current_model_id": variable_module.current_model_id,
-            "current_preset_name": variable_module.current_preset_name,
-            "initial_amount": variable_module.initial_amount,
-            "lose_stop": variable_module.lose_stop,
-            "lose_once": variable_module.lose_once,
-            "lose_twice": variable_module.lose_twice,
-            "lose_three": variable_module.lose_three,
-            "lose_four": variable_module.lose_four,
-            "continuous": variable_module.continuous,
-            "explode": variable_module.explode,
-            "stop": variable_module.stop,
-            "profit_stop": variable_module.profit_stop,
-            "profit": variable_module.profit
-        }
-    }
-    
-    state_path = os.path.join(user_dir, "state.json")
-    with open(state_path, 'w', encoding='utf-8') as f:
-        json.dump(state_data, f, indent=4, ensure_ascii=False)
-    
-    presets_data = constants.PRESETS
-    presets_path = os.path.join(user_dir, "presets.json")
-    with open(presets_path, 'w', encoding='utf-8') as f:
-        json.dump(presets_data, f, indent=4, ensure_ascii=False)
-    
-    log_event(logging.INFO, 'migrate', '迁移完成', f'user_id={user_id}')
-    return UserContext(user_dir)

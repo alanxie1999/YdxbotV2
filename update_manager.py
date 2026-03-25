@@ -36,9 +36,6 @@ SYSTEMD_SERVICE_ENV_KEYS = ("YDXBOT_SYSTEMD_SERVICE", "SYSTEMD_SERVICE")
 GLOBAL_CONFIG_CANDIDATES = (
     "global_config.json",
     "global_config.example.json",
-    # 兼容旧命名
-    "global.json",
-    "global.example.json",
 )
 
 
@@ -148,18 +145,12 @@ def _load_json_with_comments(path: Path) -> Dict[str, Any]:
 
 
 def _load_shared_global_config(repo_root: Path) -> Dict[str, Any]:
-    # 新结构优先读取 config/，兼容旧版 shared/。
-    for base_dir in ("config", "shared"):
-        config_dir = repo_root / base_dir
-        candidates = (
-            GLOBAL_CONFIG_CANDIDATES if base_dir == "config"
-            else ("global.local.json", "global.json", "global.example.json")
-        )
-        for filename in candidates:
-            path = config_dir / filename
-            if not path.exists():
-                continue
-            return _load_json_with_comments(path)
+    config_dir = repo_root / "config"
+    for filename in GLOBAL_CONFIG_CANDIDATES:
+        path = config_dir / filename
+        if not path.exists():
+            continue
+        return _load_json_with_comments(path)
     return {}
 
 

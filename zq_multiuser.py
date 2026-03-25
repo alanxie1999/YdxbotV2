@@ -289,13 +289,6 @@ STALL_GUARD_SKIP_MAX = 2
 STALL_GUARD_TIMEOUT_MAX = 2
 STALL_GUARD_TOTAL_MAX = 6
 
-# 暂停结束后的影子验证（只预测不下注）
-SHADOW_PROBE_ENABLED = True
-SHADOW_PROBE_ROUNDS = 3
-SHADOW_PROBE_PASS_REQUIRED = 2
-SHADOW_PROBE_RETRY_PAUSE_ROUNDS = 2
-
-
 def log_event(level, module, event, message=None, **kwargs):
     # 兼容旧调用: log_event(level, event, message, user_id, data)
     if message is None:
@@ -1295,43 +1288,6 @@ def apply_account_risk_default_mode(rt: Dict[str, Any]) -> Dict[str, bool]:
     return _normalize_risk_switches(rt, apply_default=True)
 
 
-def _build_risk_state_text(rt: Dict[str, Any], include_usage: bool = True) -> str:
-    risk_modes = _normalize_risk_switches(rt, apply_default=False)
-    mes = (
-        f"🛡️🛡️ 当前风控开关 🛡️🛡️\n\n"
-        f"- 基础风控：{_risk_switch_label(risk_modes['base_enabled'])}\n"
-        f"- 深度风控：{_risk_switch_label(risk_modes['deep_enabled'])}\n\n"
-        f"📊 最近 40 笔统计（基础风控依据）\n"
-        f"- 胜率：{rt.get('risk_pause_wins', 0)}/{rt.get('risk_pause_total', 40)}（{rt.get('risk_pause_win_rate', 0) * 100:.1f}%）\n"
-        f"- 连输档位：{rt.get('risk_deep_milestone', 3)}（已触发 {rt.get('risk_deep_triggered_count', 0)}/{rt.get('risk_deep_trigger_limit', 5)} 次）\n"
-    )
-    if include_usage:
-        mes += "\n用法：`risk base on|off` / `risk deep on|off` / `risk all on|off`"
-    return mes
-
-def build_startup_focus_reminder(user_ctx: UserContext) -> str:
-    """启动重点设置提醒：风控开关 + 预设 + 入口命令。"""
-    rt = user_ctx.state.runtime
-    risk_modes = _normalize_risk_switches(rt, apply_default=False)
-    preset_name = str(rt.get("current_preset_name", "")).strip() or "未设置"
-    try:
-        mode_code = int(rt.get("mode", 1) or 1)
-    except (TypeError, ValueError):
-        mode_code = 1
-    mode_text = {0: "反投", 1: "预测", 2: "追投"}.get(mode_code, "未知")
-    status_text = get_bet_status_text(rt)
-    return (
-        "📌 启动重点设置提醒\n"
-        f"🛡️ 风控提醒：基础 {_risk_switch_label(risk_modes['base_enabled'])} / "
-        f"深度 {_risk_switch_label(risk_modes['deep_enabled'])}\n"
-        f"🧭 默认模式：基础 {_risk_switch_label(risk_modes['base_default_enabled'])} / "
-        f"深度 {_risk_switch_label(risk_modes['deep_default_enabled'])}（可用 `risk ...` 开关）\n"
-        f"🎯 预设提醒：当前 `{preset_name}`（可用 `st <预设名>` 切换）\n"
-        f"📊 当前状态：{status_text}，模式：{mode_text}\n"
-        "ℹ️ 更多命令：`help`"
-    )
-
-
 # 消息分发规则表（与 master 一致）
 MESSAGE_ROUTING_TABLE = {
     "win": {"channels": ["admin", "priority"], "priority": True},
@@ -1363,6 +1319,17 @@ MESSAGE_POLICY = {
     "risk_summary": {"level": "P3", "title": "风控总结", "action": "建议作为复盘信息阅读，不需要立即处理。"},
     "warning": {"level": "P2", "title": "提醒", "action": "建议查看详情，确认是否需要人工介入。"},
     "error": {"level": "P1", "title": "异常提醒", "action": "建议立即查看 `status`，必要时执行 `restart`。"},
+}
+
+PRIORITY_FULL_MESSAGE_TYPES = {
+    "win",
+    "explode",
+    "lose_streak",
+    "lose_end",
+    "fund_pause",
+    "goal_pause",
+    "risk_summary",
+    "error",
 }
 
 
@@ -1440,23 +1407,45 @@ def _build_error_ops_card(
 
 
 def _build_help_card() -> str:
-    return _build_ops_card(
-        "📘 快速上手",
-        summary="先记住 5 个高频命令：`st`、`status`、`pause`、`resume`、`balance`。",
-        fields=[
-            ("高频命令", "`st [预设名]` 启动 / `status` 查看 / `pause` 暂停 / `resume` 恢复 / `balance` 余额"),
-            ("常用场景", "启动看 `st`，日常看 `status`，遇到异常先 `pause`，恢复用 `resume`。"),
-            ("完整命令分组", "基础控制 / 参数设置 / 模型与策略 / 测算功能 / 数据管理 / 发布更新 / 预设管理 / 多用户管理"),
-            ("基础控制", "`st [预设名]` / `pause` / `resume` / `open` / `off`"),
-            ("参数设置", "`gf [金额]` / `set [炸] [赢] [停] [盈停]` / `warn [次数]` / `wlc [次数]`"),
-            ("模型与策略", "`model [list|select|reload]` / `apikey [show|set|add|del|test]` / `ms [模式]`"),
-            ("测算功能", "`yc [预设名]` / `yc [参数...]`"),
-            ("数据管理", "`res tj` / `res state` / `res bet` / `explain` / `stats` / `balance` / `xx`"),
-            ("发布更新", "`ver` / `update [版本|提交]` / `reback [版本|提交]` / `restart`"),
-            ("预设管理", "`ys [名] ...` / `yss` / `yss dl [名]`"),
-            ("多用户管理", "`users` / `status`"),
-        ],
-        action="如果只是日常使用，优先看 `status`；准备启动时执行 `st [预设名]`。",
+    return (
+        "<b>📘 脚本命令指南</b>\n\n"
+        "结论：常用命令直接点击 <code>代码</code> 即可快速复制。\n"
+        "常用：<code>st</code> <code>status</code> <code>pause</code> <code>balance</code>\n\n"
+        "<b>⚡ 基础控制（最常用）</b>\n"
+        "• <code>/st [预设名]</code> 启动（带名切换并启动）\n"
+        "• <code>/status</code> 查看运行状态看板\n"
+        "• <code>/pause</code> / <code>/resume</code> 暂停/恢复下注\n"
+        "• <code>/balance</code> 刷新当前账户余额\n"
+        "• <code>/stats</code> 查看连赢、连输详细统计\n\n"
+        "<b>💰 资金与阈值</b>\n"
+        "• <code>/gf [金额]</code> 设置菠菜资金上限\n"
+        "• <code>/set [炸] [赢] [停] [盈停]</code> 核心阈值\n"
+        "<i>例：/set 1 1000000 3 2（炸1次 赢100w 停3局 盈停2）</i>\n"
+        "• <code>/wlc [n]</code> 连输相关阈值\n\n"
+        "<b>🤖 模型与策略（进阶）</b>\n"
+        "• <code>/model list</code> 查看可用模型\n"
+        "• <code>/model select [编号/ID]</code> 切换模型（支持编号）\n"
+        "<i>例：/model select 1</i>\n"
+        "• <code>/apikey show</code> 查看当前密钥状态\n"
+        "• <code>/apikey set</code> / <code>/apikey add</code> / <code>/apikey del</code> 管理密钥\n"
+        "• <code>/ms [0/1/2]</code> 切换模式（0=反投, 1=预测, 2=追投）\n\n"
+        "<b>📋 预设与测算（进阶）</b>\n"
+        "• <code>/yss</code> 查看全部预设\n"
+        "• <code>/yss dl [名]</code> 删除预设\n"
+        "• <code>/ys [名称] [连续] [止损] [一输] [二输] [三输] [四输] [首注]</code> 新增或覆盖预设\n"
+        "<i>例：/ys yc20 1 10 2.8 2.3 2.2 2.05 20000</i>\n"
+        "• <code>/yc [名]</code> 或 <code>/yc [参数...]</code> 按预设或临时参数测算\n\n"
+        "<b>🛠 系统与数据（进阶）</b>\n"
+        "• <code>/res tj</code> 重置收益/胜率统计\n"
+        "• <code>/res state</code> 彻底重置状态\n"
+        "• <code>/res bet</code> 只重置当前倍投链路\n"
+        "• <code>/ver</code> 查看版本\n"
+        "• <code>/restart</code> 重启程序\n"
+        "• <code>/update [版本]</code> 更新版本\n"
+        "• <code>/reback [版本]</code> 回退版本\n"
+        "• <code>/explain</code> 查看最近判断依据\n"
+        "• <code>/users</code> 查看多用户状态\n"
+        "• <code>/xx</code> 执行辅助数据操作"
     )
 
 
@@ -1602,25 +1591,6 @@ def _ensure_account_prefix(text: str, account_prefix: str) -> str:
     return f"{account_prefix}\n{content}"
 
 
-def _get_bet_mode_text(rt: Dict[str, Any]) -> str:
-    try:
-        mode_code = int(rt.get("bet_mode", rt.get("mode", 1)) or 1)
-    except (TypeError, ValueError):
-        mode_code = 1
-    return {0: "反投", 1: "预测", 2: "追投"}.get(mode_code, "未知")
-
-
-def _format_recent_results_block(history: List[int], limit: int = 40) -> str:
-    recent_history = history[-limit:][::-1]
-    if not recent_history:
-        return "暂无数据"
-    reversed_data = ["✅" if x == 1 else "❌" for x in recent_history]
-    return os.linesep.join(
-        " ".join(reversed_data[i:i + 10])
-        for i in range(0, len(reversed_data), 10)
-    )
-
-
 def _iter_targets(target):
     if isinstance(target, (list, tuple, set)):
         return [item for item in target if item not in (None, "")]
@@ -1678,7 +1648,7 @@ def _mask_command_text(command_text: str) -> tuple[str, bool]:
         return text, False
     normalized_cmd = parts[0][1:] if parts[0].startswith("/") else parts[0]
     cmd = normalized_cmd.lower()
-    if cmd in {"apikey", "ak"} and len(parts) >= 2:
+    if cmd == "apikey" and len(parts) >= 2:
         sub_cmd = parts[1].lower()
         if sub_cmd in {"set", "add"} and len(parts) >= 3:
             return " ".join(parts[:2] + ["***"]), True
@@ -1813,8 +1783,12 @@ async def send_message_v2(
     account_prefix = f"【账号：{account_name}】"
     admin_message = _strip_account_prefix(message)
     priority_source = desp if desp is not None else message
-    priority_message = _build_priority_summary(msg_type, priority_source, account_prefix)
-    priority_desp = priority_message
+    if msg_type in PRIORITY_FULL_MESSAGE_TYPES:
+        priority_message = _ensure_account_prefix(priority_source, account_prefix)
+        priority_desp = priority_message
+    else:
+        priority_message = _build_priority_summary(msg_type, priority_source, account_prefix)
+        priority_desp = priority_message
 
     sent_message = None
     admin_chat = None
@@ -4032,110 +4006,6 @@ async def _evaluate_high_step_double_confirm(
         }
     return {"blocked": False}
 
-
-def _clear_shadow_probe(rt: dict) -> None:
-    rt["shadow_probe_active"] = False
-    rt["shadow_probe_origin_reason"] = ""
-    rt["shadow_probe_target_rounds"] = 0
-    rt["shadow_probe_pass_required"] = 0
-    rt["shadow_probe_checked"] = 0
-    rt["shadow_probe_hits"] = 0
-    rt["shadow_probe_pending_prediction"] = None
-    rt["shadow_probe_last_history_len"] = -1
-
-
-def _start_shadow_probe(rt: dict, reason: str) -> None:
-    _clear_shadow_probe(rt)
-    rt["shadow_probe_active"] = True
-    rt["shadow_probe_origin_reason"] = str(reason or "风控暂停").strip() or "风控暂停"
-    rt["shadow_probe_target_rounds"] = int(SHADOW_PROBE_ROUNDS)
-    rt["shadow_probe_pass_required"] = int(SHADOW_PROBE_PASS_REQUIRED)
-    rt["shadow_probe_checked"] = 0
-    rt["shadow_probe_hits"] = 0
-    rt["shadow_probe_pending_prediction"] = None
-    rt["shadow_probe_last_history_len"] = -1
-
-
-def _should_start_shadow_after_pause(rt: dict) -> bool:
-    if not SHADOW_PROBE_ENABLED:
-        return False
-    if rt.get("manual_pause", False):
-        return False
-    reason = str(rt.get("pause_countdown_reason", "")).strip()
-    if not reason:
-        return False
-    return any(token in reason for token in ("风控", "高倍入场", "模型可用性门控"))
-
-
-def _consume_shadow_probe_settle_result(rt: dict, result: int) -> dict:
-    """
-    在结算阶段消费影子验证的待评估预测，并推进影子验证状态机。
-    返回结构:
-    {
-      "updated": bool,
-      "hit": bool,
-      "checked": int,
-      "hits": int,
-      "target_rounds": int,
-      "pass_required": int,
-      "done": bool,
-      "passed": bool,
-      "pause_rounds": int,
-    }
-    """
-    if not rt.get("shadow_probe_active", False):
-        return {"updated": False}
-
-    pending_pred = rt.get("shadow_probe_pending_prediction", None)
-    if pending_pred not in (0, 1):
-        return {"updated": False}
-
-    target_rounds = max(1, int(rt.get("shadow_probe_target_rounds", SHADOW_PROBE_ROUNDS)))
-    pass_required = max(1, int(rt.get("shadow_probe_pass_required", SHADOW_PROBE_PASS_REQUIRED)))
-    checked = int(rt.get("shadow_probe_checked", 0))
-    hits = int(rt.get("shadow_probe_hits", 0))
-
-    checked += 1
-    hit = int(pending_pred) == int(result)
-    if hit:
-        hits += 1
-
-    rt["shadow_probe_pending_prediction"] = None
-    rt["shadow_probe_checked"] = checked
-    rt["shadow_probe_hits"] = hits
-
-    done = checked >= target_rounds
-    passed = False
-    pause_rounds = 0
-
-    if done:
-        if hits >= pass_required:
-            passed = True
-            _clear_shadow_probe(rt)
-            rt["bet_on"] = True
-            rt["mode_stop"] = True
-            rt["pause_resume_pending"] = True
-            rt["pause_resume_pending_reason"] = "影子验证通过"
-            rt["pause_resume_probe_settled"] = -1
-        else:
-            _clear_shadow_probe(rt)
-            rt["shadow_probe_rearm"] = True
-            pause_rounds = int(SHADOW_PROBE_RETRY_PAUSE_ROUNDS)
-            _enter_pause(rt, pause_rounds, "影子验证未达标")
-
-    return {
-        "updated": True,
-        "hit": bool(hit),
-        "checked": checked,
-        "hits": hits,
-        "target_rounds": target_rounds,
-        "pass_required": pass_required,
-        "done": done,
-        "passed": passed,
-        "pause_rounds": pause_rounds,
-    }
-
-
 def _evaluate_entry_quality_gate(rt: dict, risk_pause: dict, next_sequence: int) -> dict:
     """
     高倍入场质量门控：
@@ -4933,39 +4803,6 @@ def generate_mobile_bet_report(
     )
 
 
-def generate_mobile_pause_report(
-    history: list,
-    pause_reason: str,
-    confidence: float = None,
-    entropy: float = None
-) -> str:
-    streak_len, streak_side = _get_current_streak(history)
-    reason_text = _compact_reason_text(pause_reason)
-    w5 = _format_recent_binary(history, 5)
-    w10 = _format_recent_binary(history, 10)
-    w40 = _format_recent_binary(history, 40)
-
-    lines = [
-        "⛔ 风控暂停简报 ⛔",
-        "",
-        f"原因：{reason_text}",
-    ]
-    if confidence is not None:
-        lines.append(f"置信度：{confidence}%")
-    if entropy is not None:
-        lines.append(f"熵值：{entropy:.2f}")
-    lines.extend(
-        [
-            f"近5局：{w5}",
-            f"近10局：{w10}",
-            f"近40局：{w40}",
-            f"当前连{streak_side}：{streak_len}",
-            "动作：暂停下注，继续观察",
-        ]
-    )
-    return "\n".join(lines)
-
-
 def _build_fund_pause_message(current_fund: int) -> str:
     return _build_alert_ops_card(
         "⛔ 资金不足，已暂停押注",
@@ -5523,53 +5360,18 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
         await event.reply(success_msg)
         log_event(logging.INFO, 'model', '切换模型', user_id=user_ctx.user_id, model=target_id)
             
-    elif sub_cmd == "reload":
-        await _reply_ops_card(
-            event,
-            "🔄 重新加载模型配置",
-            summary="系统正在重新读取当前账号的模型配置。",
-            action="请等待结果返回。",
-        )
-        try:
-            user_ctx.reload_user_config()
-            model_mgr = user_ctx.get_model_manager()
-            model_mgr.load_models()
-            models = model_mgr.list_models()
-            enabled_count = sum(
-                1
-                for provider_models in models.values()
-                for model in provider_models
-                if model.get("enabled", True)
-            )
-            log_event(logging.INFO, 'model', '重新加载模型', user_id=user_ctx.user_id, enabled=enabled_count)
-            await _reply_ops_card(
-                event,
-                "✅ 模型配置已重新加载",
-                summary="模型配置刷新完成。",
-                fields=[("可用模型", enabled_count)],
-                action="如需切换，请执行 `model select <编号或ID>`。",
-            )
-        except Exception as e:
-            log_event(logging.ERROR, 'model', '重载模型配置失败', user_id=user_ctx.user_id, error=str(e))
-            await _reply_ops_card(
-                event,
-                "❌ 模型配置重载失败",
-                summary="本次重载没有完成。",
-                fields=[("错误", str(e)[:120])],
-                action="建议检查账号配置文件后再重试。",
-            )
     else:
         await _reply_ops_card(
             event,
             "❓ 未知模型命令",
             summary="当前子命令无法识别。",
-            fields=[("用法", "`model list`\n`model select <id>`\n`model reload`")],
+            fields=[("用法", "`model list`\n`model select <id>`")],
             action="建议先执行 `model list` 查看当前可用模型。",
         )
 
 
 async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
-    """处理 apikey 命令：show/set/add/del/test。"""
+    """处理 apikey 命令：show/set/add/del。"""
     rt = user_ctx.state.runtime
     sub_cmd = (args[0].lower() if args else "show")
     ai_cfg = user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {}
@@ -5592,7 +5394,7 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             "🔐 当前账号 AI key 列表",
             summary="已按脱敏方式展示，避免在聊天窗口泄露完整 key。",
             fields=[("Key", "\n".join(lines))],
-            action="可执行 `apikey set` / `apikey add` / `apikey del` / `apikey test`。",
+            action="可执行 `apikey set` / `apikey add` / `apikey del`。",
         )
         return
 
@@ -5647,7 +5449,7 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
                     ("文件", f"`{os.path.basename(config_path)}`"),
                     ("当前 key 数量", len(updated_keys)),
                 ],
-                action="如需确认可用性，建议继续执行 `apikey test`。",
+                action="如需核对当前状态，建议执行 `apikey show`。",
             )
         except Exception as e:
             log_event(logging.ERROR, 'apikey', '写入 key 失败', user_id=user_ctx.user_id, error=str(e))
@@ -5720,53 +5522,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             )
         return
 
-    if sub_cmd in ("test", "check"):
-        model_id = rt.get("current_model_id", "qwen3-coder-plus")
-        try:
-            result = await user_ctx.get_model_manager().validate_model(model_id)
-            if result.get("success"):
-                _clear_ai_key_issue(rt)
-                user_ctx.save_state()
-                await _reply_ops_card(
-                    event,
-                    "✅ 模型测试成功",
-                    summary="当前模型连通性正常，可继续使用。",
-                    fields=[
-                        ("模型", f"`{model_id}`"),
-                        ("延迟", f"{result.get('latency', '-')}ms"),
-                    ],
-                    action="如需切换，请执行 `model select <编号或ID>`。",
-                )
-            else:
-                err = str(result.get("error", "unknown"))
-                if _looks_like_ai_key_issue(err):
-                    _mark_ai_key_issue(rt, err)
-                    user_ctx.save_state()
-                await _reply_ops_card(
-                    event,
-                    "❌ 模型测试失败",
-                    summary="当前模型未通过可用性检测。",
-                    fields=[
-                        ("模型", f"`{model_id}`"),
-                        ("错误", err[:180]),
-                    ],
-                    action="建议先检查 key 或网络，再重新执行 `apikey test`。",
-                )
-        except Exception as e:
-            await _reply_ops_card(
-                event,
-                "❌ 模型测试失败",
-                summary="测试过程中发生异常。",
-                fields=[("错误", str(e)[:180])],
-                action="建议稍后重试；若持续失败，可检查配置或网络。",
-            )
-        return
-
     await _reply_ops_card(
         event,
         "❓ 未知 key 命令",
         summary="当前子命令无法识别。",
-        fields=[("用法", "`apikey show`\n`apikey set <key>`\n`apikey add <key>`\n`apikey del <序号>`\n`apikey test`")],
+        fields=[("用法", "`apikey show`\n`apikey set <key>`\n`apikey add <key>`\n`apikey del <序号>`")],
         action="建议先执行 `apikey show` 查看当前状态。",
     )
 
@@ -5806,7 +5566,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
     cmd = normalized_cmd.lower()
     
     safe_log_text = text[:50]
-    if cmd in {"apikey", "ak"}:
+    if cmd == "apikey":
         safe_log_text = f"{raw_cmd} ***"
     masked_text, was_masked = _mask_command_text(text)
     append_interaction_event(
@@ -5827,19 +5587,19 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         if cmd == "help":
             mes = _build_help_card()
             log_event(logging.INFO, 'user_cmd', '显示帮助', user_id=user_ctx.user_id)
-            message = await send_to_admin(client, mes, user_ctx, global_config)
+            message = await send_message_v2(
+                client,
+                "info",
+                mes,
+                user_ctx,
+                global_config,
+                parse_mode="html",
+            )
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             if message:
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 60))
             return
         
-        # open/off 兼容旧命令：分别等同 resume/pause。
-        # 为避免命令歧义，open/off 不再携带额外副作用（如自动发送 /ydx）。
-        if cmd == "open":
-            cmd = "resume"
-        elif cmd == "off":
-            cmd = "pause"
-
         if cmd == "xx":
             target_groups = []
             target_groups.extend(_iter_targets(user_ctx.config.groups.get("zq_group", [])))
@@ -6211,8 +5971,8 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             )
             return
 
-        # warn/wlc - 设置连输告警阈值 - 与master一致
-        if cmd in ("warn", "wlc"):
+        # wlc - 设置连输告警阈值 - 与master一致
+        if cmd == "wlc":
             if len(my) > 1:
                 try:
                     warning_count = int(my[1])
@@ -6231,14 +5991,14 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     mes = _build_ops_card(
                         "❌ 告警阈值设置失败",
                         summary="阈值必须是大于等于 1 的整数。",
-                        action="请执行 `warn <次数>` 或 `wlc <次数>`。",
+                        action="请执行 `wlc <次数>`。",
                     )
             else:
                 mes = _build_ops_card(
                     "📌 当前连输告警阈值",
                     summary="这是当前账号触发连输告警的阈值。",
                     fields=[("当前阈值", f"{rt.get('warning_lose_count', 3)} 次")],
-                    action="如需调整，请执行 `warn <次数>` 或 `wlc <次数>`。",
+                    action="如需调整，请执行 `wlc <次数>`。",
                 )
             message = await send_to_admin(client, mes, user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
@@ -6252,7 +6012,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             return
 
-        if cmd in ("apikey", "ak"):
+        if cmd == "apikey":
             await handle_apikey_command_multiuser(event, my[1:], user_ctx)
             # 防止 key 在命令消息中长期可见
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 3))

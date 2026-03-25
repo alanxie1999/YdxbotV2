@@ -12,6 +12,9 @@ import zq_multiuser as zm
 
 def _write_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.name == "config.json" and path.parent.parent.name == "users":
+        canonical = path.parent / f"{path.parent.name}_config.json"
+        canonical.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -111,10 +114,9 @@ def test_send_message_v2_records_outbound_interactions(tmp_path, monkeypatch):
     assert "发送 | iyuu | 通知 | lose_streak | 成功" in content
     assert "发送 | tg_bot | 通知 | lose_streak | 成功 | chat_id=chat" in content
     assert "\n测试告警\n" in content
-    assert "【账号：Route User】\n[P1] 连输告警" in content
-    assert tg_payload["text"].startswith("【账号：Route User】\n[P1] 连输告警")
-    assert "操作：" in tg_payload["text"]
-    assert iyuu_payload["desp"].startswith("【账号：Route User】\n[P1] 连输告警")
+    assert "【账号：Route User】\n测试告警" in content
+    assert tg_payload["text"].startswith("【账号：Route User】\n测试告警")
+    assert iyuu_payload["desp"].startswith("【账号：Route User】\n测试告警")
 
 
 def test_process_user_command_records_masked_apikey_command(tmp_path, monkeypatch):

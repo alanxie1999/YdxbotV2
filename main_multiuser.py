@@ -761,20 +761,6 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                         error=str(e),
                     )
 
-        if admin_chat:
-            pass
-            # try:
-            #     focus_msg = build_startup_focus_reminder(user_ctx)
-            #     await client.send_message(admin_chat, focus_msg)
-            # except Exception as e:
-            #     log_event(
-            #         logging.ERROR,
-            #         'start',
-            #         '启动重点设置提醒发送失败',
-            #         user_id=user_ctx.user_id,
-            #         error=str(e),
-            #     )
-        
         log_event(logging.INFO, 'start', '用户启动成功',
                   user_id=user_ctx.user_id, name=user_ctx.config.name, balance=balance)
         
