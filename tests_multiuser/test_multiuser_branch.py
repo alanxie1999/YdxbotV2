@@ -101,9 +101,9 @@ def test_format_dashboard_matches_v1120_status_style(tmp_path):
     text = zm.format_dashboard(ctx)
 
     assert "📍 当前概览" in text
-    assert "下一手预计下注：" in text
-    assert "🎯 **策略设定**" in text
-    assert "💰 **账户余额：" in text
+    assert "下一手下注：" in text
+    assert "🎯 策略设定" in text
+    assert "💰 账户余额：" in text
     assert "模式：" not in text
 
 
@@ -2644,11 +2644,11 @@ def test_format_dashboard_shows_software_version_and_preset_lines(tmp_path, monk
 
     msg = zm.format_dashboard(ctx)
     assert "📍 当前概览" in msg
-    assert "下一手预计下注：" in msg
+    assert "下一手下注：" in msg
     assert "菠菜余额：" in msg
-    assert "🔢 **软件版本：v1.0.10(abcd1234)**" in msg
-    assert "📋 **预设名称：yc10**" in msg
-    assert "🤖 **预设参数：1 11 2.8 2.3 2.2 2.05 10000**" in msg
+    assert "🔢 软件版本：v1.0.10(abcd1234)" in msg
+    assert "📋 预设名称：yc10" in msg
+    assert "🤖 预设参数：1 11 2.8 2.3 2.2 2.05 10000" in msg
 
 
 def test_st_command_triggers_auto_yc_report(tmp_path, monkeypatch):
@@ -3203,9 +3203,9 @@ def test_format_dashboard_prioritizes_runtime_over_detail_sections(tmp_path):
 
     dashboard = zm.format_dashboard(ctx)
 
-    assert dashboard.index("📍 当前概览") < dashboard.index("📊 **近期 40 次结果**（由近及远）")
-    assert dashboard.index("📊 **近期 40 次结果**（由近及远）") < dashboard.index("🎯 **策略设定**")
+    assert dashboard.index("📍 当前概览") < dashboard.index("📊 近期 40 次结果（由近及远）")
+    assert dashboard.index("📊 近期 40 次结果（由近及远）") < dashboard.index("🎯 策略设定")
     assert "模式：追投" not in dashboard
-    assert "下一手预计下注：" in dashboard
-    assert "账户余额：320.00 万" in dashboard
+    assert "下一手下注：" in dashboard
+    assert "💰 账户余额：320.00 万" in dashboard
     assert "预设参数：" in dashboard
