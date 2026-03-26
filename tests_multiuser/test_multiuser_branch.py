@@ -1022,11 +1022,11 @@ def test_send_message_v2_routes_and_account_prefix(tmp_path, monkeypatch):
         zm.send_message_v2(
             client,
             "lose_streak",
-            "⚠️ 3 连输告警 ⚠️\n\n当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万",
+            "⚠️ 3 连输告警 ⚠️\n\n当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：13.10 万\n💰 累计损失：20.75 万\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万",
             ctx,
             {},
             title="标题",
-            desp="⚠️ 3 连输告警 ⚠️\n\n当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：131,000\n💰 累计损失：207,500\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万",
+            desp="⚠️ 3 连输告警 ⚠️\n\n当前链路已进入高关注状态，请重点关注下一手与账户余额变化。\n🔢 时间：03月25日 第 5 轮第 24 次\n📋 预设名称：yc20\n😀 连续押注：3 次\n⚡ 押注方向：小\n💵 押注本金：13.10 万\n💰 累计损失：20.75 万\n💰 账户余额：1118.75 万\n💰 菠菜余额：1111.24 万",
         )
     )
 
@@ -1037,7 +1037,7 @@ def test_send_message_v2_routes_and_account_prefix(tmp_path, monkeypatch):
     tg_payload = next(item for item in requests_payloads if "api.telegram.org" in item["url"])
     assert iyuu_payload["data"]["desp"].startswith("【账号：路由用户】\n\n")
     assert tg_payload["json"]["text"].startswith("【账号：路由用户】\n\n")
-    assert "💰 累计损失：207,500" in tg_payload["json"]["text"]
+    assert "💰 累计损失：20.75 万" in tg_payload["json"]["text"]
 
 
 def test_send_message_v2_lose_end_priority_keeps_account_prefix(tmp_path, monkeypatch):
@@ -1077,11 +1077,11 @@ def test_send_message_v2_lose_end_priority_keeps_account_prefix(tmp_path, monkey
         zm.send_message_v2(
             client,
             "lose_end",
-            "✅ 3 连输已终止！ ✅\n\n本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万",
+            "✅ 3 连输已终止！ ✅\n\n本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：8.06 万\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万",
             ctx,
             {},
             title="标题",
-            desp="✅ 3 连输已终止！ ✅\n\n本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：80,590\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万",
+            desp="✅ 3 连输已终止！ ✅\n\n本轮回补已经结束，系统已回写收益与当前余额。\n🔢 时间：03月25日 第 5 轮第 22 次 至 第 25 次\n📋 预设名称：yc20\n😀 连续押注：4 次\n⚠️ 本局连输：3 次\n💰 本局盈利：8.06 万\n💰 账户余额：1147.55 万\n💰 菠菜资金剩余：1140.05 万",
         )
     )
 
@@ -1406,7 +1406,7 @@ def test_process_settle_lose_end_message_contains_balance_lines(tmp_path, monkey
     assert "📋 预设名称：yc10" in msg
     assert "😀 连续押注：4 次" in msg
     assert "⚠️ 本局连输：3 次" in msg
-    assert "💰 本局盈利：-5,010" in msg
+    assert "💰 本局盈利：-0.50 万" in msg
     assert "💰 账户余额：2463.49 万" in msg
     assert "💰 菠菜资金剩余：2456.84 万" in msg
 
@@ -1599,7 +1599,7 @@ def test_build_pending_bet_heal_notice_contains_reconciled_status():
     assert "修复条数：3" in notice
     assert "当前连续押注：2 次" in notice
     assert "当前连输：2 次" in notice
-    assert "下一手预计下注：477,000" in notice
+    assert "下一手预计下注：47.70 万" in notice
 
 
 def test_trim_bet_sequence_log_keeps_new_chain_after_res_bet_rollover():
@@ -1685,7 +1685,7 @@ def test_process_bet_on_sends_heal_notice_when_stale_pending_entries_are_fixed(t
 
     assert any("已修正历史异常挂单" in message for message in sent_messages)
     assert any("当前连续押注：2 次" in message for message in sent_messages)
-    assert any("下一手预计下注：477,000" in message for message in sent_messages)
+    assert any("下一手预计下注：47.70 万" in message for message in sent_messages)
     assert rt["stop_count"] == 1
     assert rt["bet_sequence_count"] == 2
     assert rt["lose_count"] == 2
@@ -2282,7 +2282,7 @@ def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, mon
     assert "⚠️ 3 连输告警" in msg
     assert "当前链路已进入高关注状态" in msg
     assert "连续押注：3 次" in msg
-    assert "累计损失：2,420,500" in msg
+    assert "累计损失：242.05 万" in msg
 
 
 def test_process_settle_writes_chain_diagnostic_logs(tmp_path, monkeypatch):
@@ -2669,8 +2669,8 @@ def test_process_user_command_balance_uses_ops_card(tmp_path, monkeypatch):
 
     assert sent_messages
     assert "账户余额查询成功" in sent_messages[-1]
-    assert "账户余额：1,234,000" in sent_messages[-1]
-    assert "菠菜资金：456,000" in sent_messages[-1]
+    assert "账户余额：123.40 万" in sent_messages[-1]
+    assert "菠菜资金：45.60 万" in sent_messages[-1]
 
 
 def test_process_user_command_users_uses_ops_card(tmp_path, monkeypatch):

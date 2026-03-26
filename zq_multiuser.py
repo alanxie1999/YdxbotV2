@@ -715,7 +715,7 @@ def build_pending_bet_heal_notice(healed_pending: Dict[str, Any], summary: Dict[
             ("修复记录", fixed_text),
             ("当前连续押注", f"{continuous_count} 次"),
             ("当前连输", f"{lose_count} 次"),
-            ("下一手预计下注", format_number(next_bet_amount)),
+            ("下一手预计下注", _format_money_message(next_bet_amount)),
         ],
         action="建议先执行 `status` 确认当前状态，无需手动重启。",
         note="已按真实已结算记录重新对齐状态。",
@@ -1410,6 +1410,10 @@ def _format_wan_value(value: Any, signed: bool = False) -> str:
     if signed:
         return f"{number:+.2f}"
     return f"{number:.2f}"
+
+
+def _format_money_message(value: Any, signed: bool = False) -> str:
+    return f"{_format_wan_value(value, signed=signed)} 万"
 
 
 def _format_total_profit_value(value: Any) -> str:
@@ -3286,7 +3290,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                             ("推断结果", inferred.get("result_text", "")),
                             ("当前连续押注", f"{inferred.get('sequence_after', 0)} 次"),
                             ("当前连输", f"{inferred.get('lose_count_after', 0)} 次"),
-                            ("下一手预计下注", format_number(inferred.get("next_bet_amount", 0))),
+                            ("下一手预计下注", _format_money_message(inferred.get("next_bet_amount", 0))),
                         ],
                         action="建议执行 `status` 复核当前链路；本局会继续尝试正常下注。",
                     ),
@@ -3699,11 +3703,11 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             client,
             user_ctx,
             global_config,
-            _build_ops_card(
-                "⏭️ 本局未执行下注",
-                summary="当前金额没有匹配到可点击的下注按钮组合。",
-                fields=[("目标金额", format_number(planned_bet_amount))],
-            ),
+                _build_ops_card(
+                    "⏭️ 本局未执行下注",
+                    summary="当前金额没有匹配到可点击的下注按钮组合。",
+                    fields=[("目标金额", _format_money_message(planned_bet_amount))],
+                ),
             ttl_seconds=120,
             attr_name="skip_reason_message",
             msg_type="skip_notice",
@@ -3741,7 +3745,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                     "⏰ 本轮下注响应超时",
                     summary="当前盘口按钮响应过慢，本次下注未完成，当前倍投链不会推进。",
                     fields=[
-                        ("目标金额", format_number(planned_bet_amount)),
+                        ("目标金额", _format_money_message(planned_bet_amount)),
                         ("按钮数量", len(combination)),
                     ],
                 ),
@@ -3757,7 +3761,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                 _build_ops_card(
                     "⏰ 本轮下注窗口已失效",
                     summary="当前盘口按钮已经不可用，系统已自动跳过本局，当前倍投链不会推进。",
-                    fields=[("目标金额", format_number(planned_bet_amount))],
+                    fields=[("目标金额", _format_money_message(planned_bet_amount))],
                 ),
                 ttl_seconds=120,
                 attr_name="bet_execute_error_message",
@@ -3772,7 +3776,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                     "❌ 押注执行失败",
                     summary="本次下注没有执行成功。",
                     fields=[
-                        ("目标金额", format_number(planned_bet_amount)),
+                        ("目标金额", _format_money_message(planned_bet_amount)),
                         ("错误", str(e)[:180] or "未知错误"),
                     ],
                 ),
@@ -4145,7 +4149,7 @@ def _build_pause_resume_hint(rt: dict) -> str:
     next_sequence = int(rt.get("bet_sequence_count", 0)) + 1
     next_amount = int(calculate_bet_amount(rt) or 0)
     if next_amount > 0:
-        return f"恢复后动作：继续第 {next_sequence} 手，预计下注 {format_number(next_amount)}"
+        return f"恢复后动作：继续第 {next_sequence} 手，预计下注 {_format_money_message(next_amount)}"
     return f"恢复后动作：继续第 {next_sequence} 手"
 
 
@@ -5330,7 +5334,7 @@ def generate_mobile_bet_report(
         fields=[
             ("😀 连续押注", f"{sequence_count} 次"),
             ("⚡ 押注方向", direction),
-            ("💵 押注本金", format_number(amount)),
+            ("💵 押注本金", _format_money_message(amount)),
             (f"📊 当前连{streak_side}", streak_len),
         ],
         action="本局无需额外操作，建议等待结果通知。",
@@ -5600,8 +5604,8 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                             ("📋 预设名称", rt.get('current_preset_name', 'none')),
                             ("😀 连续押注", f"{int(active_chain_summary.get('continuous_count', rt.get('bet_sequence_count', 0)))} 次"),
                             ("⚡ 押注方向", direction),
-                            ("💵 押注本金", format_number(bet_amount)),
-                            ("💰 累计损失", format_number(total_losses)),
+                            ("💵 押注本金", _format_money_message(bet_amount)),
+                            ("💰 累计损失", _format_money_message(total_losses)),
                             ("💰 账户余额", f"{rt.get('account_balance', 0) / 10000:.2f} 万"),
                             ("💰 菠菜余额", f"{rt.get('gambling_fund', 0) / 10000:.2f} 万"),
                         ],
@@ -5654,7 +5658,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
 
             user_ctx.save_state()
 
-            result_amount = format_number(int(bet_amount * 0.99) if win else bet_amount)
+            result_amount = _format_money_message(int(bet_amount * 0.99) if win else bet_amount)
             last_bet_id = settled_entry.get("bet_id", "") if isinstance(settled_entry, dict) else ""
             bet_id = format_bet_id(last_bet_id) if last_bet_id else f"{datetime.now().strftime('%m月%d日')}第 {rt.get('current_round', 1)} 轮第 {rt.get('current_bet_seq', 1)} 次"
             settle_sequence_count = int(recent_resolved_summary.get("continuous_count", rt.get("bet_sequence_count", 0)))
@@ -5665,7 +5669,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 fields=[
                     ("😀 连续押注", f"{settle_sequence_count} 次"),
                     ("⚡ 押注方向", direction),
-                    ("💵 押注本金", format_number(bet_amount)),
+                    ("💵 押注本金", _format_money_message(bet_amount)),
                     ("📉 输赢结果", f"{result_text} {result_amount}"),
                     ("🎲 开奖结果", result_type),
                     ("🤖 预测依据", rt.get('last_predict_info', 'N/A')),
@@ -5755,7 +5759,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                     ("📋 预设名称", rt.get('current_preset_name', 'none')),
                     ("😀 连续押注", f"{lose_end_payload.get('continuous_count', lose_count)} 次"),
                     ("⚠️ 本局连输", f"{lose_count} 次"),
-                    ("💰 本局盈利", format_number(lose_end_payload.get('total_profit', 0))),
+                    ("💰 本局盈利", _format_money_message(lose_end_payload.get('total_profit', 0))),
                     ("💰 账户余额", f"{lose_end_payload.get('account_balance', rt.get('account_balance', 0)) / 10000:.2f} 万"),
                     ("💰 菠菜资金剩余", f"{lose_end_payload.get('gambling_fund', rt.get('gambling_fund', 0)) / 10000:.2f} 万"),
                 ],
@@ -6394,7 +6398,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 mes = _build_ops_card(
                     "✅ 菠菜资金已重置",
                     summary="当前账号的菠菜资金已恢复为默认值。",
-                    fields=[("当前金额", f"{rt['gambling_fund'] / 10000:.2f} 万")],
+                    fields=[("当前金额", _format_money_message(rt['gambling_fund']))],
                     action="建议执行 `status` 确认资金与状态是否符合预期。",
                 )
             elif len(my) == 2:
@@ -6413,14 +6417,14 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                             mes = _build_ops_card(
                                 "⚠️ 菠菜资金已自动调整",
                                 summary="输入金额超过当前账户余额，系统已自动压到可用上限。",
-                                fields=[("当前金额", f"{new_fund / 10000:.2f} 万")],
+                                fields=[("当前金额", _format_money_message(new_fund))],
                                 action="建议执行 `balance` 或 `status` 再确认余额状态。",
                             )
                         else:
                             mes = _build_ops_card(
                                 "✅ 菠菜资金已更新",
                                 summary="新的菠菜资金已经写入当前账号状态。",
-                                fields=[("当前金额", f"{new_fund / 10000:.2f} 万")],
+                                fields=[("当前金额", _format_money_message(new_fund))],
                                 action="建议执行 `status` 确认后续下一手金额是否符合预期。",
                             )
                         rt["gambling_fund"] = new_fund
@@ -6829,8 +6833,8 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     "💰 账户余额查询成功",
                     summary="余额已刷新到当前最新值。",
                     fields=[
-                        ("账户余额", format_number(balance)),
-                        ("菠菜资金", format_number(rt.get("gambling_fund", 0))),
+                        ("账户余额", _format_money_message(balance)),
+                        ("菠菜资金", _format_money_message(rt.get("gambling_fund", 0))),
                     ],
                     action="如需继续操作，建议再执行 `status` 查看完整概览。",
                 )
@@ -7006,7 +7010,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 summary="以下是当前账号的核心运行信息。",
                 fields=[
                     ("账号", f"{user_ctx.config.name} (ID: {user_ctx.user_id})"),
-                    ("菠菜资金", format_number(rt.get('gambling_fund', 0))),
+                    ("菠菜资金", _format_money_message(rt.get('gambling_fund', 0))),
                     ("状态", get_bet_status_text(rt)),
                     ("预设", rt.get('current_preset_name', '无')),
                     ("模型", rt.get('current_model_id', 'default')),
@@ -7091,7 +7095,7 @@ async def check_bet_status(client, user_ctx: UserContext, global_config: dict):
         mes = (
             "✅ 资金条件已满足，恢复可下注状态\n"
             f"当前资金：{rt.get('gambling_fund', 0) / 10000:.2f} 万\n"
-            f"接续倍投金额：{format_number(next_bet_amount)}\n"
+            f"接续倍投金额：{_format_money_message(next_bet_amount)}\n"
             "说明：本提示仅表示“可下注”，实际下注仍以盘口事件触发为准"
         )
         await _send_transient_admin_notice(
