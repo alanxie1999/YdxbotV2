@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from html import escape as escape_html
 import requests
 import aiohttp
@@ -258,7 +259,7 @@ RISK_BASE_MAX_PAUSE_ROUNDS = 10
 
 # 基础风控预算：同一基础风控周期累计暂停不超过10局（深度风控不占用）
 RISK_PAUSE_TOTAL_CAP_ROUNDS = 10
-RISK_PAUSE_MODEL_TIMEOUT_SEC = 3.5
+RISK_PAUSE_MODEL_TIMEOUT_SEC = 5.0
 AI_KEY_WARNING_TEXT = "⚠️ 大模型AI key 失效/缺失，请更新 key！！！"
 
 # 高倍入场质量门控（目标：尽量减少进入第5手以后）
@@ -282,7 +283,7 @@ HIGH_PRESSURE_PATTERN_PAUSE_ROUNDS = 2
 HIGH_STEP_DOUBLE_CONFIRM_MIN_STEP = 7
 HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF = 70
 HIGH_STEP_DOUBLE_CONFIRM_PAUSE_ROUNDS = 2
-HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 4.0
+HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 5.0
 
 # 同手位防卡死：避免 SKIP/超时导致长期不落单
 STALL_GUARD_SKIP_MAX = 2
@@ -3186,9 +3187,37 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     predict_timeout_sec = timing_cfg["predict_timeout_sec"]
     click_interval_sec = timing_cfg["click_interval_sec"]
     click_timeout_sec = timing_cfg["click_timeout_sec"]
+    flow_started_at = time.monotonic()
+    prompt_wait_ms = 0
+    predict_ms = 0
+    click_ms = 0
+
+    def _emit_bet_timing(outcome: str, **extra: Any) -> None:
+        total_ms = int((time.monotonic() - flow_started_at) * 1000)
+        timing_payload = {
+            "timing_outcome": str(outcome or "").strip() or "unknown",
+            "timing_total_ms": total_ms,
+            "timing_prompt_wait_ms": int(prompt_wait_ms),
+            "timing_predict_ms": int(predict_ms),
+            "timing_click_ms": int(click_ms),
+            "timing_predict_budget_ms": int(predict_timeout_sec * 1000),
+            "timing_click_budget_ms": int(click_timeout_sec * 1000),
+        }
+        if extra:
+            timing_payload.update(extra)
+        log_event(
+            logging.INFO,
+            'bet_on',
+            '下注时序摘要',
+            user_id=user_ctx.user_id,
+            category='runtime',
+            **_build_runtime_chain_diag(rt, state, **timing_payload),
+        )
 
     if not getattr(event, "reply_markup", None) and prompt_wait_sec > 0:
+        prompt_wait_started_at = time.monotonic()
         await asyncio.sleep(prompt_wait_sec)
+        prompt_wait_ms = int((time.monotonic() - prompt_wait_started_at) * 1000)
 
     text = event.message.message
     history_before = list(state.history)
@@ -3460,6 +3489,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         return
 
     if not event.reply_markup:
+        _emit_bet_timing("no_markup")
         rt["bet"] = False
         user_ctx.save_state()
         await _send_transient_admin_notice(
@@ -3480,12 +3510,15 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     next_sequence = int(rt.get("bet_sequence_count", 0) or 0) + 1
     history_signature = "".join(str(x) for x in state.history[-12:])
 
+    predict_started_at = time.monotonic()
     try:
         prediction = await asyncio.wait_for(
             predict_next_bet_core(user_ctx, global_config),
             timeout=predict_timeout_sec,
         )
+        predict_ms = int((time.monotonic() - predict_started_at) * 1000)
     except asyncio.TimeoutError:
+        predict_ms = int((time.monotonic() - predict_started_at) * 1000)
         prediction = int(fallback_prediction(state.history))
         rt["last_predict_info"] = f"预测超时，改用统计兜底（{'大' if prediction == 1 else '小'}）"
         rt["last_predict_source"] = "timeout_fallback"
@@ -3586,6 +3619,11 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         elif int(skip_trigger.get("pause_rounds", 0) or 0) > 0:
             pause_rounds = max(1, int(skip_trigger.get("pause_rounds", 0) or 0))
             pause_reason = str(skip_trigger.get("pause_reason", "") or "连续观望暂停").strip()
+            _emit_bet_timing(
+                "skip_pause",
+                timing_sequence=int(next_sequence),
+                timing_predict_source=str(rt.get("last_predict_source", "")),
+            )
             _enter_pause(rt, pause_rounds, pause_reason)
             _clear_hand_stall_guard(rt)
             user_ctx.save_state()
@@ -3608,6 +3646,11 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             )
             return
         else:
+            _emit_bet_timing(
+                "skip",
+                timing_sequence=int(next_sequence),
+                timing_predict_source=str(rt.get("last_predict_source", "")),
+            )
             if _verbose_runtime_diag_enabled():
                 log_event(
                     logging.INFO,
@@ -3691,6 +3734,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         return
 
     try:
+        click_started_at = time.monotonic()
         for amount in combination:
             button_data = buttons.get(amount)
             if button_data is not None:
@@ -3699,7 +3743,15 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                     timeout=click_timeout_sec,
                 )
                 await asyncio.sleep(click_interval_sec)
+        click_ms = int((time.monotonic() - click_started_at) * 1000)
     except Exception as e:
+        click_ms = int((time.monotonic() - click_started_at) * 1000)
+        _emit_bet_timing(
+            "click_failed",
+            timing_sequence=int(next_sequence),
+            timing_predict_source=str(rt.get("last_predict_source", "")),
+            timing_error=str(e)[:120],
+        )
         if _is_invalid_callback_message_error(e):
             await send_to_admin(
                 client,
@@ -3762,6 +3814,14 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             predict_tag=str(rt.get("last_predict_tag", "")),
             predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
         ),
+    )
+    _emit_bet_timing(
+        "placed",
+        timing_sequence=int(rt.get("bet_sequence_count", 0) or 0),
+        timing_predict_source=str(rt.get("last_predict_source", "")),
+        timing_predict_tag=str(rt.get("last_predict_tag", "")),
+        timing_predict_confidence=int(rt.get("last_predict_confidence", 0) or 0),
+        timing_amount=int(rt.get("bet_amount", 0) or 0),
     )
 
     bet_report = generate_mobile_bet_report(
@@ -4022,10 +4082,10 @@ def _read_timing_config(global_config: dict) -> dict:
         return max(minimum, min(maximum, val))
 
     return {
-        "prompt_wait_sec": _to_float("prompt_wait_sec", 1.2, 0.0, 5.0),
-        "predict_timeout_sec": _to_float("predict_timeout_sec", 8.0, 1.0, 30.0),
+        "prompt_wait_sec": _to_float("prompt_wait_sec", 0.8, 0.0, 5.0),
+        "predict_timeout_sec": _to_float("predict_timeout_sec", 9.0, 1.0, 30.0),
         "click_interval_sec": _to_float("click_interval_sec", 0.45, 0.05, 2.0),
-        "click_timeout_sec": _to_float("click_timeout_sec", 6.0, 1.0, 20.0),
+        "click_timeout_sec": _to_float("click_timeout_sec", 3.5, 1.0, 20.0),
     }
 
 
