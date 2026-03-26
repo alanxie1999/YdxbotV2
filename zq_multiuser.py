@@ -3695,11 +3695,11 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     await _notify_ai_key_warning_if_needed(client, user_ctx, global_config)
 
-    rt["bet_amount"] = int(bet_amount)
+    planned_bet_amount = int(bet_amount)
     direction = "大" if prediction == 1 else "小"
     direction_en = "big" if prediction == 1 else "small"
     buttons = constants.BIG_BUTTON if prediction == 1 else constants.SMALL_BUTTON
-    combination = constants.find_combination(rt["bet_amount"], buttons)
+    combination = constants.find_combination(planned_bet_amount, buttons)
 
     if not combination:
         log_event(
@@ -3711,7 +3711,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             **_build_runtime_chain_diag(
                 rt,
                 state,
-                next_bet_amount=rt["bet_amount"],
+                next_bet_amount=planned_bet_amount,
                 button_side=direction_en,
             ),
         )
@@ -3724,8 +3724,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             _build_ops_card(
                 "⏭️ 本局未执行下注",
                 summary="当前金额没有匹配到可点击的下注按钮组合。",
-                fields=[("目标金额", format_number(rt["bet_amount"]))],
-                action="建议检查按钮映射配置，或等待下一次盘口。",
+                fields=[("目标金额", format_number(planned_bet_amount))],
             ),
             ttl_seconds=120,
             attr_name="skip_reason_message",
@@ -3733,6 +3732,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         )
         return
 
+    effective_click_timeout_sec = _resolve_click_timeout_sec(click_timeout_sec, len(combination))
     try:
         click_started_at = time.monotonic()
         for amount in combination:
@@ -3740,7 +3740,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             if button_data is not None:
                 await asyncio.wait_for(
                     _click_bet_button_with_recover(client, event, user_ctx, button_data),
-                    timeout=click_timeout_sec,
+                    timeout=effective_click_timeout_sec,
                 )
                 await asyncio.sleep(click_interval_sec)
         click_ms = int((time.monotonic() - click_started_at) * 1000)
@@ -3752,31 +3752,59 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             timing_predict_source=str(rt.get("last_predict_source", "")),
             timing_error=str(e)[:120],
         )
-        if _is_invalid_callback_message_error(e):
-            await send_to_admin(
+        rt["bet"] = False
+        user_ctx.save_state()
+        if isinstance(e, asyncio.TimeoutError):
+            await _send_transient_admin_notice(
                 client,
-                _build_ops_card(
-                    "⏰ 本轮下注窗口已失效",
-                    summary="当前盘口的按钮已经不可用，系统已自动跳过本局。",
-                    action="无需手动补单，建议等待下一次盘口并关注结果通知。",
-                ),
                 user_ctx,
                 global_config,
+                _build_ops_card(
+                    "⏰ 本轮下注响应超时",
+                    summary="当前盘口按钮响应过慢，本次下注未完成，当前倍投链不会推进。",
+                    fields=[
+                        ("目标金额", format_number(planned_bet_amount)),
+                        ("按钮数量", len(combination)),
+                    ],
+                ),
+                ttl_seconds=120,
+                attr_name="bet_execute_error_message",
+                msg_type="skip_notice",
+            )
+        elif _is_invalid_callback_message_error(e) or "下注窗口失效" in str(e):
+            await _send_transient_admin_notice(
+                client,
+                user_ctx,
+                global_config,
+                _build_ops_card(
+                    "⏰ 本轮下注窗口已失效",
+                    summary="当前盘口按钮已经不可用，系统已自动跳过本局，当前倍投链不会推进。",
+                    fields=[("目标金额", format_number(planned_bet_amount))],
+                ),
+                ttl_seconds=120,
+                attr_name="bet_execute_error_message",
+                msg_type="skip_notice",
             )
         else:
-            await send_to_admin(
+            await _send_transient_admin_notice(
                 client,
+                user_ctx,
+                global_config,
                 _build_ops_card(
                     "❌ 押注执行失败",
                     summary="本次下注没有执行成功。",
-                    fields=[("错误", str(e)[:180])],
-                    action="建议先执行 `status` 查看当前状态，再决定是否继续。",
+                    fields=[
+                        ("目标金额", format_number(planned_bet_amount)),
+                        ("错误", str(e)[:180] or "未知错误"),
+                    ],
                 ),
-                user_ctx,
-                global_config,
+                ttl_seconds=120,
+                attr_name="bet_execute_error_message",
+                msg_type="skip_notice",
             )
         return
 
+    rt["bet_amount"] = planned_bet_amount
     rt["bet"] = True
     rt["total"] = rt.get("total", 0) + 1
     rt["bet_sequence_count"] = rt.get("bet_sequence_count", 0) + 1
@@ -4087,6 +4115,20 @@ def _read_timing_config(global_config: dict) -> dict:
         "click_interval_sec": _to_float("click_interval_sec", 0.45, 0.05, 2.0),
         "click_timeout_sec": _to_float("click_timeout_sec", 3.5, 1.0, 20.0),
     }
+
+
+def _resolve_click_timeout_sec(base_timeout_sec: float, combination_len: int) -> float:
+    """高金额多按钮组合给予更宽松的单次点击超时，避免误判点击失败。"""
+    try:
+        combo_len = int(combination_len or 0)
+    except Exception:
+        combo_len = 0
+    timeout_sec = float(base_timeout_sec or 0)
+    if combo_len >= 10:
+        return max(timeout_sec, 7.0)
+    if combo_len >= 8:
+        return max(timeout_sec, 6.0)
+    return timeout_sec
 
 
 def calculate_bet_amount(rt: dict) -> int:

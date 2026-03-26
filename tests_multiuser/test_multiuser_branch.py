@@ -2095,6 +2095,114 @@ def test_process_bet_on_high_step_skip_pauses_instead_of_unlock(tmp_path, monkey
     assert any("高手位连续观望，已自动暂停" in message for message in sent_messages)
 
 
+def test_process_bet_on_click_timeout_does_not_advance_bet_amount(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "click_timeout_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "点击超时用户"},
+            "telegram": {"user_id": 5102},
+            "groups": {"admin_chat": 5102},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = False
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["lose_count"] = 5
+    rt["bet_sequence_count"] = 5
+    rt["bet_amount"] = 909000
+    rt["current_round"] = 5
+    rt["current_bet_seq"] = 15
+    ctx.state.history = [0, 1] * 20
+
+    sent = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        return 1
+
+    async def fake_click_recover(client, event, user_ctx, button_data):
+        raise asyncio.TimeoutError()
+
+    async def fake_transient_notice(client, user_ctx, global_cfg, message, ttl_seconds=120, attr_name="x", msg_type="info"):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=5102, id=len(sent))
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "_click_bet_button_with_recover", fake_click_recover)
+    monkeypatch.setattr(zm, "_send_transient_admin_notice", fake_transient_notice)
+
+    event = SimpleNamespace(
+        id=99010,
+        chat_id=5102,
+        reply_markup=SimpleNamespace(rows=[]),
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["bet"] is False
+    assert rt["bet_sequence_count"] == 5
+    assert rt["bet_amount"] == 909000
+    assert any("⏰ 本轮下注响应超时" in message for _, message in sent)
+    assert any("目标金额：" in message and "按钮数量：" in message for _, message in sent)
+
+
+def test_process_bet_on_stale_window_reports_window_expired(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "stale_window_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "窗口失效用户"},
+            "telegram": {"user_id": 5103},
+            "groups": {"admin_chat": 5103},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet"] = False
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["lose_count"] = 5
+    rt["bet_sequence_count"] = 5
+    rt["bet_amount"] = 909000
+    ctx.state.history = [0, 1] * 20
+
+    sent = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        return 1
+
+    async def fake_click_recover(client, event, user_ctx, button_data):
+        raise RuntimeError("下注窗口失效且未找到可用的最新下注消息")
+
+    async def fake_transient_notice(client, user_ctx, global_cfg, message, ttl_seconds=120, attr_name="x", msg_type="info"):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=5103, id=len(sent))
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "_click_bet_button_with_recover", fake_click_recover)
+    monkeypatch.setattr(zm, "_send_transient_admin_notice", fake_transient_notice)
+
+    event = SimpleNamespace(
+        id=99011,
+        chat_id=5103,
+        reply_markup=SimpleNamespace(rows=[]),
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["bet"] is False
+    assert rt["bet_amount"] == 909000
+    assert any("⏰ 本轮下注窗口已失效" in message for _, message in sent)
+
+
 def test_process_settle_warn_message_uses_real_settled_chain_count(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "5093"
     _write_json(
