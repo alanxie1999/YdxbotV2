@@ -2778,6 +2778,48 @@ def test_process_user_command_users_uses_ops_card(tmp_path, monkeypatch):
     assert "胜率：12/20" in sent_messages[-1]
 
 
+def test_process_user_command_yss_uses_plain_preset_list_layout(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "preset_list_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "预设列表用户"},
+            "telegram": {"user_id": 70158},
+            "groups": {"admin_chat": 70158},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.presets = {
+        "5k": ["1", "12", "3.0", "2.5", "2.2", "2.1", "5000"],
+        "10w": ["1", "8", "3.0", "2.5", "2.2", "2.1", "100000"],
+    }
+
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70158, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="yss", chat_id=70158, id=15)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert sent_messages
+    msg = sent_messages[-1]
+    assert msg.startswith("📚 当前预设列表\n\n")
+    assert "'5k '" in msg or "'5k':" in msg
+    assert "'10w':" in msg
+    assert "以下是当前账号可用的全部预设" not in msg
+    assert "删除可执行" not in msg
+
+
 def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "help_user"
     _write_json(

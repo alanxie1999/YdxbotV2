@@ -6932,12 +6932,8 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 # 查看所有预设
                 if len(presets) > 0:
                     max_key_length = max(len(str(k)) for k in presets.keys())
-                    mes = _build_ops_card(
-                        "📚 当前预设列表",
-                        summary="以下是当前账号可用的全部预设。",
-                        fields=[("预设", "\n".join(f"'{k.ljust(max_key_length)}': {v}" for k, v in presets.items()))],
-                        action="删除可执行 `yss dl [名]`，启动可执行 `st [名]`。",
-                    )
+                    preset_lines = "\n".join(f"'{k.ljust(max_key_length)}': {v}" for k, v in presets.items())
+                    mes = f"📚 当前预设列表\n\n{preset_lines}"
                     log_event(logging.INFO, 'user_cmd', '查看预设', user_id=user_ctx.user_id)
                 else:
                     mes = _build_ops_card(
