@@ -702,6 +702,7 @@ class UserContext:
         
         # 内置预设作为权威基线（代码更新后应覆盖同名旧值）
         self.presets = dict(constants.PRESETS)
+        current_preset_reset = False
         
         if os.path.exists(presets_path):
             try:
@@ -712,7 +713,11 @@ class UserContext:
 
                     overridden_builtins = 0
                     custom_count = 0
+                    dropped_legacy = 0
                     for key, value in user_presets.items():
+                        if key in getattr(constants, "LEGACY_PRESET_NAMES", set()):
+                            dropped_legacy += 1
+                            continue
                         if key in constants.PRESETS:
                             overridden_builtins += 1
                             continue
@@ -723,15 +728,22 @@ class UserContext:
                     logging.DEBUG,
                     'load_presets',
                     '加载用户预设成功',
-                    f'user_id={self.user_id}, custom={custom_count}, builtin_refreshed={overridden_builtins}'
+                    f'user_id={self.user_id}, custom={custom_count}, builtin_refreshed={overridden_builtins}, legacy_removed={dropped_legacy}'
                 )
             except Exception as e:
                 log_event(logging.ERROR, 'load_presets', '加载用户预设失败', f'user_id={self.user_id}, error={str(e)}')
         else:
             log_event(logging.INFO, 'load_presets', '初始化默认预设', f'user_id={self.user_id}')
+
+        current_preset_name = str(self.state.runtime.get("current_preset_name", "") or "").strip()
+        if current_preset_name and current_preset_name not in self.presets:
+            self.state.runtime["current_preset_name"] = ""
+            current_preset_reset = True
         
         # 保存合并后的预设到文件（确保文件是最新的）
         self.save_presets()
+        if current_preset_reset:
+            self.save_state()
     
     def save_state(self):
         with self._lock:

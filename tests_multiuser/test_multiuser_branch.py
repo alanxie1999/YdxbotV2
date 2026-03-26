@@ -583,11 +583,13 @@ def test_user_context_refreshes_builtin_presets_but_keeps_custom(tmp_path):
     )
 
     ctx = UserContext(str(user_dir))
-    assert ctx.presets["yc05"] == constants.PRESETS["yc05"]
+    assert "yc05" not in ctx.presets
+    assert ctx.presets["5k"] == constants.PRESETS["5k"]
     assert ctx.presets["my_custom"] == ["1", "6", "2.2", "2.1", "2.0", "2.0", "800"]
 
     saved_presets = json.loads((user_dir / "presets.json").read_text(encoding="utf-8"))
-    assert saved_presets["yc05"] == constants.PRESETS["yc05"]
+    assert "yc05" not in saved_presets
+    assert saved_presets["5k"] == constants.PRESETS["5k"]
     assert saved_presets["my_custom"] == ["1", "6", "2.2", "2.1", "2.0", "2.0", "800"]
 
 
@@ -3005,11 +3007,11 @@ def test_st_command_triggers_auto_yc_report(tmp_path, monkeypatch):
     monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
     monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
 
-    cmd_event = SimpleNamespace(raw_text="st yc05", chat_id=5008, id=21)
+    cmd_event = SimpleNamespace(raw_text="st 5k", chat_id=5008, id=21)
     asyncio.run(zm.process_user_command(SimpleNamespace(), cmd_event, ctx, {}))
 
-    assert ctx.state.runtime.get("current_preset_name") == "yc05"
-    assert any("预设启动成功: yc05" in msg for msg in sent_messages)
+    assert ctx.state.runtime.get("current_preset_name") == "5k"
+    assert any("预设启动成功: 5k" in msg for msg in sent_messages)
     assert any("🔮 已根据当前预设自动测算" in msg for msg in sent_messages)
     assert any("🎯 策略参数" in msg for msg in sent_messages)
     assert any("连数|倍率|下注| 盈利 |所需本金" in msg for msg in sent_messages)

@@ -1798,7 +1798,7 @@ def _build_help_card() -> str:
         "• <code>/yss</code> 查看全部预设\n"
         "• <code>/yss dl [名]</code> 删除预设\n"
         "• <code>/ys [名称] [连续] [止损] [一输] [二输] [三输] [四输] [首注]</code> 新增或覆盖预设\n"
-        "<i>例：/ys yc20 1 10 2.8 2.3 2.2 2.05 20000</i>\n"
+        "<i>例：/ys 2w 1 10 3.0 2.5 2.2 2.1 20000</i>\n"
         "• <code>/yc [名]</code> 或 <code>/yc [参数...]</code> 按预设或临时参数测算\n\n"
         "<b>🛠 系统与数据（进阶）</b>\n"
         "• <code>/res tj</code> 重置收益/胜率统计\n"
@@ -7134,7 +7134,7 @@ def _parse_yc_params(args, presets):
             "用法:\n"
             "`yc [预设名]` - 测算已有预设\n"
             "`yc [参数...]` - 自定义参数测算\n\n"
-            "例: `yc yc05` 或 `yc 1 13 3 2.1 2.1 2.05 500`"
+            "例: `yc 5k` 或 `yc 1 12 3.0 2.5 2.2 2.1 5000`"
         )
 
     if args[0] in presets:
@@ -7333,7 +7333,7 @@ async def yc_command_handler_multiuser(
                 "❌ 测算命令无法执行",
                 summary="当前测算参数不完整或格式不正确。",
                 note=error_msg,
-                action="请执行 `yc [预设名]` 或 `yc [参数...]`，例如 `yc yc05`。",
+                action="请执行 `yc [预设名]` 或 `yc [参数...]`，例如 `yc 5k`。",
             ),
             user_ctx,
             global_config,
