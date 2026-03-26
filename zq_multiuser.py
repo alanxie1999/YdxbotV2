@@ -1657,6 +1657,7 @@ MESSAGE_ROUTING_TABLE = {
     "model_failure": {"channels": ["admin", "priority"], "priority": True},
     "model_pause": {"channels": ["admin", "priority"], "priority": True},
     "model_resume": {"channels": ["admin", "priority"], "priority": True},
+    "startup_ready": {"channels": ["admin", "priority"], "priority": True},
     "risk_pause": {"channels": ["admin"], "priority": False},
     "risk_summary": {"channels": ["admin", "priority"], "priority": True},
     "pause": {"channels": ["admin"], "priority": False},
@@ -1693,6 +1694,7 @@ PRIORITY_FULL_MESSAGE_TYPES = {
     "model_failure",
     "model_pause",
     "model_resume",
+    "startup_ready",
     "risk_summary",
     "error",
 }

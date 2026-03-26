@@ -647,6 +647,72 @@ def test_main_log_event_includes_account_prefix(monkeypatch):
     assert captured["extra"]["category"] in {"runtime", "business"}
 
 
+def test_start_user_sends_startup_ready_notice(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "startup_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "启动通知用户"},
+            "telegram": {
+                "user_id": 8802,
+                "api_id": 123,
+                "api_hash": "hash",
+                "session_name": "startup_user",
+            },
+            "groups": {"zq_group": [1], "zq_bot": [2]},
+            "notification": {
+                "admin_chat": 8802,
+                "iyuu": {"enable": False},
+                "tg_bot": {"enable": True, "bot_token": "token", "chat_id": "chat"},
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+
+    sent = []
+
+    class DummyClient:
+        async def connect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def send_message(self, target, message, parse_mode=None):
+            return SimpleNamespace(chat_id=target, id=1)
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", title=None, desp=None):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=8802, id=len(sent))
+
+    async def fake_create_client(user_ctx, global_cfg):
+        return DummyClient()
+
+    async def fake_fetch_account_balance(user_ctx):
+        return 12_340_000
+
+    monkeypatch.setattr(mm, "_acquire_session_lock", lambda _ctx: True)
+    monkeypatch.setattr(mm, "create_client", fake_create_client)
+    monkeypatch.setattr(mm, "register_handlers", lambda client, user_ctx, global_cfg: None)
+    monkeypatch.setattr(mm, "fetch_account_balance", fake_fetch_account_balance)
+    monkeypatch.setattr(mm, "register_main_user_log_identity", lambda _ctx: "startup-user")
+    monkeypatch.setattr(mm, "_resolve_admin_chat", lambda _ctx: 8802)
+    monkeypatch.setattr(zm, "register_user_log_identity", lambda _ctx: "startup-user")
+    monkeypatch.setattr(zm, "heal_stale_pending_bets", lambda _ctx: {"count": 0, "items": []})
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+    monkeypatch.setattr(zm, "get_software_version_text", lambda: "v1.2.3(test)")
+
+    client = asyncio.run(mm.start_user(ctx, {}))
+
+    assert client is not None
+    assert sent
+    assert sent[-1][0] == "startup_ready"
+    assert "✅ 脚本启动成功" in sent[-1][1]
+    assert "版本：v1.2.3(test)" in sent[-1][1]
+    assert "账户余额：1234.00 万" in sent[-1][1]
+    assert "菠菜资金：2500.00 万" in sent[-1][1]
+
+
 def test_user_isolation_between_two_contexts(tmp_path):
     users_dir = tmp_path / "users"
     config_dir = tmp_path / "config"

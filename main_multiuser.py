@@ -725,7 +725,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
         )
 
         # 启动恢复时只保留挂单自愈。
-        from zq_multiuser import heal_stale_pending_bets
+        from zq_multiuser import heal_stale_pending_bets, send_message_v2, _build_ops_card, get_software_version_text
         heal_result = heal_stale_pending_bets(user_ctx)
 
         user_ctx.save_state()
@@ -763,6 +763,32 @@ async def start_user(user_ctx: UserContext, global_config: dict):
 
         log_event(logging.INFO, 'start', '用户启动成功',
                   user_id=user_ctx.user_id, name=user_ctx.config.name, balance=balance)
+
+        startup_msg = _build_ops_card(
+            "✅ 脚本启动成功",
+            summary="当前账号已完成启动并开始监听。",
+            fields=[
+                ("版本", get_software_version_text()),
+                ("账户余额", f"{max(0, int(balance or 0)) / 10000:.2f} 万"),
+                ("菠菜资金", f"{max(0, int(gambling_fund or 0)) / 10000:.2f} 万"),
+            ],
+        )
+        try:
+            await send_message_v2(
+                client,
+                "startup_ready",
+                startup_msg,
+                user_ctx,
+                global_config,
+            )
+        except Exception as e:
+            log_event(
+                logging.ERROR,
+                'start',
+                '启动成功通知发送失败',
+                user_id=user_ctx.user_id,
+                error=str(e),
+            )
         
         return client
         
