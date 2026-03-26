@@ -68,6 +68,15 @@ def test_user_context_prefers_user_dir_slug_for_logs(tmp_path):
     assert mm.register_main_user_log_identity(ctx) == "shuji"
 
 
+def test_read_timing_config_defaults_match_v120():
+    timing = zm._read_timing_config({})
+
+    assert timing["prompt_wait_sec"] == 1.2
+    assert timing["predict_timeout_sec"] == 8.0
+    assert timing["click_interval_sec"] == 0.45
+    assert timing["click_timeout_sec"] == 6.0
+
+
 def test_format_dashboard_matches_status_html_layout(tmp_path):
     user_dir = tmp_path / "users" / "status_style_user"
     _write_json(

@@ -13,6 +13,14 @@
         "api_url": "https://zhuque.in/api/user/getInfo?"
     },
 
+    # 押注时序配置（默认恢复到 v1.2.0 口径）
+    "betting": {
+        "prompt_wait_sec": 1.2,
+        "predict_timeout_sec": 8.0,
+        "click_interval_sec": 0.45,
+        "click_timeout_sec": 6.0
+    },
+
     # 更新配置（私有仓库才需要）
     "update": {
         "github_token": ""

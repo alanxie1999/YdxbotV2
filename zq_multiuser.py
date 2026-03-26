@@ -4110,10 +4110,10 @@ def _read_timing_config(global_config: dict) -> dict:
         return max(minimum, min(maximum, val))
 
     return {
-        "prompt_wait_sec": _to_float("prompt_wait_sec", 0.8, 0.0, 5.0),
-        "predict_timeout_sec": _to_float("predict_timeout_sec", 9.0, 1.0, 30.0),
+        "prompt_wait_sec": _to_float("prompt_wait_sec", 1.2, 0.0, 5.0),
+        "predict_timeout_sec": _to_float("predict_timeout_sec", 8.0, 1.0, 30.0),
         "click_interval_sec": _to_float("click_interval_sec", 0.45, 0.05, 2.0),
-        "click_timeout_sec": _to_float("click_timeout_sec", 3.5, 1.0, 20.0),
+        "click_timeout_sec": _to_float("click_timeout_sec", 6.0, 1.0, 20.0),
     }
 
 
