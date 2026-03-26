@@ -345,25 +345,6 @@ def format_number(num):
     return f"{int(num):,}"
 
 
-def _sync_fund_from_account_when_insufficient(rt: Dict[str, Any], required_amount: int = 0) -> bool:
-    """
-    仅在“资金不足”场景触发的修正：
-    若当前菠菜资金不足，且账户余额更高，则把菠菜资金同步为账户余额。
-    """
-    try:
-        fund = int(rt.get("gambling_fund", 0) or 0)
-        balance = int(rt.get("account_balance", 0) or 0)
-        need = max(0, int(required_amount or 0))
-    except (TypeError, ValueError):
-        return False
-
-    threshold = max(1, need)
-    if fund < threshold and balance > fund:
-        rt["gambling_fund"] = balance
-        return True
-    return False
-
-
 def heal_stale_pending_bets(user_ctx: UserContext) -> Dict[str, Any]:
     """
     启动时自愈历史挂单：
@@ -3461,28 +3442,25 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     rt["limit_stop_notified"] = False
 
     if not is_fund_available(user_ctx, bet_amount):
-        if _sync_fund_from_account_when_insufficient(rt, bet_amount):
-            user_ctx.save_state()
-        if not is_fund_available(user_ctx, bet_amount):
-            if not rt.get("fund_pause_notified", False):
-                display_fund = max(0, rt.get("gambling_fund", 0))
-                mes = _build_fund_pause_message(display_fund)
-                await send_message_v2(
-                    client,
-                    "fund_pause",
-                    mes,
-                    user_ctx,
-                    global_config,
-                    title=f"菠菜机器人 {user_ctx.config.name} 资金暂停",
-                    desp=mes,
-                )
-                rt["fund_pause_notified"] = True
-            rt["bet"] = False
-            rt["bet_on"] = False
-            rt["mode_stop"] = True
-            _clear_lose_recovery_tracking(rt)
-            user_ctx.save_state()
-            return
+        if not rt.get("fund_pause_notified", False):
+            display_fund = max(0, rt.get("gambling_fund", 0))
+            mes = _build_fund_pause_message(display_fund)
+            await send_message_v2(
+                client,
+                "fund_pause",
+                mes,
+                user_ctx,
+                global_config,
+                title=f"菠菜机器人 {user_ctx.config.name} 资金暂停",
+                desp=mes,
+            )
+            rt["fund_pause_notified"] = True
+        rt["bet"] = False
+        rt["bet_on"] = False
+        rt["mode_stop"] = True
+        _clear_lose_recovery_tracking(rt)
+        user_ctx.save_state()
+        return
     rt["fund_pause_notified"] = False
 
     if not (rt.get("bet_on", False) or rt.get("mode_stop", True)):
@@ -5491,27 +5469,22 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 rt["fund_pause_notified"] = False
                 return
             if not is_fund_available(user_ctx, next_bet_amount):
-                if _sync_fund_from_account_when_insufficient(rt, next_bet_amount):
-                    user_ctx.save_state()
-                if not is_fund_available(user_ctx, next_bet_amount):
-                    if not rt.get("fund_pause_notified", False):
-                        display_fund = max(0, rt.get("gambling_fund", 0))
-                        mes = _build_fund_pause_message(display_fund)
-                        await send_message_v2(
-                            client,
-                            "fund_pause",
-                            mes,
-                            user_ctx,
-                            global_config,
-                            title=f"菠菜机器人 {user_ctx.config.name} 资金暂停",
-                            desp=mes,
-                        )
-                        rt["fund_pause_notified"] = True
-                    rt["bet"] = False
-                    rt["bet_on"] = False
-                    rt["mode_stop"] = True
-                else:
-                    rt["fund_pause_notified"] = False
+                if not rt.get("fund_pause_notified", False):
+                    display_fund = max(0, rt.get("gambling_fund", 0))
+                    mes = _build_fund_pause_message(display_fund)
+                    await send_message_v2(
+                        client,
+                        "fund_pause",
+                        mes,
+                        user_ctx,
+                        global_config,
+                        title=f"菠菜机器人 {user_ctx.config.name} 资金暂停",
+                        desp=mes,
+                    )
+                    rt["fund_pause_notified"] = True
+                rt["bet"] = False
+                rt["bet_on"] = False
+                rt["mode_stop"] = True
             else:
                 rt["fund_pause_notified"] = False
 
@@ -5653,8 +5626,9 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                 start_seq = lose_start_info.get("seq", "?")
                 end_round = settle_round
                 end_seq = settle_seq
-                total_profit = rt.get("gambling_fund", 0) - lose_start_info.get("fund", rt.get("gambling_fund", 0))
                 total_loss = int(recent_resolved_summary.get("total_losses", 0))
+                resolved_chain = recent_resolved_summary.get("chain", []) if isinstance(recent_resolved_summary.get("chain"), list) else []
+                total_profit = sum(int(item.get("profit", 0) or 0) for item in resolved_chain if isinstance(item, dict))
                 current_balance = int(rt.get("account_balance", 0) or 0)
                 current_fund = int(rt.get("gambling_fund", 0) or 0)
                 if int(old_lose_count) >= warning_lose_count and _is_valid_lose_range(start_round, start_seq, end_round, end_seq):
@@ -7129,43 +7103,6 @@ async def check_bet_status(client, user_ctx: UserContext, global_config: dict):
             attr_name="status_transition_message",
         )
     elif not is_fund_available(user_ctx, next_bet_amount):
-        if _sync_fund_from_account_when_insufficient(rt, next_bet_amount):
-            log_event(
-                logging.INFO,
-                'status',
-                '检查状态时资金不足触发资金同步',
-                user_id=user_ctx.user_id,
-                data=(
-                    f"need={next_bet_amount}, fund={rt.get('gambling_fund', 0)}, "
-                    f"account={rt.get('account_balance', 0)}"
-                ),
-            )
-            user_ctx.save_state()
-
-        if is_fund_available(user_ctx, next_bet_amount):
-            await _clear_pause_countdown_notice(client, user_ctx)
-            rt["bet"] = False
-            rt["bet_on"] = True
-            rt["mode_stop"] = True
-            rt["pause_count"] = 0
-            rt["fund_pause_notified"] = False
-            user_ctx.save_state()
-            mes = (
-                "✅ 资金同步后已恢复可下注状态\n"
-                f"当前资金：{rt.get('gambling_fund', 0) / 10000:.2f} 万\n"
-                f"接续倍投金额：{format_number(next_bet_amount)}\n"
-                "说明：本提示仅表示“可下注”，实际下注仍以盘口事件触发为准"
-            )
-            await _send_transient_admin_notice(
-                client,
-                user_ctx,
-                global_config,
-                mes,
-                ttl_seconds=120,
-                attr_name="status_transition_message",
-            )
-            return
-
         rt["bet_on"] = False
         rt["mode_stop"] = True
         _clear_lose_recovery_tracking(rt)
