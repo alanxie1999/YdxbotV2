@@ -13,7 +13,7 @@
         "api_url": "https://zhuque.in/api/user/getInfo?"
     },
 
-    # 押注时序配置（默认恢复到 v1.2.0 口径）
+    # 押注时序配置
     "betting": {
         "prompt_wait_sec": 1.2,
         "predict_timeout_sec": 8.0,
