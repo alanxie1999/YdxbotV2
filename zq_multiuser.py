@@ -5320,8 +5320,13 @@ def count_lose_streaks(bet_sequence_log):
     current_streak = 0
     
     for entry in bet_sequence_log:
-        profit = entry.get("profit", 0)
-        if profit < 0:
+        if not isinstance(entry, dict):
+            continue
+        result = entry.get("result")
+        if result not in {"赢", "输"}:
+            continue
+        profit = int(entry.get("profit", 0) or 0)
+        if result == "输" and profit < 0:
             current_streak += 1
         else:
             if current_streak > 0:
@@ -5332,6 +5337,72 @@ def count_lose_streaks(bet_sequence_log):
         lose_streaks[current_streak] = lose_streaks.get(current_streak, 0) + 1
     
     return lose_streaks
+
+
+def _get_resolved_strategy_bet_logs(state: UserState) -> List[Dict[str, Any]]:
+    logs = _get_strategy_bet_sequence_log(state)
+    resolved: List[Dict[str, Any]] = []
+    for entry in logs:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("result") not in {"赢", "输"}:
+            continue
+        resolved.append(entry)
+    return resolved
+
+
+def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -> str:
+    windows = windows or [1000, 500, 200, 100]
+    history = state.history if isinstance(state.history, list) else []
+    resolved_logs = _get_resolved_strategy_bet_logs(state)
+
+    labels: List[int] = []
+    stats = {"连大": [], "连小": [], "连输": []}
+    all_ns = set()
+
+    for window in windows:
+        actual = min(int(window), len(history))
+        if actual <= 0:
+            continue
+        if actual in labels:
+            continue
+        labels.append(actual)
+
+        history_window = history[-actual:]
+        result_counts = count_consecutive(history_window)
+        lose_streaks = count_lose_streaks(resolved_logs[-actual:])
+        stats["连大"].append(result_counts["大"])
+        stats["连小"].append(result_counts["小"])
+        stats["连输"].append(lose_streaks)
+        all_ns.update(result_counts["大"].keys())
+        all_ns.update(result_counts["小"].keys())
+        all_ns.update(lose_streaks.keys())
+
+    label_width = max(3, max(len(str(label)) for label in labels)) if labels else 3
+    header = "类别 |" + "".join(f" {str(label).rjust(label_width)} |" for label in labels)
+    divider = "-" * len(header)
+
+    lines = ["最近局数“连大、连小、连输”统计", ""]
+    for category in ["连大", "连小", "连输"]:
+        lines.append(category)
+        lines.append("=" * len(header))
+        lines.append(header)
+        lines.append(divider)
+        for n in sorted(all_ns, reverse=True):
+            if any(n in stats[category][i] for i in range(len(labels))):
+                row = f" {str(n).center(2)}  |"
+                for i in range(len(labels)):
+                    count = stats[category][i].get(n, 0)
+                    value = str(count) if count > 0 else "-"
+                    row += f" {value.center(label_width)} |"
+                lines.append(row)
+        lines.append("")
+    pre_block = escape_html("\n".join(lines).rstrip())
+    return (
+        "📊 统计概览\n\n"
+        "说明：仅统计当前策略链中已结算记录；未结算和异常挂单不计入。\n\n"
+        f"<pre>{pre_block}</pre>"
+    )
 
 
 def _clear_lose_recovery_tracking(rt: dict) -> None:
@@ -5813,40 +5884,15 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
             and current_total % AUTO_STATS_INTERVAL_ROUNDS == 0
             and current_total != last_stats_total
         ):
-            windows = [1000, 500, 200, 100]
-            stats = {"连大": [], "连小": [], "连输": []}
-            all_ns = set()
-
-            for window in windows:
-                history_window = state.history[-window:]
-                result_counts = count_consecutive(history_window)
-                bet_sequence_log = state.bet_sequence_log[-window:]
-                lose_streaks = count_lose_streaks(bet_sequence_log)
-                stats["连大"].append(result_counts["大"])
-                stats["连小"].append(result_counts["小"])
-                stats["连输"].append(lose_streaks)
-                all_ns.update(result_counts["大"].keys())
-                all_ns.update(result_counts["小"].keys())
-                all_ns.update(lose_streaks.keys())
-
-            mes_lines = ["```", "最近局数“连大、连小、连输”统计", ""]
-            for category in ["连大", "连小", "连输"]:
-                mes_lines.append(category)
-                mes_lines.append("================================")
-                mes_lines.append("类别 | 1000|  500  |200 | 100|")
-                mes_lines.append("--------------------------------")
-                for n in sorted(all_ns, reverse=True):
-                    if any(n in stats[category][i] for i in range(len(windows))):
-                        row = f" {str(n).center(2)}  |"
-                        for i in range(len(windows)):
-                            count = stats[category][i].get(n, 0)
-                            value = str(count) if count > 0 else "-"
-                            row += f" {value.center(3)} |"
-                        mes_lines.append(row)
-                mes_lines.append("")
-            mes_lines.append("```")
-            mes = "\n".join(mes_lines)
-            stats_message = await send_to_admin(client, mes, user_ctx, global_config)
+            mes = _build_stats_report(state)
+            stats_message = await send_message_v2(
+                client,
+                "info",
+                mes,
+                user_ctx,
+                global_config,
+                parse_mode="html",
+            )
             user_ctx.stats_message = stats_message
             rt["stats_last_report_total"] = current_total
             if stats_message:
@@ -6441,45 +6487,18 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                     global_config,
                 )
                 return
-            
-            windows = [1000, 500, 200, 100]
-            stats = {"连大": [], "连小": [], "连输": []}
-            all_ns = set()
-            
-            for window in windows:
-                history_window = state.history[-window:]
-                result_counts = count_consecutive(history_window)
-                bet_sequence_log = state.bet_sequence_log[-window:]
-                lose_streaks = count_lose_streaks(bet_sequence_log)
-                
-                stats["连大"].append(result_counts["大"])
-                stats["连小"].append(result_counts["小"])
-                stats["连输"].append(lose_streaks)
-                
-                all_ns.update(result_counts["大"].keys())
-                all_ns.update(result_counts["小"].keys())
-                all_ns.update(lose_streaks.keys())
-            
-            mes = "```\n最近局数“连大、连小、连输”统计\n\n"
-            for category in ["连大", "连小", "连输"]:
-                mes += f"{category}\n"
-                mes += "================================\n"
-                mes += "类别 | 1000|  500  |200 | 100|\n"
-                mes += "--------------------------------\n"
-                sorted_ns = sorted(all_ns, reverse=True)
-                for n in sorted_ns:
-                    if any(n in stats[category][i] for i in range(len(windows))):
-                        mes += f" {str(n).center(2)}  |"
-                        for i in range(len(windows)):
-                            count = stats[category][i].get(n, 0)
-                            value = str(count) if count > 0 else "-"
-                            mes += f" {value.center(3)} |"
-                        mes += "\n"
-                mes += "\n"
-            mes += "```"
+
+            mes = _build_stats_report(state)
             
             log_event(logging.INFO, 'user_cmd', '查看统计', user_id=user_ctx.user_id)
-            message = await send_to_admin(client, mes, user_ctx, global_config)
+            message = await send_message_v2(
+                client,
+                "info",
+                mes,
+                user_ctx,
+                global_config,
+                parse_mode="html",
+            )
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             if message:
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 30))

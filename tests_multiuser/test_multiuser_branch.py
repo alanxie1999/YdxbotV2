@@ -2971,6 +2971,87 @@ def test_process_user_command_yss_uses_plain_preset_list_layout(tmp_path, monkey
     assert "删除可执行" not in msg
 
 
+def test_process_user_command_stats_uses_html_preformatted_report(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "stats_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "统计用户"},
+            "telegram": {"user_id": 70159},
+            "groups": {"admin_chat": 70159},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.state.history = [1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0]
+    ctx.state.bet_sequence_log = [
+        {"profit": -1000, "result": "输"},
+        {"profit": -2000, "result": "输"},
+        {"profit": None, "result": None},
+        {"profit": 990, "result": "赢"},
+        {"profit": -3000, "result": "输"},
+    ]
+
+    sent = []
+
+    async def fake_send_message_v2(client, msg_type, message, user_ctx, global_cfg, parse_mode="markdown", *args, **kwargs):
+        sent.append((msg_type, message, parse_mode))
+        return SimpleNamespace(chat_id=70159, id=len(sent))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_message_v2", fake_send_message_v2)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="stats", chat_id=70159, id=16)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert sent
+    msg_type, message, parse_mode = sent[-1]
+    assert msg_type == "info"
+    assert parse_mode == "html"
+    assert message.startswith("📊 统计概览")
+    assert "<pre>" in message
+    assert "类别 |  12 |" in message
+
+
+def test_count_lose_streaks_ignores_unsettled_entries():
+    logs = [
+        {"profit": -1000, "result": "输"},
+        {"profit": None, "result": None},
+        {"profit": -2000, "result": "输"},
+        {"profit": 990, "result": "赢"},
+        {"profit": -3000, "result": "输"},
+    ]
+
+    lose_streaks = zm.count_lose_streaks(logs)
+
+    assert lose_streaks == {2: 1, 1: 1}
+
+
+def test_build_stats_report_uses_actual_window_labels_and_resolved_chain():
+    state = SimpleNamespace(
+        history=[1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0],
+        runtime={},
+        bet_sequence_log=[
+            {"profit": -1000, "result": "输"},
+            {"profit": -2000, "result": "输"},
+            {"profit": None, "result": None},
+            {"profit": 990, "result": "赢"},
+            {"profit": -3000, "result": "输"},
+        ],
+    )
+
+    report = zm._build_stats_report(state, windows=[1000, 5])
+
+    assert "最近局数“连大、连小、连输”统计" in report
+    assert "类别 |  12 |   5 |" in report or "类别 |  12 |  5 |" in report
+    assert "连输" in report
+    assert " 2  " in report
+
+
 def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "help_user"
     _write_json(
