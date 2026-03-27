@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 import errno
+import json
 try:
     import fcntl
 except ImportError:
@@ -18,6 +19,8 @@ except ImportError:
 else:
     msvcrt = None
 from typing import Any, Dict, List
+from types import SimpleNamespace
+import requests
 from telethon import TelegramClient, events
 from logging.handlers import TimedRotatingFileHandler
 from user_manager import UserManager, UserContext
@@ -327,19 +330,109 @@ def _release_session_lock(user_ctx: UserContext):
     setattr(user_ctx, "_session_lock_fd", None)
 
 
+def _get_admin_console_cfg(user_ctx: UserContext) -> Dict[str, Any]:
+    return user_ctx.config.admin_console if isinstance(getattr(user_ctx.config, "admin_console", None), dict) else {}
+
+
+def _get_admin_console_mode(user_ctx: UserContext) -> str:
+    return str(_get_admin_console_cfg(user_ctx).get("mode", "") or "").strip()
+
+
+def _resolve_admin_telegram_id_chat(user_ctx: UserContext):
+    cfg = _get_admin_console_cfg(user_ctx).get("telegram_id", {})
+    if not isinstance(cfg, dict):
+        return None
+    target = cfg.get("chat_id")
+    return _normalize_target(target)
+
+
 def _resolve_admin_chat(user_ctx: UserContext):
-    notification = user_ctx.config.notification if isinstance(user_ctx.config.notification, dict) else {}
-    admin_chat = notification.get("admin_chat")
-    if admin_chat in (None, ""):
-        admin_chat = user_ctx.config.groups.get("admin_chat")
-    if isinstance(admin_chat, str):
-        text = admin_chat.strip()
-        if text.lstrip("-").isdigit():
-            try:
-                return int(text)
-            except Exception:
-                return admin_chat
-    return admin_chat
+    """兼容旧内部调用：仅返回 telegram_id 管理入口。"""
+    return _resolve_admin_telegram_id_chat(user_ctx)
+
+
+def _get_admin_telegram_bot_cfg(user_ctx: UserContext) -> Dict[str, Any]:
+    cfg = _get_admin_console_cfg(user_ctx).get("telegram_bot", {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _get_admin_bot_allowed_sender_ids(user_ctx: UserContext) -> set:
+    cfg = _get_admin_telegram_bot_cfg(user_ctx)
+    raw = cfg.get("allowed_sender_ids", [])
+    items = raw if isinstance(raw, (list, tuple, set)) else [raw]
+    result = set()
+    for item in items:
+        normalized = _normalize_target(item)
+        if normalized not in (None, ""):
+            result.add(str(normalized))
+    return result
+
+
+def _normalize_bot_parse_mode(parse_mode: str | None) -> str | None:
+    text = str(parse_mode or "").strip().lower()
+    if text == "html":
+        return "HTML"
+    return None
+
+
+def _build_admin_bot_reply_markup() -> Dict[str, Any]:
+    return {
+        "keyboard": [[{"text": "/help"}]],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+async def _bot_api_request(bot_token: str, method: str, *, payload: Dict[str, Any] | None = None, timeout: int = 30) -> Dict[str, Any]:
+    url = f"https://api.telegram.org/bot{bot_token}/{method}"
+    response = await asyncio.to_thread(requests.post, url, json=payload or {}, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    if not data.get("ok", False):
+        raise RuntimeError(str(data))
+    return data
+
+
+async def _send_admin_console_text(client, user_ctx: UserContext, text: str, parse_mode: str | None = None):
+    mode = _get_admin_console_mode(user_ctx)
+    if mode == "telegram_id":
+        chat_id = _resolve_admin_telegram_id_chat(user_ctx)
+        if not chat_id:
+            return None
+        return await client.send_message(chat_id, text, parse_mode=parse_mode)
+
+    if mode == "telegram_bot":
+        bot_cfg = _get_admin_telegram_bot_cfg(user_ctx)
+        bot_token = str(bot_cfg.get("bot_token", "") or "").strip()
+        chat_id = _normalize_target(bot_cfg.get("chat_id"))
+        if not bot_token or chat_id in (None, ""):
+            return None
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": _build_admin_bot_reply_markup(),
+        }
+        api_parse_mode = _normalize_bot_parse_mode(parse_mode)
+        if api_parse_mode:
+            payload["parse_mode"] = api_parse_mode
+        result = await _bot_api_request(bot_token, "sendMessage", payload=payload, timeout=10)
+        msg = result.get("result", {}) if isinstance(result.get("result", {}), dict) else {}
+        return SimpleNamespace(
+            chat_id=chat_id,
+            id=msg.get("message_id"),
+            is_bot_api=True,
+            bot_token=bot_token,
+        )
+    return None
+
+
+async def _prime_admin_bot_offset(bot_token: str) -> int:
+    result = await _bot_api_request(bot_token, "getUpdates", payload={"timeout": 0, "allowed_updates": ["message"]}, timeout=10)
+    updates = result.get("result", []) if isinstance(result.get("result", []), list) else []
+    if not updates:
+        return 0
+    latest = max(int(item.get("update_id", 0) or 0) for item in updates)
+    return latest + 1
 
 
 def _normalize_target(value: Any) -> Any:
@@ -376,6 +469,67 @@ def _get_user_event_lock(user_ctx: UserContext) -> asyncio.Lock:
         lock = asyncio.Lock()
         setattr(user_ctx, "_event_lock", lock)
     return lock
+
+
+async def _run_admin_console_bot_loop(client: TelegramClient, user_ctx: UserContext, global_config: dict):
+    bot_cfg = _get_admin_telegram_bot_cfg(user_ctx)
+    bot_token = str(bot_cfg.get("bot_token", "") or "").strip()
+    chat_id = _normalize_target(bot_cfg.get("chat_id"))
+    allowed_senders = _get_admin_bot_allowed_sender_ids(user_ctx)
+    if not bot_token or chat_id in (None, ""):
+        return
+
+    try:
+        offset = await _prime_admin_bot_offset(bot_token)
+    except Exception as e:
+        log_event(logging.ERROR, 'admin_bot', '管理员 Bot 初始化失败', user_id=user_ctx.user_id, error=str(e))
+        return
+
+    setattr(user_ctx, "_admin_bot_offset", offset)
+
+    while getattr(user_ctx, "client", None) is client:
+        try:
+            payload = {
+                "timeout": 20,
+                "allowed_updates": ["message"],
+            }
+            if offset > 0:
+                payload["offset"] = offset
+            result = await _bot_api_request(bot_token, "getUpdates", payload=payload, timeout=30)
+            updates = result.get("result", []) if isinstance(result.get("result", []), list) else []
+            for update in updates:
+                update_id = int(update.get("update_id", 0) or 0)
+                if update_id > 0:
+                    offset = update_id + 1
+                message = update.get("message", {}) if isinstance(update.get("message", {}), dict) else {}
+                if not message:
+                    continue
+                message_chat = message.get("chat", {}) if isinstance(message.get("chat", {}), dict) else {}
+                message_chat_id = _normalize_target(message_chat.get("id"))
+                if str(message_chat_id) != str(chat_id):
+                    continue
+                if str(message_chat.get("type", "") or "") != "private":
+                    continue
+                sender_id = _normalize_target((message.get("from", {}) or {}).get("id"))
+                if allowed_senders and str(sender_id) not in allowed_senders:
+                    continue
+                text = str(message.get("text", "") or "").strip()
+                if not text:
+                    continue
+                if text == "/start":
+                    text = "/help"
+                event = SimpleNamespace(
+                    raw_text=text,
+                    chat_id=message_chat_id,
+                    id=update_id,
+                    sender_id=sender_id,
+                )
+                async with _get_user_event_lock(user_ctx):
+                    from zq_multiuser import process_user_command as zq_user
+                    await zq_user(client, event, user_ctx, global_config)
+        except Exception as e:
+            log_event(logging.ERROR, 'admin_bot', '管理员 Bot 轮询异常', user_id=user_ctx.user_id, error=str(e))
+            await asyncio.sleep(3)
 
 
 def _normalize_ai_keys(ai_cfg: Any) -> List[str]:
@@ -431,7 +585,7 @@ def register_handlers(client: TelegramClient, user_ctx: UserContext, global_conf
     state = user_ctx.state
     presets = user_ctx.presets
     button_mapping = global_config.get("button_mapping", {})
-    admin_chat = _resolve_admin_chat(user_ctx)
+    admin_chat = _resolve_admin_telegram_id_chat(user_ctx) if _get_admin_console_mode(user_ctx) == "telegram_id" else None
     zq_group_targets = _iter_targets(config.groups.get("zq_group", []))
     zq_bot_targets = _iter_targets(config.groups.get("zq_bot"))
     
@@ -465,29 +619,18 @@ def register_handlers(client: TelegramClient, user_ctx: UserContext, global_conf
     async def red_packet_handler(event):
         await zq_red_packet(client, event, user_ctx, global_config)
     
-    @client.on(events.NewMessage(chats=admin_chat if admin_chat else []))
-    async def user_handler(event):
-        raw_text = (event.raw_text or "").strip()
-        safe_cmd = raw_text[:50]
-        lower_text = raw_text.lower()
-        if lower_text.startswith("apikey ") or lower_text.startswith("/apikey "):
-            safe_cmd = "apikey ***"
-        log_event(logging.DEBUG, 'user_cmd', '收到用户命令',
-                  user_id=user_ctx.user_id, cmd=safe_cmd)
-        allowed_senders = _get_allowed_sender_ids(user_ctx)
-        if allowed_senders:
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id is None or str(sender_id) not in allowed_senders:
-                log_event(
-                    logging.WARNING,
-                    'user_cmd',
-                    '命令发送者不在白名单，已忽略',
-                    user_id=user_ctx.user_id,
-                    sender_id=sender_id,
-                )
-                return
-        async with _get_user_event_lock(user_ctx):
-            await zq_user(client, event, user_ctx, global_config)
+    if admin_chat:
+        @client.on(events.NewMessage(chats=admin_chat))
+        async def user_handler(event):
+            raw_text = (event.raw_text or "").strip()
+            safe_cmd = raw_text[:50]
+            lower_text = raw_text.lower()
+            if lower_text.startswith("apikey ") or lower_text.startswith("/apikey "):
+                safe_cmd = "apikey ***"
+            log_event(logging.DEBUG, 'user_cmd', '收到用户命令',
+                      user_id=user_ctx.user_id, cmd=safe_cmd)
+            async with _get_user_event_lock(user_ctx):
+                await zq_user(client, event, user_ctx, global_config)
 
 
 async def zq_bet_on(client, event, user_ctx: UserContext, global_config: dict):
@@ -547,19 +690,17 @@ async def check_models_for_user(client, user_ctx: UserContext):
         report += f"📊 **汇总**: {success_count}/{total_models} 可用\n"
         report += f"🤖 **当前默认**: `{user_ctx.get_runtime('current_model_id', 'qwen3-coder-plus')}`"
         
-        admin_chat = _resolve_admin_chat(user_ctx)
-        if admin_chat:
-            await client.send_message(admin_chat, report)
+        await _send_admin_console_text(client, user_ctx, report)
 
-            ai_cfg = user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {}
-            has_keys = bool(_normalize_ai_keys(ai_cfg))
-            key_issue_detected = (not has_keys) or any(_looks_like_ai_key_issue(err) for err in failure_errors)
-            if key_issue_detected:
-                warn = (
-                    "⚠️ 大模型AI key 失效/缺失，请更新 key！！！\n"
-                    "请在管理员窗口执行：`apikey set <新key>`"
-                )
-                await client.send_message(admin_chat, warn)
+        ai_cfg = user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {}
+        has_keys = bool(_normalize_ai_keys(ai_cfg))
+        key_issue_detected = (not has_keys) or any(_looks_like_ai_key_issue(err) for err in failure_errors)
+        if key_issue_detected:
+            warn = (
+                "⚠️ 大模型AI key 失效/缺失，请更新 key！！！\n"
+                "请在管理员窗口执行：`apikey set <新key>`"
+            )
+            await _send_admin_console_text(client, user_ctx, warn)
         log_event(logging.INFO, 'model_check', '模型自检完成', user_id=user_ctx.user_id)
         
     except Exception as e:
@@ -651,7 +792,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
 
         zq_group_targets = _iter_targets(user_ctx.config.groups.get("zq_group", []))
         zq_bot_targets = _iter_targets(user_ctx.config.groups.get("zq_bot"))
-        admin_chat = _resolve_admin_chat(user_ctx)
+        admin_mode = _get_admin_console_mode(user_ctx)
 
         # 启动前校验，避免“进程运行但账号无命令/无结算”的静默失败。
         if not zq_group_targets or not zq_bot_targets:
@@ -664,13 +805,6 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 zq_bot=zq_bot_targets,
             )
             return None
-        if not admin_chat:
-            log_event(
-                logging.WARNING,
-                'start',
-                '未配置 admin_chat，命令与仪表盘将不可用',
-                user_id=user_ctx.user_id,
-            )
 
         lock_acquired = _acquire_session_lock(user_ctx)
         if not lock_acquired:
@@ -743,23 +877,22 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 count=healed_count,
                 items=healed_preview,
             )
-            if admin_chat:
-                mes = (
-                    "🩹 挂单自愈已执行\n"
-                    f"检测到历史异常挂单：{healed_count} 笔（result=None）\n"
-                    "处理方式：已自动标记为“异常未结算”（不再参与胜率/连输统计）\n"
-                    f"样例：{healed_preview}"
+            mes = (
+                "🩹 挂单自愈已执行\n"
+                f"检测到历史异常挂单：{healed_count} 笔（result=None）\n"
+                "处理方式：已自动标记为“异常未结算”（不再参与胜率/连输统计）\n"
+                f"样例：{healed_preview}"
+            )
+            try:
+                await _send_admin_console_text(client, user_ctx, mes)
+            except Exception as e:
+                log_event(
+                    logging.ERROR,
+                    'start',
+                    '挂单自愈通知发送失败',
+                    user_id=user_ctx.user_id,
+                    error=str(e),
                 )
-                try:
-                    await client.send_message(admin_chat, mes)
-                except Exception as e:
-                    log_event(
-                        logging.ERROR,
-                        'start',
-                        '挂单自愈通知发送失败',
-                        user_id=user_ctx.user_id,
-                        error=str(e),
-                    )
 
         log_event(logging.INFO, 'start', '用户启动成功',
                   user_id=user_ctx.user_id, name=user_ctx.config.name, balance=balance)
@@ -789,6 +922,13 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 user_id=user_ctx.user_id,
                 error=str(e),
             )
+
+        if admin_mode == "telegram_bot":
+            existing_task = getattr(user_ctx, "_admin_console_task", None)
+            if existing_task is None or existing_task.done():
+                user_ctx._admin_console_task = asyncio.create_task(
+                    _run_admin_console_bot_loop(client, user_ctx, global_config)
+                )
         
         return client
         
@@ -841,14 +981,11 @@ async def main():
     log_event(logging.INFO, 'main', '所有用户启动完成', count=len(clients))
 
     async def notify_release(message: str):
-        sent_admins = set()
         for user_ctx in user_manager.get_all_users().values():
-            admin_chat = _resolve_admin_chat(user_ctx)
-            if not admin_chat or admin_chat in sent_admins or not user_ctx.client:
+            if not user_ctx.client:
                 continue
             try:
-                await user_ctx.client.send_message(admin_chat, message)
-                sent_admins.add(admin_chat)
+                await _send_admin_console_text(user_ctx.client, user_ctx, message)
             except Exception as e:
                 log_event(
                     logging.ERROR,

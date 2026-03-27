@@ -24,21 +24,38 @@
         "x_csrf": "请填你的x_csrf"
     },
 
-    # 通知配置（admin_chat 放这里）
-    "notification": {
-        "admin_chat": 1234567890,
-        # 可选：命令发送者白名单（不填=不启用白名单）
-        # 启用后，只有这些 sender_id 发出的命令才会被处理
-        "allowed_sender_ids": [],
-        "iyuu": {
-            "enable": false,
-            "url": "",
-            "token": ""
+    # 管理员控制台（二选一，必配）
+    "admin_console": {
+        # 可选：telegram_id / telegram_bot
+        "mode": "telegram_id",
+
+        # 方案一：通过 Telegram chat id 管理（适合 me / 私聊 / 专用群）
+        "telegram_id": {
+            "chat_id": 1234567890
         },
-        "tg_bot": {
-            "enable": false,
+
+        # 方案二：通过管理员专用 Bot 管理（适合每账号独立控制台）
+        "telegram_bot": {
             "bot_token": "",
-            "chat_id": ""
+            "chat_id": "",
+            # 可选：允许发命令的 Telegram 用户 ID 白名单
+            "allowed_sender_ids": []
+        }
+    },
+
+    # 通知渠道（只负责通知，不负责命令交互）
+    "notification": {
+        "channels": {
+            "iyuu": {
+                "enable": false,
+                "url": "",
+                "token": ""
+            },
+            "telegram_notify_bot": {
+                "enable": false,
+                "bot_token": "",
+                "chat_id": ""
+            }
         }
     },
 

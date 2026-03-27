@@ -14,6 +14,7 @@ import time
 from html import escape as escape_html
 import requests
 import aiohttp
+from types import SimpleNamespace
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
 from user_manager import UserContext, UserState, trim_bet_sequence_log
@@ -1961,19 +1962,45 @@ def _iter_targets(target):
     return [target]
 
 
-def _resolve_admin_chat(user_ctx: UserContext):
-    notification = user_ctx.config.notification if isinstance(user_ctx.config.notification, dict) else {}
-    admin_chat = notification.get("admin_chat")
-    if admin_chat in (None, ""):
-        admin_chat = user_ctx.config.groups.get("admin_chat")
-    if isinstance(admin_chat, str):
-        text = admin_chat.strip()
+def _get_admin_console_cfg(user_ctx: UserContext) -> Dict[str, Any]:
+    return user_ctx.config.admin_console if isinstance(getattr(user_ctx.config, "admin_console", None), dict) else {}
+
+
+def _get_admin_console_mode(user_ctx: UserContext) -> str:
+    return str(_get_admin_console_cfg(user_ctx).get("mode", "") or "").strip()
+
+
+def _resolve_admin_telegram_id_chat(user_ctx: UserContext):
+    cfg = _get_admin_console_cfg(user_ctx).get("telegram_id", {})
+    if not isinstance(cfg, dict):
+        return None
+    target = cfg.get("chat_id")
+    if isinstance(target, str):
+        text = target.strip()
         if text.lstrip("-").isdigit():
             try:
                 return int(text)
             except Exception:
-                return admin_chat
-    return admin_chat
+                return target
+        return text
+    return target
+
+
+def _get_admin_telegram_bot_cfg(user_ctx: UserContext) -> Dict[str, Any]:
+    cfg = _get_admin_console_cfg(user_ctx).get("telegram_bot", {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _get_notification_channels_cfg(user_ctx: UserContext) -> Dict[str, Any]:
+    notification = user_ctx.config.notification if isinstance(user_ctx.config.notification, dict) else {}
+    channels = notification.get("channels", {}) if isinstance(notification.get("channels", {}), dict) else {}
+    return channels
+
+
+def _get_notify_channel_cfg(user_ctx: UserContext, channel_name: str) -> Dict[str, Any]:
+    channels = _get_notification_channels_cfg(user_ctx)
+    cfg = channels.get(channel_name, {})
+    return cfg if isinstance(cfg, dict) else {}
 
 
 def _append_text_record(file_path: str, content: str) -> None:
@@ -2113,6 +2140,13 @@ def _record_outbound_message(
     )
 
 
+def _normalize_bot_parse_mode(parse_mode: Optional[str]) -> Optional[str]:
+    mode = str(parse_mode or "").strip().lower()
+    if mode == "html":
+        return "HTML"
+    return None
+
+
 async def _post_form_async(url: str, payload: dict, timeout: int = 5):
     """在异步上下文中安全发送 form 请求，避免阻塞事件循环。"""
     return await asyncio.to_thread(requests.post, url, data=payload, timeout=timeout)
@@ -2153,39 +2187,76 @@ async def send_message_v2(
         priority_desp = priority_message
 
     sent_message = None
-    admin_chat = None
+    admin_target = None
     if "admin" in channels or "all" in channels:
         try:
-            admin_chat = _resolve_admin_chat(user_ctx)
-            if admin_chat:
-                # 修复：多用户分支 - 返回管理员消息对象，确保仪表盘/统计可被后续刷新删除。
-                sent_message = await client.send_message(admin_chat, admin_message, parse_mode=parse_mode)
-                _record_outbound_message(
-                    user_ctx,
-                    channel="admin_chat",
-                    text=admin_message,
-                    msg_type=msg_type,
-                    success=True,
-                    parse_mode=parse_mode,
-                    chat_id=admin_chat,
-                )
+            admin_mode = _get_admin_console_mode(user_ctx)
+            if admin_mode == "telegram_id":
+                admin_target = _resolve_admin_telegram_id_chat(user_ctx)
+                if admin_target:
+                    sent_message = await client.send_message(admin_target, admin_message, parse_mode=parse_mode)
+                    _record_outbound_message(
+                        user_ctx,
+                        channel="admin_chat",
+                        text=admin_message,
+                        msg_type=msg_type,
+                        success=True,
+                        parse_mode=parse_mode,
+                        chat_id=admin_target,
+                    )
+            elif admin_mode == "telegram_bot":
+                bot_cfg = _get_admin_telegram_bot_cfg(user_ctx)
+                bot_token = str(bot_cfg.get("bot_token", "") or "").strip()
+                admin_target = bot_cfg.get("chat_id")
+                if bot_token and admin_target not in (None, ""):
+                    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    payload: Dict[str, Any] = {
+                        "chat_id": admin_target,
+                        "text": admin_message,
+                        "reply_markup": {
+                            "keyboard": [[{"text": "/help"}]],
+                            "resize_keyboard": True,
+                            "is_persistent": True,
+                        },
+                    }
+                    bot_parse_mode = _normalize_bot_parse_mode(parse_mode)
+                    if bot_parse_mode:
+                        payload["parse_mode"] = bot_parse_mode
+                    response = await _post_json_async(url, payload, timeout=5)
+                    sent_json = response.json() if hasattr(response, "json") else {}
+                    result = sent_json.get("result", {}) if isinstance(sent_json, dict) else {}
+                    sent_message = SimpleNamespace(
+                        chat_id=admin_target,
+                        id=result.get("message_id"),
+                        is_bot_api=True,
+                        bot_token=bot_token,
+                    )
+                    _record_outbound_message(
+                        user_ctx,
+                        channel="admin_console.telegram_bot",
+                        text=admin_message,
+                        msg_type=msg_type,
+                        success=True,
+                        parse_mode=parse_mode,
+                        chat_id=admin_target,
+                    )
         except Exception as e:
             log_event(logging.ERROR, 'send_msg', '发送管理员消息失败', user_id=user_ctx.user_id, data=str(e))
 
-    if admin_chat is not None and sent_message is None:
+    if admin_target is not None and sent_message is None:
         _record_outbound_message(
             user_ctx,
-            channel="admin_chat",
+            channel=f"admin_console.{_get_admin_console_mode(user_ctx) or 'unknown'}",
             text=admin_message,
             msg_type=msg_type,
             success=False,
             parse_mode=parse_mode,
-            chat_id=admin_chat,
+            chat_id=admin_target,
             error="send_failed",
         )
 
     if "priority" in channels or "all" in channels:
-        iyuu_cfg = user_ctx.config.notification.get("iyuu", {})
+        iyuu_cfg = _get_notify_channel_cfg(user_ctx, "iyuu")
         if iyuu_cfg.get("enable"):
             try:
                 final_title = title or f"菠菜机器人 {account_name} 通知"
@@ -2208,7 +2279,7 @@ async def send_message_v2(
             except Exception as e:
                 log_event(logging.ERROR, 'send_msg', 'IYUU通知失败', user_id=user_ctx.user_id, data=str(e))
 
-        tg_bot_cfg = user_ctx.config.notification.get("tg_bot", {})
+        tg_bot_cfg = _get_notify_channel_cfg(user_ctx, "telegram_notify_bot")
         if tg_bot_cfg.get("enable"):
             try:
                 bot_token = tg_bot_cfg.get("bot_token")
@@ -2268,7 +2339,7 @@ async def send_message(
     priority_message = _ensure_account_prefix(message, account_prefix)
     priority_desp = _ensure_account_prefix(desp if desp is not None else message, account_prefix)
     if to in ("priority", "iyuu"):
-        iyuu_cfg = user_ctx.config.notification.get("iyuu", {})
+        iyuu_cfg = _get_notify_channel_cfg(user_ctx, "iyuu")
         if iyuu_cfg.get("enable"):
             final_title = title or f"菠菜机器人 {account_name} 通知"
             payload = {"text": final_title, "desp": priority_desp}
@@ -2288,7 +2359,7 @@ async def send_message(
                     title=final_title,
                 )
     if to in ("priority", "tgbot"):
-        tg_bot_cfg = user_ctx.config.notification.get("tg_bot", {})
+        tg_bot_cfg = _get_notify_channel_cfg(user_ctx, "telegram_notify_bot")
         if tg_bot_cfg.get("enable"):
             bot_token = tg_bot_cfg.get("bot_token")
             chat_id = tg_bot_cfg.get("chat_id")
@@ -3862,6 +3933,17 @@ async def cleanup_message(client, message_ref):
     """安全地删除指定消息对象。"""
     if not message_ref:
         return
+    if getattr(message_ref, "is_bot_api", False):
+        bot_token = getattr(message_ref, "bot_token", "")
+        chat_id = getattr(message_ref, "chat_id", None)
+        msg_id = getattr(message_ref, "id", None)
+        if bot_token and chat_id is not None and msg_id is not None:
+            try:
+                url = f"https://api.telegram.org/bot{bot_token}/deleteMessage"
+                await _post_json_async(url, {"chat_id": chat_id, "message_id": msg_id}, timeout=5)
+                return
+            except Exception:
+                pass
     try:
         await message_ref.delete()
         return

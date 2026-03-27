@@ -12,7 +12,28 @@ import zq_multiuser as zm
 
 def _write_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.name == "config.json" and path.parent.parent.name == "users":
+    if (path.name == "config.json" or path.name.endswith("_config.json")) and path.parent.parent.name == "users" and isinstance(data, dict):
+        payload = json.loads(json.dumps(data, ensure_ascii=False))
+        groups = payload.get("groups", {}) if isinstance(payload.get("groups", {}), dict) else {}
+        notification = payload.get("notification", {}) if isinstance(payload.get("notification", {}), dict) else {}
+        admin_console = payload.get("admin_console", {}) if isinstance(payload.get("admin_console", {}), dict) else {}
+        if not admin_console:
+            admin_chat = notification.get("admin_chat", groups.get("admin_chat", payload.get("telegram", {}).get("user_id", 0)))
+            admin_console = {
+                "mode": "telegram_id",
+                "telegram_id": {"chat_id": admin_chat},
+                "telegram_bot": {"bot_token": "", "chat_id": "", "allowed_sender_ids": []},
+            }
+            payload["admin_console"] = admin_console
+        channels = notification.get("channels", {}) if isinstance(notification.get("channels", {}), dict) else {}
+        if not channels:
+            channels = {
+                "iyuu": notification.get("iyuu", {"enable": False, "url": "", "token": ""}),
+                "telegram_notify_bot": notification.get("tg_bot", {"enable": False, "bot_token": "", "chat_id": ""}),
+            }
+        payload["notification"] = {"channels": channels}
+        data = payload
+    if (path.name == "config.json" or path.name.endswith("_config.json")) and path.parent.parent.name == "users":
         canonical = path.parent / f"{path.parent.name}_config.json"
         canonical.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

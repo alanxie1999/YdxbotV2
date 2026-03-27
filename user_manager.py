@@ -289,6 +289,20 @@ def merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]
     return result
 
 
+def _normalize_chat_target(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        if text.lstrip("-").isdigit():
+            try:
+                return int(text)
+            except Exception:
+                return value
+        return text
+    return value
+
+
 @dataclass
 class UserConfig:
     user_id: int
@@ -296,6 +310,7 @@ class UserConfig:
     telegram: Dict[str, Any] = field(default_factory=dict)
     groups: Dict[str, Any] = field(default_factory=dict)
     zhuque: Dict[str, Any] = field(default_factory=dict)
+    admin_console: Dict[str, Any] = field(default_factory=dict)
     notification: Dict[str, Any] = field(default_factory=dict)
     ai: Dict[str, Any] = field(default_factory=dict)
 
@@ -520,9 +535,30 @@ class UserContext:
         telegram_cfg = merge_dict(global_cfg.get("telegram", {}), data.get("telegram", {}))
         groups_cfg = merge_dict(global_cfg.get("groups", {}), data.get("groups", {}))
         zhuque_cfg = merge_dict(global_cfg.get("zhuque", {}), data.get("zhuque", {}))
-        # 精简规则：通知和 AI 仅从账号配置读取（不走全局继承）
+        # 精简规则：管理员控制台、通知和 AI 仅从账号配置读取（不走全局继承）
+        admin_console_cfg = data.get("admin_console", {}) if isinstance(data.get("admin_console", {}), dict) else {}
         notification_cfg = data.get("notification", {}) if isinstance(data.get("notification", {}), dict) else {}
         ai_cfg = data.get("ai", {}) if isinstance(data.get("ai", {}), dict) else {}
+
+        mode = str(admin_console_cfg.get("mode", "") or "").strip()
+        if mode not in {"telegram_id", "telegram_bot"}:
+            raise ValueError("admin_console.mode 必须配置为 telegram_id 或 telegram_bot")
+
+        telegram_id_cfg = admin_console_cfg.get("telegram_id", {}) if isinstance(admin_console_cfg.get("telegram_id", {}), dict) else {}
+        telegram_bot_cfg = admin_console_cfg.get("telegram_bot", {}) if isinstance(admin_console_cfg.get("telegram_bot", {}), dict) else {}
+
+        if mode == "telegram_id":
+            chat_id = _normalize_chat_target(telegram_id_cfg.get("chat_id"))
+            if chat_id in (None, ""):
+                raise ValueError("admin_console.telegram_id.chat_id 未配置")
+        else:
+            bot_token = str(telegram_bot_cfg.get("bot_token", "") or "").strip()
+            chat_id = _normalize_chat_target(telegram_bot_cfg.get("chat_id"))
+            if not bot_token or chat_id in (None, ""):
+                raise ValueError("admin_console.telegram_bot.bot_token 或 chat_id 未配置")
+
+        channels_cfg = notification_cfg.get("channels", {}) if isinstance(notification_cfg.get("channels", {}), dict) else {}
+        notification_cfg = {"channels": channels_cfg}
 
         # 从配置中读取user_id，如果没有则使用目录名的哈希值
         self.user_id = telegram_cfg.get("user_id", 0)
@@ -542,6 +578,7 @@ class UserContext:
             telegram=telegram_cfg,
             groups=groups_cfg,
             zhuque=zhuque_cfg,
+            admin_console=admin_console_cfg,
             notification=notification_cfg,
             ai=ai_cfg,
         )
