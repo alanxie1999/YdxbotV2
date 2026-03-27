@@ -11,6 +11,7 @@ import os
 import sys
 import errno
 import json
+from datetime import datetime
 try:
     import fcntl
 except ImportError:
@@ -583,10 +584,12 @@ async def _run_admin_console_bot_loop(client: TelegramClient, user_ctx: UserCont
                     continue
                 if text == "/start":
                     text = "/help"
+                message_id = int(message.get("message_id", update_id) or update_id)
                 event = SimpleNamespace(
                     raw_text=text,
                     chat_id=message_chat_id,
-                    id=update_id,
+                    id=message_id,
+                    update_id=update_id,
                     sender_id=sender_id,
                 )
                 async with _get_user_event_lock(user_ctx):
@@ -964,9 +967,9 @@ async def start_user(user_ctx: UserContext, global_config: dict):
 
         startup_msg = _build_ops_card(
             "✅ 脚本启动成功",
-            summary="当前账号已完成启动并开始监听。",
             fields=[
-                ("版本", get_software_version_text()),
+                ("重启日期", datetime.now().strftime("%Y 年 %m 月 %d 日 %H:%M")),
+                ("脚本版本", get_software_version_text()),
                 ("账户余额", f"{max(0, int(balance or 0)) / 10000:.2f} 万"),
                 ("菠菜资金", f"{max(0, int(gambling_fund or 0)) / 10000:.2f} 万"),
             ],
@@ -989,9 +992,10 @@ async def start_user(user_ctx: UserContext, global_config: dict):
             )
 
         if admin_mode == "telegram_bot":
+            bot_cfg = _get_admin_telegram_bot_cfg(user_ctx)
+            client._admin_console_bot_token = str(bot_cfg.get("bot_token", "") or "").strip()
+            client._admin_console_bot_chat_id = _normalize_target(bot_cfg.get("chat_id"))
             await _ensure_admin_bot_menu(user_ctx)
-
-        if admin_mode == "telegram_bot":
             existing_task = getattr(user_ctx, "_admin_console_task", None)
             if existing_task is None or existing_task.done():
                 user_ctx._admin_console_task = asyncio.create_task(
@@ -1052,6 +1056,10 @@ async def main():
         for user_ctx in user_manager.get_all_users().values():
             if not user_ctx.client:
                 continue
+            match = re.search(r"最新版本：([^\n]+)", message)
+            if match:
+                user_ctx.state.runtime["release_latest_tag"] = match.group(1).strip()
+                user_ctx.save_state()
             try:
                 await _send_admin_console_text(user_ctx.client, user_ctx, message)
             except Exception as e:

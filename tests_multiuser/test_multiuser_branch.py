@@ -175,6 +175,27 @@ def test_format_dashboard_shows_strategy_watch_line_when_skip_streak_active(tmp_
     assert "策略观望：当前手位连续观望 2 次" in text
 
 
+def test_format_dashboard_shows_pending_release_notice(tmp_path):
+    user_dir = tmp_path / "users" / "status_release_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态版本用户"},
+            "telegram": {"user_id": 6006},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_on"] = True
+    rt["current_preset_name"] = "5k"
+    rt["release_latest_tag"] = "v9.9.9"
+
+    text = zm.format_dashboard(ctx)
+
+    assert "📦 新版本：v9.9.9（可更新）" in text
+
+
 def test_format_dashboard_shows_model_probe_progress(tmp_path):
     user_dir = tmp_path / "users" / "status_probe_user"
     _write_json(
@@ -743,7 +764,8 @@ def test_start_user_sends_startup_ready_notice(tmp_path, monkeypatch):
     assert sent
     assert sent[-1][0] == "startup_ready"
     assert "✅ 脚本启动成功" in sent[-1][1]
-    assert "版本：v1.2.3(test)" in sent[-1][1]
+    assert "重启日期：" in sent[-1][1]
+    assert "脚本版本：v1.2.3(test)" in sent[-1][1]
     assert "账户余额：1234.00 万" in sent[-1][1]
     assert "菠菜资金：2500.00 万" in sent[-1][1]
 
@@ -2892,6 +2914,40 @@ def test_process_user_command_balance_uses_ops_card(tmp_path, monkeypatch):
     assert "菠菜资金：45.60 万" in sent_messages[-1]
 
 
+def test_process_user_command_stf_sets_profit_target_in_wan(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "stf_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "目标用户"},
+            "telegram": {"user_id": 70160},
+            "groups": {"admin_chat": 70160},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70160, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="stf 100", chat_id=70160, id=17)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert ctx.state.runtime["profit"] == 1_000_000
+    assert sent_messages
+    assert "✅ 本轮目标金额已更新" in sent_messages[-1]
+    assert "当前目标：100.00 万" in sent_messages[-1]
+
+
 def test_process_user_command_users_uses_ops_card(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "users_info_user"
     _write_json(
@@ -3086,7 +3142,7 @@ def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch
     assert "<b>📘 脚本命令指南</b>" in message
     assert "⚡ 基础控制（最常用）" in message
     assert "<code>/st [预设名]</code>" in message
-    assert "<code>/set [炸] [赢] [停] [盈停]</code>" in message
+    assert "<code>/stf [数字]</code>" in message
     assert "<code>/model select [编号/ID]</code>" in message
     assert "<code>/res state</code>" in message
 

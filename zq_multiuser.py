@@ -1294,6 +1294,26 @@ def get_software_version_text() -> str:
         return "unknown"
 
 
+def _get_pending_release_notice(rt: Dict[str, Any]) -> str:
+    latest_tag = str(rt.get("release_latest_tag", "") or "").strip()
+    if not latest_tag:
+        return ""
+    current_version = get_software_version_text()
+    if latest_tag in current_version:
+        return ""
+    return f"📦 新版本：{latest_tag}（可更新）"
+
+
+def _get_pending_release_notice(rt: Dict[str, Any]) -> str:
+    latest_tag = str(rt.get("release_latest_tag", "") or "").strip()
+    if not latest_tag:
+        return ""
+    current_version = get_software_version_text()
+    if latest_tag and latest_tag in current_version:
+        return ""
+    return f"📦 新版本：{latest_tag}（可更新）"
+
+
 # 仪表盘格式化 - 与master版本保持一致
 def format_dashboard(user_ctx: UserContext) -> str:
     """生成 HTML 版 status 卡片。"""
@@ -1475,6 +1495,7 @@ def _build_status_html_data(user_ctx: UserContext) -> Dict[str, Any]:
         "gambling_fund_text": _format_wan_value(rt.get("gambling_fund", 0)),
         "model_health_lines": _build_model_health_lines(rt),
         "strategy_watch_line": _build_strategy_watch_line(rt),
+        "release_notice": _get_pending_release_notice(rt),
     }
 
 
@@ -1519,6 +1540,7 @@ def generate_status_html(data: Dict[str, Any]) -> str:
     lose_stop = escape_html(str(data.get("lose_stop", 0) or 0))
     model_health_lines = [escape_html(str(line)) for line in data.get("model_health_lines", []) if str(line).strip()]
     strategy_watch_line = escape_html(str(data.get("strategy_watch_line", "") or "").strip())
+    release_notice = escape_html(str(data.get("release_notice", "") or "").strip())
 
     if account_balance_text in {"Cookie 失效", "网络异常", "获取中"}:
         account_balance_line = escape_html(account_balance_text)
@@ -1528,6 +1550,8 @@ def generate_status_html(data: Dict[str, Any]) -> str:
     model_health_block = ""
     if model_health_lines:
         model_health_block = "\n".join(model_health_lines) + "\n\n"
+    if release_notice:
+        model_health_block = f"{release_notice}\n\n" + model_health_block
     if strategy_watch_line:
         model_health_block += f"{strategy_watch_line}\n\n"
 
@@ -1785,16 +1809,15 @@ def _build_help_card() -> str:
         "• <code>/stats</code> 查看连赢、连输详细统计\n\n"
         "<b>💰 资金与阈值</b>\n"
         "• <code>/gf [金额]</code> 设置菠菜资金上限\n"
-        "• <code>/set [炸] [赢] [停] [盈停]</code> 核心阈值\n"
-        "<i>例：/set 1 1000000 3 2（炸1次 赢100w 停3局 盈停2）</i>\n"
+        "• <code>/stf [数字]</code> 设置本轮目标金额（单位：万）\n"
+        "<i>例：/stf 100</i>\n"
         "• <code>/wlc [n]</code> 连输相关阈值\n\n"
         "<b>🤖 模型与策略（进阶）</b>\n"
         "• <code>/model list</code> 查看可用模型\n"
         "• <code>/model select [编号/ID]</code> 切换模型（支持编号）\n"
         "<i>例：/model select 1</i>\n"
         "• <code>/apikey show</code> 查看当前密钥状态\n"
-        "• <code>/apikey set</code> / <code>/apikey add</code> / <code>/apikey del</code> 管理密钥\n"
-        "• <code>/ms [0/1/2]</code> 切换模式（0=反投, 1=预测, 2=追投）\n\n"
+        "• <code>/apikey set</code> / <code>/apikey add</code> / <code>/apikey del</code> 管理密钥\n\n"
         "<b>📋 预设与测算（进阶）</b>\n"
         "• <code>/yss</code> 查看全部预设\n"
         "• <code>/yss dl [名]</code> 删除预设\n"
@@ -5950,7 +5973,13 @@ async def delete_later(client, chat_id, message_id, delay=10):
     """延迟指定秒数后删除消息。"""
     await asyncio.sleep(delay)
     try:
-        await client.delete_messages(chat_id, message_id)
+        bot_token = str(getattr(client, "_admin_console_bot_token", "") or "").strip()
+        bot_chat_id = getattr(client, "_admin_console_bot_chat_id", None)
+        if bot_token and bot_chat_id is not None and str(chat_id) == str(bot_chat_id):
+            url = f"https://api.telegram.org/bot{bot_token}/deleteMessage"
+            await _post_json_async(url, {"chat_id": chat_id, "message_id": message_id}, timeout=5)
+        else:
+            await client.delete_messages(chat_id, message_id)
     except Exception:
         pass
 
@@ -6584,52 +6613,41 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 await check_bet_status(client, user_ctx, global_config)
             return
         
-        # set - 设置风控参数 - 与master一致
-        if cmd == "set" and len(my) >= 5:
-            try:
-                rt["explode"] = int(my[1])
-                rt["profit"] = int(my[2])
-                rt["stop"] = int(my[3])
-                rt["profit_stop"] = int(my[4])
-                if len(my) > 5:
-                    rt["stop_count"] = int(my[5])
-                user_ctx.save_state()
-                mes = _build_ops_card(
-                    "✅ 风控参数已更新",
-                    summary="新的炸号、盈利和暂停参数已经写入当前账号状态。",
-                    fields=[
-                        ("炸号阈值", f"{rt['explode']} 次"),
-                        ("盈利目标", f"{rt['profit']/10000:.2f} 万"),
-                        ("暂停局数", f"{rt['stop']} 局"),
-                        ("盈停局数", f"{rt['profit_stop']} 局"),
-                    ],
-                    action="建议执行 `status` 复核当前参数是否符合预期。",
-                )
-                log_event(logging.INFO, 'user_cmd', '设置参数', user_id=user_ctx.user_id,
-                         explode=rt['explode'], profit=rt['profit'], stop=rt['stop'], profit_stop=rt['profit_stop'])
-                message = await send_to_admin(client, mes, user_ctx, global_config)
-                asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-                if message:
-                    asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
-            except ValueError:
-                await send_to_admin(
-                    client,
-                    _build_ops_card(
-                        "❌ 风控参数设置失败",
-                        summary="参数格式无效，当前只支持整数。",
-                        action="请按 `set [炸] [赢] [停] [盈停]` 重新输入。",
-                    ),
-                    user_ctx,
-                    global_config,
-                )
-            return
-        if cmd == "set":
+        if cmd == "stf":
+            if len(my) == 2:
+                try:
+                    target_wan = float(my[1])
+                    if target_wan <= 0:
+                        raise ValueError
+                    rt["profit"] = int(target_wan * 10000)
+                    user_ctx.save_state()
+                    mes = _build_ops_card(
+                        "✅ 本轮目标金额已更新",
+                        fields=[("当前目标", f"{rt['profit'] / 10000:.2f} 万")],
+                    )
+                    log_event(logging.INFO, 'user_cmd', '设置本轮目标金额', user_id=user_ctx.user_id, profit=rt["profit"])
+                    message = await send_to_admin(client, mes, user_ctx, global_config)
+                    asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
+                    if message:
+                        asyncio.create_task(delete_later(client, message.chat_id, message.id, 30))
+                except ValueError:
+                    await send_to_admin(
+                        client,
+                        _build_ops_card(
+                            "❌ 目标金额设置失败",
+                            summary="请输入大于 0 的数字。",
+                            action="正确用法：`stf [数字]`，例如 `stf 100`。",
+                        ),
+                        user_ctx,
+                        global_config,
+                    )
+                return
             await send_to_admin(
                 client,
                 _build_ops_card(
-                    "❌ 风控参数设置失败",
-                    summary="当前参数数量不足。",
-                    action="请按 `set [炸] [赢] [停] [盈停]` 重新输入完整参数。",
+                    "❌ 目标金额设置失败",
+                    summary="当前参数数量不正确。",
+                    action="正确用法：`stf [数字]`，例如 `stf 100`。",
                 ),
                 user_ctx,
                 global_config,
@@ -7082,50 +7100,6 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             # 测算命令 - 与master一致
             await yc_command_handler_multiuser(client, event, my[1:], user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-            return
-        
-        # ms - 切换模式 - 与master一致
-        if cmd == "ms":
-            if len(my) > 1:
-                try:
-                    mode = int(my[1])
-                    mode_names = {0: "反投", 1: "预测", 2: "追投"}
-                    if mode in mode_names:
-                        rt["bet_mode"] = mode
-                        user_ctx.save_state()
-                        mes = _build_ops_card(
-                            "✅ 模式切换成功",
-                            summary="后续会按新的下注模式继续运行。",
-                            fields=[("当前模式", f"{mode_names[mode]} ({mode})")],
-                            action="建议执行 `status` 确认当前状态。",
-                        )
-                        log_event(logging.INFO, 'user_cmd', '切换模式', user_id=user_ctx.user_id, mode=mode)
-                    else:
-                        mes = _build_ops_card(
-                            "❌ 模式切换失败",
-                            summary="当前模式值无效。",
-                            action="可选模式：`0=反投`、`1=预测`、`2=追投`。",
-                        )
-                except ValueError:
-                    mes = _build_ops_card(
-                        "❌ 模式切换失败",
-                        summary="模式参数必须是数字。",
-                        action="请执行 `ms 0`、`ms 1` 或 `ms 2`。",
-                    )
-            else:
-                current_mode = rt.get("bet_mode", 1)
-                mode_names = {0: "反投", 1: "预测", 2: "追投"}
-                mes = _build_ops_card(
-                    "📌 当前下注模式",
-                    summary="这是当前账号使用的下注模式。",
-                    fields=[("当前模式", f"{mode_names.get(current_mode, '未知')} ({current_mode})")],
-                    action="如需切换，请执行 `ms [0|1|2]`。",
-                )
-            
-            message = await send_to_admin(client, mes, user_ctx, global_config)
-            asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
-            if message:
-                asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
             return
         
         # ========== 多用户管理命令 ==========
