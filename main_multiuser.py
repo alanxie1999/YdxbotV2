@@ -375,12 +375,48 @@ def _normalize_bot_parse_mode(parse_mode: str | None) -> str | None:
     return None
 
 
-def _build_admin_bot_reply_markup() -> Dict[str, Any]:
-    return {
-        "keyboard": [[{"text": "/help"}]],
-        "resize_keyboard": True,
-        "is_persistent": True,
-    }
+def _build_admin_bot_commands() -> List[Dict[str, str]]:
+    return [
+        {"command": "help", "description": "查看帮助"},
+        {"command": "status", "description": "查看状态"},
+        {"command": "pause", "description": "暂停押注"},
+        {"command": "resume", "description": "恢复押注"},
+        {"command": "balance", "description": "刷新余额"},
+        {"command": "yss", "description": "查看预设"},
+    ]
+
+
+def _render_bot_text_payload(text: str, parse_mode: str | None) -> tuple[str, str | None]:
+    mode = str(parse_mode or "").strip().lower()
+    raw = str(text or "")
+    if mode == "html":
+        return raw, "HTML"
+    if mode != "markdown":
+        return raw, None
+
+    import html
+    import re
+
+    placeholders: List[tuple[str, str]] = []
+
+    def _store(value: str) -> str:
+        token = f"__BOT_FMT_{len(placeholders)}__"
+        placeholders.append((token, value))
+        return token
+
+    def _replace_pre(match):
+        body = match.group(1)
+        return _store(f"<pre>{html.escape(body)}</pre>")
+
+    protected = re.sub(r"```([\s\S]*?)```", _replace_pre, raw)
+    escaped = html.escape(protected)
+    escaped = re.sub(r"\*\*([^*\n]+)\*\*", lambda m: f"<b>{m.group(1)}</b>", escaped)
+    escaped = re.sub(r"`([^`\n]+)`", lambda m: f"<code>{m.group(1)}</code>", escaped)
+
+    for token, value in placeholders:
+        escaped = escaped.replace(html.escape(token), value)
+        escaped = escaped.replace(token, value)
+    return escaped, "HTML"
 
 
 async def _bot_api_request(bot_token: str, method: str, *, payload: Dict[str, Any] | None = None, timeout: int = 30) -> Dict[str, Any]:
@@ -391,6 +427,36 @@ async def _bot_api_request(bot_token: str, method: str, *, payload: Dict[str, An
     if not data.get("ok", False):
         raise RuntimeError(str(data))
     return data
+
+
+async def _ensure_admin_bot_menu(user_ctx: UserContext) -> None:
+    bot_cfg = _get_admin_telegram_bot_cfg(user_ctx)
+    bot_token = str(bot_cfg.get("bot_token", "") or "").strip()
+    chat_id = _normalize_target(bot_cfg.get("chat_id"))
+    if not bot_token or chat_id in (None, ""):
+        return
+    commands = _build_admin_bot_commands()
+    try:
+        await _bot_api_request(
+            bot_token,
+            "setMyCommands",
+            payload={
+                "commands": commands,
+                "scope": {"type": "chat", "chat_id": chat_id},
+            },
+            timeout=10,
+        )
+        await _bot_api_request(
+            bot_token,
+            "setChatMenuButton",
+            payload={
+                "chat_id": chat_id,
+                "menu_button": {"type": "commands"},
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        log_event(logging.ERROR, 'admin_bot', '管理员 Bot 菜单初始化失败', user_id=user_ctx.user_id, error=str(e))
 
 
 async def _send_admin_console_text(client, user_ctx: UserContext, text: str, parse_mode: str | None = None):
@@ -407,12 +473,11 @@ async def _send_admin_console_text(client, user_ctx: UserContext, text: str, par
         chat_id = _normalize_target(bot_cfg.get("chat_id"))
         if not bot_token or chat_id in (None, ""):
             return None
+        rendered_text, api_parse_mode = _render_bot_text_payload(text, parse_mode)
         payload: Dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text,
-            "reply_markup": _build_admin_bot_reply_markup(),
+            "text": rendered_text,
         }
-        api_parse_mode = _normalize_bot_parse_mode(parse_mode)
         if api_parse_mode:
             payload["parse_mode"] = api_parse_mode
         result = await _bot_api_request(bot_token, "sendMessage", payload=payload, timeout=10)
@@ -922,6 +987,9 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 user_id=user_ctx.user_id,
                 error=str(e),
             )
+
+        if admin_mode == "telegram_bot":
+            await _ensure_admin_bot_menu(user_ctx)
 
         if admin_mode == "telegram_bot":
             existing_task = getattr(user_ctx, "_admin_console_task", None)

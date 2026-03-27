@@ -2147,6 +2147,36 @@ def _normalize_bot_parse_mode(parse_mode: Optional[str]) -> Optional[str]:
     return None
 
 
+def _render_bot_text_payload(text: str, parse_mode: Optional[str]) -> tuple[str, Optional[str]]:
+    mode = str(parse_mode or "").strip().lower()
+    raw = str(text or "")
+    if mode == "html":
+        return raw, "HTML"
+    if mode != "markdown":
+        return raw, None
+
+    placeholders: List[tuple[str, str]] = []
+
+    def _store(value: str) -> str:
+        token = f"__BOT_FMT_{len(placeholders)}__"
+        placeholders.append((token, value))
+        return token
+
+    def _replace_pre(match):
+        body = match.group(1)
+        return _store(f"<pre>{escape_html(body)}</pre>")
+
+    protected = re.sub(r"```([\s\S]*?)```", _replace_pre, raw)
+    escaped = escape_html(protected)
+    escaped = re.sub(r"\*\*([^*\n]+)\*\*", lambda m: f"<b>{m.group(1)}</b>", escaped)
+    escaped = re.sub(r"`([^`\n]+)`", lambda m: f"<code>{m.group(1)}</code>", escaped)
+
+    for token, value in placeholders:
+        escaped = escaped.replace(escape_html(token), value)
+        escaped = escaped.replace(token, value)
+    return escaped, "HTML"
+
+
 async def _post_form_async(url: str, payload: dict, timeout: int = 5):
     """在异步上下文中安全发送 form 请求，避免阻塞事件循环。"""
     return await asyncio.to_thread(requests.post, url, data=payload, timeout=timeout)
@@ -2210,16 +2240,11 @@ async def send_message_v2(
                 admin_target = bot_cfg.get("chat_id")
                 if bot_token and admin_target not in (None, ""):
                     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    rendered_text, bot_parse_mode = _render_bot_text_payload(admin_message, parse_mode)
                     payload: Dict[str, Any] = {
                         "chat_id": admin_target,
-                        "text": admin_message,
-                        "reply_markup": {
-                            "keyboard": [[{"text": "/help"}]],
-                            "resize_keyboard": True,
-                            "is_persistent": True,
-                        },
+                        "text": rendered_text,
                     }
-                    bot_parse_mode = _normalize_bot_parse_mode(parse_mode)
                     if bot_parse_mode:
                         payload["parse_mode"] = bot_parse_mode
                     response = await _post_json_async(url, payload, timeout=5)
@@ -2286,7 +2311,10 @@ async def send_message_v2(
                 chat_id = tg_bot_cfg.get("chat_id")
                 if bot_token and chat_id:
                     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                    payload = {"chat_id": chat_id, "text": priority_message}
+                    rendered_text, bot_parse_mode = _render_bot_text_payload(priority_message, parse_mode)
+                    payload = {"chat_id": chat_id, "text": rendered_text}
+                    if bot_parse_mode:
+                        payload["parse_mode"] = bot_parse_mode
                     await _post_json_async(url, payload, timeout=5)
                     _record_outbound_message(
                         user_ctx,

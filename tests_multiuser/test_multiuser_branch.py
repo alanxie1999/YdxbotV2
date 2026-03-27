@@ -689,10 +689,16 @@ def test_start_user_sends_startup_ready_notice(tmp_path, monkeypatch):
                 "session_name": "startup_user",
             },
             "groups": {"zq_group": [1], "zq_bot": [2]},
+            "admin_console": {
+                "mode": "telegram_id",
+                "telegram_id": {"chat_id": 8802},
+                "telegram_bot": {"bot_token": "", "chat_id": "", "allowed_sender_ids": []},
+            },
             "notification": {
-                "admin_chat": 8802,
-                "iyuu": {"enable": False},
-                "tg_bot": {"enable": True, "bot_token": "token", "chat_id": "chat"},
+                "channels": {
+                    "iyuu": {"enable": False},
+                    "telegram_notify_bot": {"enable": True, "bot_token": "token", "chat_id": "chat"},
+                },
             },
         },
     )
@@ -740,6 +746,124 @@ def test_start_user_sends_startup_ready_notice(tmp_path, monkeypatch):
     assert "版本：v1.2.3(test)" in sent[-1][1]
     assert "账户余额：1234.00 万" in sent[-1][1]
     assert "菠菜资金：2500.00 万" in sent[-1][1]
+
+
+def test_send_message_v2_admin_bot_renders_markdown_title_as_html(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "admin_bot_render_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "Bot管理用户"},
+            "telegram": {"user_id": 8803},
+            "admin_console": {
+                "mode": "telegram_bot",
+                "telegram_id": {"chat_id": 8803},
+                "telegram_bot": {
+                    "bot_token": "token",
+                    "chat_id": "8803",
+                    "allowed_sender_ids": [8803]
+                }
+            },
+            "notification": {"channels": {"iyuu": {"enable": False}, "telegram_notify_bot": {"enable": False}}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    payloads = []
+
+    def fake_post(url, data=None, json=None, timeout=5):
+        payloads.append({"url": url, "json": json, "data": data})
+        return SimpleNamespace(status_code=200, json=lambda: {"ok": True, "result": {"message_id": 9}})
+
+    monkeypatch.setattr(zm.requests, "post", fake_post)
+
+    asyncio.run(
+        zm.send_message_v2(
+            SimpleNamespace(),
+            "info",
+            "🎯 **测试标题** 🎯\n\n本局下注指令已发送。",
+            ctx,
+            {},
+            parse_mode="markdown",
+        )
+    )
+
+    assert payloads
+    payload = payloads[-1]["json"]
+    assert payload["parse_mode"] == "HTML"
+    assert "<b>测试标题</b>" in payload["text"]
+    assert "reply_markup" not in payload
+
+
+def test_start_user_initializes_admin_bot_menu(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "admin_bot_menu_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "Bot菜单用户"},
+            "telegram": {
+                "user_id": 8804,
+                "api_id": 123,
+                "api_hash": "hash",
+                "session_name": "admin_bot_menu_user",
+            },
+            "groups": {"zq_group": [1], "zq_bot": [2]},
+            "admin_console": {
+                "mode": "telegram_bot",
+                "telegram_id": {"chat_id": 8804},
+                "telegram_bot": {
+                    "bot_token": "token",
+                    "chat_id": "8804",
+                    "allowed_sender_ids": [8804]
+                }
+            },
+            "notification": {"channels": {"iyuu": {"enable": False}, "telegram_notify_bot": {"enable": False}}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    calls = []
+
+    class DummyClient:
+        async def connect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def send_message(self, target, message, parse_mode=None):
+            return SimpleNamespace(chat_id=target, id=1)
+
+    async def fake_create_client(user_ctx, global_cfg):
+        return DummyClient()
+
+    async def fake_fetch_account_balance(user_ctx):
+        return 12_340_000
+
+    async def fake_bot_api_request(bot_token, method, payload=None, timeout=30):
+        calls.append((method, payload))
+        if method == "sendMessage":
+            return {"ok": True, "result": {"message_id": 10}}
+        return {"ok": True, "result": True}
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(mm, "_acquire_session_lock", lambda _ctx: True)
+    monkeypatch.setattr(mm, "create_client", fake_create_client)
+    monkeypatch.setattr(mm, "register_handlers", lambda client, user_ctx, global_cfg: None)
+    monkeypatch.setattr(mm, "fetch_account_balance", fake_fetch_account_balance)
+    monkeypatch.setattr(mm, "register_main_user_log_identity", lambda _ctx: "bot-menu-user")
+    monkeypatch.setattr(zm, "register_user_log_identity", lambda _ctx: "bot-menu-user")
+    monkeypatch.setattr(zm, "heal_stale_pending_bets", lambda _ctx: {"count": 0, "items": []})
+    monkeypatch.setattr(mm, "_bot_api_request", fake_bot_api_request)
+    monkeypatch.setattr(mm.asyncio, "create_task", fake_create_task)
+
+    client = asyncio.run(mm.start_user(ctx, {}))
+
+    assert client is not None
+    methods = [method for method, _ in calls]
+    assert "setMyCommands" in methods
+    assert "setChatMenuButton" in methods
 
 
 def test_user_isolation_between_two_contexts(tmp_path):
