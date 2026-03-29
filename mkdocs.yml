@@ -1,0 +1,36 @@
+site_name: YdxbotV2 Wiki
+site_description: YdxbotV2 使用文档与运维说明
+site_url: https://ibarnard.github.io/YdxbotV2/
+repo_url: https://github.com/ibarnard/YdxbotV2
+repo_name: ibarnard/YdxbotV2
+docs_dir: docs
+site_dir: site
+use_directory_urls: true
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.highlight
+
+nav:
+  - 首页: index.md
+  - 快速开始: quick-start.md
+  - 配置说明: config.md
+  - 命令参考: commands.md
+  - 更新日志: CHANGELOG.md
+  - 发布规范: RELEASE_POLICY.md
+
