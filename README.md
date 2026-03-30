@@ -1,56 +1,35 @@
 # YdxbotV2
 
-多账号 Telegram 自动化脚本。
+Ydxbot 是一个基于 Telegram 的多账号自动化脚本项目。
 
-## 使用范围
-仅用于个人技术研究与自动化流程学习，请遵守当地法律法规与平台规则。
+## 说明
 
-## 快速安装
-```bash
-git clone https://github.com/ibarnard/YdxbotV2.git
-cd YdxbotV2
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+本项目当前以开源形式提供，主要用于：
 
-## 最小配置
-1. 通用配置
-```bash
-cp config/global_config.example.json config/global_config.json
-```
-编辑 `config/global_config.json`，按实际环境填写必要字段。
+- 自动化流程研究
+- 多账号架构实践
+- Telegram 交互与通知机制测试
+- 文档与运维流程演练
 
-2. 新建账号目录（示例：`xu`）
-```bash
-mkdir -p users/xu
-cp users/_template/example_config.json users/xu/xu_config.json
-cp users/_template/state.json.default users/xu/state.json
-cp users/_template/presets.json.default users/xu/presets.json
-```
-编辑 `users/xu/xu_config.json`，填写该账号私有信息。
+## 免责声明
 
-3. 放置 session
-- 将该账号对应的 `.session` 文件放到 `users/xu/` 目录。
+本项目仅供学习、测试与技术研究使用。
 
-## 启动
-```bash
-python3 main_multiuser.py
-```
+使用者应自行判断其适用范围，并自行承担部署、运行、配置、更新及使用过程中产生的一切风险与责任。
 
-## 更新
-```bash
-git fetch --all --tags
-git pull --ff-only origin main
-source venv/bin/activate
-pip install -r requirements.txt
-```
-然后重启脚本进程。
+项目维护者与贡献者不对任何直接或间接损失、封禁、数据异常、账户风险、平台风险或其他后果承担责任。
 
-## 运行建议
-- 建议使用 `tmux` 或 `systemd` 托管进程。
-- 不要同时混用多种启动方式，避免重复进程。
+## 文档入口
 
-## 安全说明
-- 不要提交任何私密数据（会话文件、密钥、Cookie、Token 等）。
-- `users/*` 下账号数据仅保留在本地或服务器。
+完整使用说明、配置方式、命令参考、更新规范与后续文档，请查看 Wiki：
+
+- Wiki 首页：[https://ibarnard.github.io/YdxbotV2/](https://ibarnard.github.io/YdxbotV2/)
+- 快速开始：[https://ibarnard.github.io/YdxbotV2/quick-start/](https://ibarnard.github.io/YdxbotV2/quick-start/)
+- 配置说明：[https://ibarnard.github.io/YdxbotV2/config/](https://ibarnard.github.io/YdxbotV2/config/)
+- 命令参考：[https://ibarnard.github.io/YdxbotV2/commands/](https://ibarnard.github.io/YdxbotV2/commands/)
+
+## 当前状态
+
+当前仓库 README 只保留项目说明与文档入口。
+
+详细内容统一在 Wiki 中维护，以避免 README、代码和发布说明长期分叉。

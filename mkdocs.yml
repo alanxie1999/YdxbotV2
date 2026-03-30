@@ -31,6 +31,10 @@ nav:
   - 快速开始: quick-start.md
   - 配置说明: config.md
   - 命令参考: commands.md
+  - 运行机制:
+      - 模型兜底与恢复: runtime-model-fallback.md
+      - 统计口径说明: runtime-stats.md
+  - 运维排障:
+      - 常见故障排查: ops-troubleshooting.md
   - 更新日志: CHANGELOG.md
   - 发布规范: RELEASE_POLICY.md
-
