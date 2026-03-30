@@ -57,6 +57,8 @@ DEFAULT_STATE: Dict[str, Any] = {
     "last_report_round": 0,
     "last_alert_at": {},
     "last_message_ids": {},
+    "last_diag_reason": "",
+    "last_diag_round": 0,
 }
 
 
@@ -197,6 +199,43 @@ def get_current_streak(history: List[int]) -> tuple[int, int]:
     return streak, tail
 
 
+def _recent_near_to_far(history: List[int], limit: int = 12) -> List[int]:
+    if not history:
+        return []
+    return [int(x) for x in history[-limit:][::-1]]
+
+
+def _alternation_prefix_length(values: List[int]) -> int:
+    if not values:
+        return 0
+    length = 1
+    for idx in range(1, len(values)):
+        if int(values[idx]) != int(values[idx - 1]):
+            length += 1
+        else:
+            break
+    return length
+
+
+def analyze_alert_alternation(history: List[int], prefix_limit: int = 12) -> Dict[str, Any]:
+    near_to_far = _recent_near_to_far(history, prefix_limit)
+    prefix_len = _alternation_prefix_length(near_to_far)
+    prefix_seq = "".join(str(x) for x in near_to_far[:prefix_len])
+    latest_value = int(near_to_far[0]) if near_to_far else None
+    continue_next = (1 - latest_value) if latest_value in {0, 1} else None
+    reverse_bet = latest_value if latest_value in {0, 1} else None
+    return {
+        "near_to_far_seq": "".join(str(x) for x in near_to_far),
+        "prefix_len": int(prefix_len),
+        "prefix_seq": prefix_seq,
+        "latest_value": latest_value,
+        "continue_next": continue_next,
+        "reverse_bet": reverse_bet,
+        "direct_trigger": prefix_len >= 6,
+        "candidate": prefix_len >= 4,
+    }
+
+
 def _cooldown_ready(state: Dict[str, Any], config: Dict[str, Any], key: str, now_ts: Optional[int] = None) -> bool:
     now = int(now_ts or time.time())
     last_map = state.get("last_alert_at", {})
@@ -312,16 +351,13 @@ def build_streak_alert(history: List[int], config: Dict[str, Any]) -> Optional[s
 
 
 def build_pair_alert(history: List[int], config: Dict[str, Any]) -> Optional[str]:
-    rhythm = zm.analyze_rhythm_context(history)
-    threshold = int(config.get("pair_trigger_consecutive", 3) or 3)
-    tag = str(rhythm.get("rhythm_tag", ""))
-    if tag != "ALTERNATION_RHYTHM":
+    alternation = analyze_alert_alternation(history)
+    if not alternation.get("candidate", False):
         return None
-
-    next_char = rhythm.get("alternation_next")
-    if next_char not in {0, 1}:
+    reverse_bet = alternation.get("reverse_bet")
+    if reverse_bet not in {0, 1}:
         return None
-    advice_side = "大" if int(next_char) == 0 else "小"
+    advice_side = "大" if int(reverse_bet) == 1 else "小"
     return _build_pattern_alert_html(
         alert_type="配对规律提醒",
         rule_text="当前盘口连续识别为交替型（010101 / 101010）",
@@ -400,15 +436,16 @@ def evaluate_alerts(state: Dict[str, Any], config: Dict[str, Any], history: List
 
     rhythm = zm.analyze_rhythm_context(history)
     rhythm_tag = str(rhythm.get("rhythm_tag", ""))
+    alternation = analyze_alert_alternation(history)
     prev_tag = str(state.get("last_pair_tag", "") or "")
     prev_count = int(state.get("last_pair_count", 0) or 0)
-    if rhythm_tag in {"ALTERNATION_RHYTHM", "PAIR_FORMATION"}:
-        current_count = prev_count + 1 if rhythm_tag == prev_tag else 1
-        state["last_pair_tag"] = rhythm_tag
+    if alternation.get("candidate", False):
+        current_count = prev_count + 1 if prev_tag == "ALTERNATION_RHYTHM" else 1
+        state["last_pair_tag"] = "ALTERNATION_RHYTHM"
         state["last_pair_count"] = current_count
         notify_threshold = int(config.get("pair_trigger_consecutive", 3) or 3)
-        pair_key = f"pair_{rhythm_tag}_{current_count}"
-        if current_count >= notify_threshold and _cooldown_ready(state, config, pair_key):
+        pair_key = f"pair_ALTERNATION_RHYTHM_{current_count}"
+        if (alternation.get("direct_trigger", False) or current_count >= notify_threshold) and _cooldown_ready(state, config, pair_key):
             message = build_pair_alert(history, config)
             if message:
                 events.append(AlertEvent("pair", message))
@@ -427,6 +464,30 @@ def evaluate_alerts(state: Dict[str, Any], config: Dict[str, Any], history: List
     ):
         events.append(AlertEvent("report", build_market_stats_report(history, report_interval, config)))
         state["last_report_round"] = round_counter
+
+    if not events:
+        diag_reason = ""
+        if alternation.get("candidate", False):
+            pair_count = int(state.get("last_pair_count", 0) or 0)
+            notify_threshold = int(config.get("pair_trigger_consecutive", 3) or 3)
+            if alternation.get("direct_trigger", False):
+                diag_reason = "交替前缀已达直发阈值，但冷却中未重复提醒"
+            else:
+                diag_reason = f"交替前缀长度 {alternation.get('prefix_len', 0)}，连续识别 {pair_count} 次，未到阈值 {notify_threshold}"
+        elif rhythm_tag == "PAIR_FORMATION":
+            diag_reason = f"当前更像成双型（{alternation.get('near_to_far_seq', '')[:12]}），按配置禁发"
+        elif streak_len < threshold:
+            side_text = "大" if side == 1 else "小" if side == 0 else "未知"
+            diag_reason = f"当前仅 {streak_len} 连{side_text}，未到阈值 {threshold}"
+        else:
+            diag_reason = f"当前盘型偏 {rhythm_tag}，交替前缀长度 {alternation.get('prefix_len', 0)}，未触发提醒"
+
+        last_diag_reason = str(state.get("last_diag_reason", "") or "")
+        last_diag_round = int(state.get("last_diag_round", 0) or 0)
+        if diag_reason and (diag_reason != last_diag_reason or round_counter - last_diag_round >= 5):
+            logger.info("盘口播报未触发：%s", diag_reason)
+            state["last_diag_reason"] = diag_reason
+            state["last_diag_round"] = round_counter
 
     return events
 

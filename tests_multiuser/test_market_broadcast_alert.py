@@ -39,6 +39,19 @@ def test_build_pair_alert_for_alternation_gives_reverse_suggestion():
     assert message.rstrip().endswith("@a")
 
 
+def test_build_pair_alert_detects_recent_prefix_alternation_even_when_older_data_is_mixed():
+    # 用户观察到的盘口字符串是“由近及远”0101011010010，
+    # state.history 传入时按主程序惯例是“由远及近”，所以这里传其反转。
+    history = [int(x) for x in "0100101101010"]
+    config = {"pair_trigger_consecutive": 3, "mention_users": ["@a"]}
+
+    message = mba.build_pair_alert(history, config)
+
+    assert message is not None
+    assert "配对规律提醒" in message
+    assert "010101 / 101010" in message
+
+
 def test_build_pair_alert_for_pair_formation_is_disabled():
     history = [1, 0, 1, 1, 0, 1, 1, 0, 1]
     config = {"pair_trigger_consecutive": 3, "mention_users": ["@a"]}
