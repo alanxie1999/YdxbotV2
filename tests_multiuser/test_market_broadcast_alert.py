@@ -87,7 +87,7 @@ def test_handle_command_updates_threshold_and_mentions(tmp_path, monkeypatch):
     assert "开启盘口播报提醒" in result
 
 
-def test_process_private_command_message_allows_dm_even_when_alerts_disabled():
+def test_process_command_message_allows_dm_even_when_alerts_disabled():
     config = {
         "enable": False,
         "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
@@ -101,7 +101,7 @@ def test_process_private_command_message_allows_dm_even_when_alerts_disabled():
         "text": "/fa",
     }
 
-    result = mba.process_private_command_message(message, config)
+    result = mba.process_command_message(message, config)
 
     assert result is not None
     chat_id, reply = result
@@ -109,7 +109,7 @@ def test_process_private_command_message_allows_dm_even_when_alerts_disabled():
     assert "盘口播报提醒配置" in reply
 
 
-def test_process_private_command_message_ignores_group_chat():
+def test_process_command_message_allows_notify_group_chat():
     config = {
         "enable": True,
         "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
@@ -122,7 +122,27 @@ def test_process_private_command_message_ignores_group_chat():
         "text": "/fa",
     }
 
-    assert mba.process_private_command_message(message, config) is None
+    result = mba.process_command_message(message, config)
+    assert result is not None
+    chat_id, reply = result
+    assert chat_id == -1003657725404
+    assert "盘口播报提醒配置" in reply
+
+
+def test_process_command_message_ignores_unrelated_group_chat():
+    config = {
+        "enable": True,
+        "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
+        "chat_ids": [-1003657725404],
+        "allowed_sender_ids": [5721909476],
+    }
+    message = {
+        "chat": {"id": -1009999999999, "type": "supergroup"},
+        "from": {"id": 5721909476},
+        "text": "/fa",
+    }
+
+    assert mba.process_command_message(message, config) is None
 
 
 def test_process_group_message_updates_state_and_triggers_report():

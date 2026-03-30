@@ -625,7 +625,7 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
 
     return (
         "📡 fa 命令说明\n\n"
-        "建议：请私聊机器人执行以下配置命令，群里只保留提醒通知。\n\n"
+        "支持私聊机器人或在通知群里执行以下配置命令。\n\n"
         "fa\n"
         "fa on / fa off\n"
         "fa s 4\n"
@@ -639,9 +639,12 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
     )
 
 
-def process_private_command_message(message: Dict[str, Any], config: Dict[str, Any]) -> Optional[tuple[int, str]]:
+def process_command_message(message: Dict[str, Any], config: Dict[str, Any]) -> Optional[tuple[int, str]]:
     ctx = _extract_message_context(message)
-    if ctx["chat_type"] != "private":
+    chat_ids = set(int(x) for x in config.get("chat_ids", []) if str(x).strip())
+    is_private = ctx["chat_type"] == "private"
+    is_notify_group = ctx["chat_id"] in chat_ids if ctx["chat_id"] else False
+    if not is_private and not is_notify_group:
         return None
     reply = handle_command(ctx["text"], ctx["sender_id"], config)
     if not reply:
@@ -735,7 +738,7 @@ def run_forever(sleep_seconds: int = 3) -> None:
                 update_id = int(update.get("update_id", 0) or 0)
                 state["last_update_id"] = update_id + 1
                 message = update.get("message", {}) if isinstance(update.get("message", {}), dict) else {}
-                command_result = process_private_command_message(message, config)
+                command_result = process_command_message(message, config)
                 if command_result:
                     reply_chat_id, command_reply = command_result
                     _send_text(bot_token, reply_chat_id, command_reply)
