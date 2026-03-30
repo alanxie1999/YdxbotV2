@@ -3109,6 +3109,28 @@ def test_build_stats_report_uses_actual_window_labels_and_resolved_chain():
     assert " 0 " in report
 
 
+def test_build_stats_report_uses_account_level_resolved_bet_logs_not_current_chain():
+    state = SimpleNamespace(
+        history=[1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0],
+        runtime={"bet_reset_log_index": 4},
+        bet_sequence_log=[
+            {"profit": -1000, "result": "输"},
+            {"profit": -2000, "result": "输"},
+            {"profit": 990, "result": "赢"},
+            {"profit": -3000, "result": "输"},
+            {"profit": -4000, "result": "输"},
+            {"profit": 1980, "result": "赢"},
+        ],
+    )
+
+    report = zm._build_stats_report(state, windows=[1000, 5])
+
+    assert "押注统计" in report
+    assert "连输" in report
+    assert " 2  " in report
+    assert " 1  " in report
+
+
 def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "help_user"
     _write_json(

@@ -5384,8 +5384,8 @@ def count_lose_streaks(bet_sequence_log):
     return lose_streaks
 
 
-def _get_resolved_strategy_bet_logs(state: UserState) -> List[Dict[str, Any]]:
-    logs = _get_strategy_bet_sequence_log(state)
+def _get_resolved_account_bet_logs(state: UserState) -> List[Dict[str, Any]]:
+    logs = state.bet_sequence_log if isinstance(getattr(state, "bet_sequence_log", None), list) else []
     resolved: List[Dict[str, Any]] = []
     for entry in logs:
         if not isinstance(entry, dict):
@@ -5399,7 +5399,7 @@ def _get_resolved_strategy_bet_logs(state: UserState) -> List[Dict[str, Any]]:
 def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -> str:
     windows = windows or [1000, 500, 200, 100]
     history = state.history if isinstance(state.history, list) else []
-    resolved_logs = _get_resolved_strategy_bet_logs(state)
+    resolved_logs = _get_resolved_account_bet_logs(state)
 
     def _build_section(title: str, categories: List[str], source_length: int, source_getter) -> List[str]:
         labels: List[int] = []
@@ -5460,7 +5460,7 @@ def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -
     lines = [
         "\u6700\u8fd1\u5c40\u6570\u201c\u8fde\u5927\u3001\u8fde\u5c0f\u3001\u8fde\u8f93\u201d\u7edf\u8ba1",
         "",
-        "\u8bf4\u660e\uff1a\u76d8\u53e3\u7edf\u8ba1\u57fa\u4e8e history\uff1b\u62bc\u6ce8\u7edf\u8ba1\u57fa\u4e8e\u5f53\u524d\u7b56\u7565\u94fe\u4e2d\u5df2\u7ed3\u7b97\u62bc\u6ce8\u8bb0\u5f55\u3002",
+        "\u8bf4\u660e\uff1a\u76d8\u53e3\u7edf\u8ba1\u57fa\u4e8e history\uff1b\u62bc\u6ce8\u7edf\u8ba1\u57fa\u4e8e\u5f53\u524d\u8d26\u53f7\u5168\u90e8\u5df2\u7ed3\u7b97\u62bc\u6ce8\u8bb0\u5f55\u3002",
         "",
         *market_lines,
         *bet_lines,
