@@ -1025,7 +1025,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 from market_broadcast_alert.market_broadcast_alert import load_config as load_market_alert_config
 
                 market_alert_cfg = load_market_alert_config()
-                if bool(market_alert_cfg.get("enable", False)):
+                if str(market_alert_cfg.get("bot_token", "") or "").strip():
                     MARKET_BROADCAST_ALERT_TASK = asyncio.create_task(
                         _run_market_broadcast_alert_background(user_ctx)
                     )
@@ -1035,6 +1035,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                         '盘口播报提醒模块已启动',
                         user_id=user_ctx.user_id,
                         chat_id=market_alert_cfg.get("chat_id"),
+                        enable=bool(market_alert_cfg.get("enable", False)),
                     )
             except Exception as e:
                 log_event(

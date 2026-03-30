@@ -83,6 +83,47 @@ def test_handle_command_updates_threshold_and_mentions(tmp_path, monkeypatch):
     config = mba.load_config()
     assert config["report_enable"] is True
 
+    result = mba.handle_command("/faon", sender_id=0, config=config)
+    assert "开启盘口播报提醒" in result
+
+
+def test_process_private_command_message_allows_dm_even_when_alerts_disabled():
+    config = {
+        "enable": False,
+        "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
+        "chat_ids": [-1003657725404],
+        "allowed_sender_ids": [5721909476],
+        "mention_users": ["@TrumpChe"],
+    }
+    message = {
+        "chat": {"id": 5721909476, "type": "private"},
+        "from": {"id": 5721909476},
+        "text": "/fa",
+    }
+
+    result = mba.process_private_command_message(message, config)
+
+    assert result is not None
+    chat_id, reply = result
+    assert chat_id == 5721909476
+    assert "盘口播报提醒配置" in reply
+
+
+def test_process_private_command_message_ignores_group_chat():
+    config = {
+        "enable": True,
+        "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
+        "chat_ids": [-1003657725404],
+        "allowed_sender_ids": [5721909476],
+    }
+    message = {
+        "chat": {"id": -1003657725404, "type": "supergroup"},
+        "from": {"id": 5721909476},
+        "text": "/fa",
+    }
+
+    assert mba.process_private_command_message(message, config) is None
+
 
 def test_process_group_message_updates_state_and_triggers_report():
     config = {
@@ -145,7 +186,7 @@ def test_process_market_history_snapshot_uses_main_history_not_group_message(tmp
         {
             "enable": True,
             "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
-            "chat_id": -1002310838908,
+            "chat_ids": [-1002310838908, -1003657725404],
             "allowed_sender_ids": [5721909476],
             "report_enable": True,
             "streak_threshold": 4,
@@ -158,15 +199,35 @@ def test_process_market_history_snapshot_uses_main_history_not_group_message(tmp
 
     sent = mba.process_market_history_snapshot([1, 0, 1, 1, 1, 1])
 
-    assert sent == 1
-    assert sent_messages
-    assert sent_messages[0][1] == -1002310838908
-    assert "连大提醒" in sent_messages[0][2]
-    assert scheduled and scheduled[0][2] == mba.AUTO_DELETE_SECONDS
+    assert sent == 2
+    assert len(sent_messages) == 2
+    assert {item[1] for item in sent_messages} == {-1002310838908, -1003657725404}
+    assert all("连大提醒" in item[2] for item in sent_messages)
+    assert len(scheduled) == 2
+    assert all(item[2] == mba.AUTO_DELETE_SECONDS for item in scheduled)
     assert not deleted_messages
 
     sent_again = mba.process_market_history_snapshot([1, 0, 1, 1, 1, 1])
     assert sent_again == 0
+
+
+def test_load_config_normalizes_chat_ids_and_legacy_chat_id(tmp_path, monkeypatch):
+    config_path = tmp_path / "cfg.json"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(mba, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(mba, "STATE_PATH", state_path)
+
+    mba.save_config(
+        {
+            "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
+            "chat_id": -100111,
+            "chat_ids": [-100222, "-100333", -100222],
+        }
+    )
+
+    config = mba.load_config()
+
+    assert config["chat_ids"] == [-100222, -100333]
 
 
 def test_build_market_stats_report_has_no_mentions_or_recent_history():

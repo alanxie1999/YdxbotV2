@@ -34,7 +34,7 @@ AUTO_DELETE_SECONDS = 60
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enable": False,
     "bot_token": "",
-    "chat_id": 0,
+    "chat_ids": [],
     "allowed_sender_ids": [],
     "report_enable": True,
     "streak_threshold": 4,
@@ -111,6 +111,22 @@ def load_config() -> Dict[str, Any]:
     config["report_interval"] = max(1, int(config.get("report_interval", 10) or 10))
     config["cooldown_seconds"] = max(0, int(config.get("cooldown_seconds", 600) or 600))
     config["report_enable"] = _to_bool(config.get("report_enable", True), True)
+    raw_chat_ids = config.get("chat_ids", config.get("chat_id", []))
+    if isinstance(raw_chat_ids, (int, str)):
+        raw_chat_ids = [raw_chat_ids]
+    if not isinstance(raw_chat_ids, list):
+        raw_chat_ids = []
+    normalized_chat_ids: List[int] = []
+    for item in raw_chat_ids:
+        try:
+            chat_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        if chat_id and chat_id not in normalized_chat_ids:
+            normalized_chat_ids.append(chat_id)
+    config["chat_ids"] = normalized_chat_ids
+    if "chat_id" in config:
+        config.pop("chat_id", None)
     mention_users = config.get("mention_users", [])
     if not isinstance(mention_users, list):
         mention_users = []
@@ -147,18 +163,18 @@ def save_state(state: Dict[str, Any]) -> None:
     _write_json(STATE_PATH, state)
 
 
-def validate_runtime_config(config: Dict[str, Any]) -> tuple[str, int]:
+def validate_runtime_config(config: Dict[str, Any], require_chat_ids: bool = True) -> tuple[str, List[int]]:
     bot_token = str(config.get("bot_token", "") or "").strip()
-    chat_id = int(config.get("chat_id", 0) or 0)
+    chat_ids = list(config.get("chat_ids", [])) if isinstance(config.get("chat_ids", []), list) else []
     if not bot_token:
         raise ValueError("盘口播报提醒未配置 bot_token")
     if not re.fullmatch(r"\d{6,}:[A-Za-z0-9_-]{20,}", bot_token):
         raise ValueError(
             "盘口播报提醒 bot_token 格式无效，请填写 BotFather 提供的完整 token，格式应为“数字:密钥”"
         )
-    if not chat_id:
-        raise ValueError("盘口播报提醒未配置 chat_id")
-    return bot_token, chat_id
+    if require_chat_ids and not chat_ids:
+        raise ValueError("盘口播报提醒未配置 chat_ids")
+    return bot_token, chat_ids
 
 
 def parse_market_history(text: str) -> List[int]:
@@ -436,6 +452,27 @@ def _send_text(bot_token: str, chat_id: int, text: str, parse_mode: Optional[str
     return response.json()
 
 
+def _build_bot_commands() -> List[Dict[str, str]]:
+    return [
+        {"command": "fa", "description": "查看盘口播报配置"},
+        {"command": "faon", "description": "开启盘口播报提醒"},
+        {"command": "faoff", "description": "关闭盘口播报提醒"},
+        {"command": "fas", "description": "设置连大连小提醒阈值"},
+        {"command": "fap", "description": "设置配对规律提醒阈值"},
+        {"command": "far", "description": "设置周期播报开关或间隔"},
+        {"command": "fam", "description": "查看或修改艾特名单"},
+    ]
+
+
+def _ensure_bot_menu(bot_token: str) -> None:
+    url = f"https://api.telegram.org/bot{bot_token}/setMyCommands"
+    response = requests.post(url, json={"commands": _build_bot_commands()}, timeout=15)
+    response.raise_for_status()
+    menu_url = f"https://api.telegram.org/bot{bot_token}/setChatMenuButton"
+    menu_response = requests.post(menu_url, json={"menu_button": {"type": "commands"}}, timeout=15)
+    menu_response.raise_for_status()
+
+
 def _delete_message(bot_token: str, chat_id: int, message_id: int) -> None:
     url = f"https://api.telegram.org/bot{bot_token}/deleteMessage"
     response = requests.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=15)
@@ -459,8 +496,35 @@ def _normalize_command(text: str) -> List[str]:
         return []
     if raw.startswith("/"):
         raw = raw[1:]
+    alias_map = {
+        "faon": "fa on",
+        "faoff": "fa off",
+        "fas": "fa s",
+        "fap": "fa p",
+        "far": "fa r",
+        "fam": "fa m",
+    }
+    lowered = raw.lower()
+    for alias, replacement in alias_map.items():
+        if lowered == alias:
+            raw = replacement
+            break
+        if lowered.startswith(alias + " "):
+            raw = replacement + raw[len(alias):]
+            break
     raw = raw.replace("@", " @")
     return [part.strip() for part in raw.split() if part.strip()]
+
+
+def _extract_message_context(message: Dict[str, Any]) -> Dict[str, Any]:
+    chat = message.get("chat", {}) if isinstance(message.get("chat", {}), dict) else {}
+    sender = message.get("from", {}) if isinstance(message.get("from", {}), dict) else {}
+    return {
+        "chat_id": int(chat.get("id", 0) or 0),
+        "chat_type": str(chat.get("type", "") or "").strip().lower(),
+        "sender_id": int(sender.get("id", 0) or 0),
+        "text": str(message.get("text", "") or ""),
+    }
 
 
 def _normalize_mention_tokens(tokens: List[str]) -> List[str]:
@@ -493,10 +557,10 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
         return "❌ 仅指定管理员可使用该命令"
 
     bot_token = str(config.get("bot_token", "") or "").strip()
-    chat_id = int(config.get("chat_id", 0) or 0)
-    if not allowed_sender_ids and bot_token and chat_id and sender_id:
+    primary_chat_id = int(config.get("chat_ids", [0])[0] or 0) if config.get("chat_ids") else 0
+    if not allowed_sender_ids and bot_token and primary_chat_id and sender_id:
         try:
-            if not _is_admin(bot_token, chat_id, sender_id):
+            if not _is_admin(bot_token, primary_chat_id, sender_id):
                 return "❌ 仅群管理员可使用该命令"
         except Exception:
             return "❌ 管理员身份校验失败，请稍后再试"
@@ -504,10 +568,11 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
     if len(tokens) == 1:
         mentions = " ".join(config.get("mention_users", [])) or "未设置"
         status = "ON" if bool(config.get("enable", False)) else "OFF"
+        chat_ids_text = " / ".join(str(x) for x in config.get("chat_ids", [])) or "未设置"
         return (
             "📡 盘口播报提醒配置\n\n"
             f"开关：{status}\n"
-            f"群ID：{config.get('chat_id', 0)}\n"
+            f"通知群ID：{chat_ids_text}\n"
             f"命令管理员ID：{', '.join(str(x) for x in config.get('allowed_sender_ids', [])) or '未设置'}\n"
             f"连大连小阈值：{config.get('streak_threshold', 4)}\n"
             f"配对规律阈值：{config.get('pair_trigger_consecutive', 3)}\n"
@@ -560,6 +625,7 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
 
     return (
         "📡 fa 命令说明\n\n"
+        "建议：请私聊机器人执行以下配置命令，群里只保留提醒通知。\n\n"
         "fa\n"
         "fa on / fa off\n"
         "fa s 4\n"
@@ -569,8 +635,18 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
         "fa m\n"
         "fa m + @user1 @user2\n"
         "fa m - @user1\n"
-        "配置文件需填写：bot_token / chat_id / allowed_sender_ids"
+        "配置文件需填写：bot_token / chat_ids / allowed_sender_ids"
     )
+
+
+def process_private_command_message(message: Dict[str, Any], config: Dict[str, Any]) -> Optional[tuple[int, str]]:
+    ctx = _extract_message_context(message)
+    if ctx["chat_type"] != "private":
+        return None
+    reply = handle_command(ctx["text"], ctx["sender_id"], config)
+    if not reply:
+        return None
+    return ctx["chat_id"], reply
 
 
 def process_group_message(message: Dict[str, Any], config: Dict[str, Any], state: Dict[str, Any]) -> List[AlertEvent]:
@@ -595,7 +671,7 @@ def process_market_history_snapshot(history: List[int]) -> int:
             return 0
 
         try:
-            bot_token, chat_id = validate_runtime_config(config)
+            bot_token, chat_ids = validate_runtime_config(config, require_chat_ids=True)
         except ValueError as exc:
             logger.warning("盘口播报提醒配置无效：%s", exc)
             return 0
@@ -608,23 +684,27 @@ def process_market_history_snapshot(history: List[int]) -> int:
         events = evaluate_alerts(state, config, normalized_history[-2000:])
         sent_count = 0
         for event in events:
-            try:
-                last_message_ids = state.setdefault("last_message_ids", {})
-                previous_message_id = int(last_message_ids.get(event.event_type, 0) or 0)
-                if previous_message_id > 0:
-                    try:
-                        _delete_message(bot_token, chat_id, previous_message_id)
-                    except requests.RequestException:
-                        pass
-                response = _send_text(bot_token, chat_id, event.message, parse_mode=event.parse_mode)
-                message_id = int(response.get("result", {}).get("message_id", 0) or 0)
-                if message_id > 0:
-                    last_message_ids[event.event_type] = message_id
-                    _schedule_delete(bot_token, chat_id, message_id, AUTO_DELETE_SECONDS)
-                sent_count += 1
-            except requests.RequestException as exc:
-                logger.warning("盘口播报提醒发送失败：%s", exc)
-                break
+            for chat_id in chat_ids:
+                try:
+                    last_message_ids = state.setdefault("last_message_ids", {})
+                    per_event = last_message_ids.setdefault(event.event_type, {})
+                    if not isinstance(per_event, dict):
+                        per_event = {}
+                        last_message_ids[event.event_type] = per_event
+                    previous_message_id = int(per_event.get(str(chat_id), 0) or 0)
+                    if previous_message_id > 0:
+                        try:
+                            _delete_message(bot_token, chat_id, previous_message_id)
+                        except requests.RequestException:
+                            pass
+                    response = _send_text(bot_token, chat_id, event.message, parse_mode=event.parse_mode)
+                    message_id = int(response.get("result", {}).get("message_id", 0) or 0)
+                    if message_id > 0:
+                        per_event[str(chat_id)] = message_id
+                        _schedule_delete(bot_token, chat_id, message_id, AUTO_DELETE_SECONDS)
+                    sent_count += 1
+                except requests.RequestException as exc:
+                    logger.warning("盘口播报提醒发送失败：chat_id=%s error=%s", chat_id, exc)
 
         save_state(state)
         return sent_count
@@ -633,7 +713,8 @@ def process_market_history_snapshot(history: List[int]) -> int:
 def run_forever(sleep_seconds: int = 3) -> None:
     config = load_config()
     state = load_state()
-    bot_token, chat_id = validate_runtime_config(config)
+    bot_token, _ = validate_runtime_config(config, require_chat_ids=False)
+    _ensure_bot_menu(bot_token)
 
     while True:
         try:
@@ -654,13 +735,10 @@ def run_forever(sleep_seconds: int = 3) -> None:
                 update_id = int(update.get("update_id", 0) or 0)
                 state["last_update_id"] = update_id + 1
                 message = update.get("message", {}) if isinstance(update.get("message", {}), dict) else {}
-                if int(message.get("chat", {}).get("id", 0) or 0) != chat_id:
-                    continue
-                text = str(message.get("text", "") or "")
-                sender_id = int(message.get("from", {}).get("id", 0) or 0)
-                command_reply = handle_command(text, sender_id, config)
-                if command_reply:
-                    _send_text(bot_token, chat_id, command_reply)
+                command_result = process_private_command_message(message, config)
+                if command_result:
+                    reply_chat_id, command_reply = command_result
+                    _send_text(bot_token, reply_chat_id, command_reply)
                 save_state(state)
             time.sleep(max(1, int(sleep_seconds)))
         except requests.HTTPError as exc:

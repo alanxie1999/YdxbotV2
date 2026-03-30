@@ -1,8 +1,10 @@
 {
-  "_comment": "盘口播报提醒示例配置。请复制为 market_broadcast_alert_config.json 后填写真实信息。chat_id 是机器人发送通知的目标群ID；allowed_sender_ids 是允许在群里执行 fa 管理命令的 Telegram 用户ID 列表。",
+  "_comment": "盘口播报提醒示例配置。请复制为 market_broadcast_alert_config.json 后填写真实信息。chat_ids 是机器人发送通知的目标群ID列表；allowed_sender_ids 是允许私聊机器人执行 fa 管理命令的 Telegram 用户ID 列表。",
   "enable": false,
   "bot_token": "请填写你的群TGBot Token",
-  "chat_id": -1001234567890,
+  "chat_ids": [
+    -1001234567890
+  ],
   "allowed_sender_ids": [
     123456789
   ],
