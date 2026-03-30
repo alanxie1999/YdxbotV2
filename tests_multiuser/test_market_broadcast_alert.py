@@ -241,9 +241,8 @@ def test_process_market_history_snapshot_uses_main_history_not_group_message(tmp
     assert len(sent_messages) == 2
     assert {item[1] for item in sent_messages} == {-1002310838908, -1003657725404}
     assert all("连大提醒" in item[2] for item in sent_messages)
-    assert len(scheduled) == 2
-    assert all(item[2] == mba.AUTO_DELETE_SECONDS for item in scheduled)
     assert not deleted_messages
+    assert not scheduled
 
     sent_again = mba.process_market_history_snapshot([1, 0, 1, 1, 1, 1])
     assert sent_again == 0

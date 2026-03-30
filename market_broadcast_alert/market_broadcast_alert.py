@@ -708,17 +708,10 @@ def process_market_history_snapshot(history: List[int]) -> int:
                     if not isinstance(per_event, dict):
                         per_event = {}
                         last_message_ids[event.event_type] = per_event
-                    previous_message_id = int(per_event.get(str(chat_id), 0) or 0)
-                    if previous_message_id > 0:
-                        try:
-                            _delete_message(bot_token, chat_id, previous_message_id)
-                        except requests.RequestException:
-                            pass
                     response = _send_text(bot_token, chat_id, event.message, parse_mode=event.parse_mode)
                     message_id = int(response.get("result", {}).get("message_id", 0) or 0)
                     if message_id > 0:
                         per_event[str(chat_id)] = message_id
-                        _schedule_delete(bot_token, chat_id, message_id, AUTO_DELETE_SECONDS)
                     sent_count += 1
                 except requests.RequestException as exc:
                     logger.warning("盘口播报提醒发送失败：chat_id=%s error=%s", chat_id, exc)
