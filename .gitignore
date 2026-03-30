@@ -62,4 +62,5 @@ ENV/
 .DS_Store
 
 # ?????????
+market_broadcast_alert/market_broadcast_alert_config.json
 market_broadcast_alert/market_broadcast_alert_state.json

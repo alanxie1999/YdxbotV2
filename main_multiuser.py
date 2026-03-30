@@ -35,6 +35,7 @@ logger.propagate = False
 ACCOUNT_LOG_BACKUP_DAYS = 3
 _MAIN_ACCOUNT_SLUG_REGISTRY: Dict[str, str] = {}
 MAIN_ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
+MARKET_BROADCAST_ALERT_TASK = None
 
 
 def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
@@ -1003,20 +1004,21 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 )
 
         # 盘口播报提醒模块：独立目录、自带配置；缺失或初始化失败时不影响主程序。
-        existing_market_alert_task = getattr(user_ctx, "_market_broadcast_alert_task", None)
-        if existing_market_alert_task is None or existing_market_alert_task.done():
+        global MARKET_BROADCAST_ALERT_TASK
+        if MARKET_BROADCAST_ALERT_TASK is None or MARKET_BROADCAST_ALERT_TASK.done():
             try:
                 from market_broadcast_alert.market_broadcast_alert import load_config as load_market_alert_config
-                from market_broadcast_alert.market_broadcast_alert import load_state as load_market_alert_state
+                from market_broadcast_alert.market_broadcast_alert import run_forever as run_market_alert_forever
 
                 market_alert_cfg = load_market_alert_config()
                 if bool(market_alert_cfg.get("enable", False)):
-                    # 预加载状态文件，确保模板存在；真正的长轮询进程后续可独立启用。
-                    load_market_alert_state()
+                    MARKET_BROADCAST_ALERT_TASK = asyncio.create_task(
+                        asyncio.to_thread(run_market_alert_forever)
+                    )
                     log_event(
                         logging.INFO,
                         'start',
-                        '盘口播报提醒模块已加载',
+                        '盘口播报提醒模块已启动',
                         user_id=user_ctx.user_id,
                         chat_id=market_alert_cfg.get("chat_id"),
                     )
@@ -1024,7 +1026,7 @@ async def start_user(user_ctx: UserContext, global_config: dict):
                 log_event(
                     logging.WARNING,
                     'start',
-                    '盘口播报提醒模块加载失败，已忽略',
+                    '盘口播报提醒模块启动失败，已忽略',
                     user_id=user_ctx.user_id,
                     error=str(e),
                 )

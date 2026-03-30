@@ -20,6 +20,7 @@ import zq_multiuser as zm
 
 
 MODULE_DIR = Path(__file__).resolve().parent
+CONFIG_EXAMPLE_PATH = MODULE_DIR / "market_broadcast_alert_config.example.json"
 CONFIG_PATH = MODULE_DIR / "market_broadcast_alert_config.json"
 STATE_PATH = MODULE_DIR / "market_broadcast_alert_state.json"
 
@@ -27,6 +28,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "enable": False,
     "bot_token": "",
     "chat_id": 0,
+    "allowed_sender_ids": [],
     "streak_threshold": 4,
     "pair_trigger_consecutive": 3,
     "report_interval": 10,
@@ -74,7 +76,12 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
 
 
 def load_config() -> Dict[str, Any]:
-    config = _read_json(CONFIG_PATH, DEFAULT_CONFIG)
+    if not CONFIG_EXAMPLE_PATH.exists():
+        CONFIG_EXAMPLE_PATH.write_text(json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not CONFIG_PATH.exists():
+        config = dict(DEFAULT_CONFIG)
+    else:
+        config = _read_json(CONFIG_PATH, DEFAULT_CONFIG)
     config["streak_threshold"] = max(1, int(config.get("streak_threshold", 4) or 4))
     config["pair_trigger_consecutive"] = max(1, int(config.get("pair_trigger_consecutive", 3) or 3))
     config["report_interval"] = max(1, int(config.get("report_interval", 10) or 10))
@@ -83,6 +90,16 @@ def load_config() -> Dict[str, Any]:
     if not isinstance(mention_users, list):
         mention_users = []
     config["mention_users"] = [str(item).strip() for item in mention_users if str(item).strip()]
+    allowed_sender_ids = config.get("allowed_sender_ids", [])
+    if not isinstance(allowed_sender_ids, list):
+        allowed_sender_ids = []
+    normalized_sender_ids: List[int] = []
+    for item in allowed_sender_ids:
+        try:
+            normalized_sender_ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    config["allowed_sender_ids"] = normalized_sender_ids
     return config
 
 
@@ -349,9 +366,13 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
     if tokens[0].lower() != "fa":
         return None
 
+    allowed_sender_ids = set(int(x) for x in config.get("allowed_sender_ids", []))
+    if allowed_sender_ids and sender_id and sender_id not in allowed_sender_ids:
+        return "❌ 仅指定管理员可使用该命令"
+
     bot_token = str(config.get("bot_token", "") or "").strip()
     chat_id = int(config.get("chat_id", 0) or 0)
-    if bot_token and chat_id and sender_id:
+    if not allowed_sender_ids and bot_token and chat_id and sender_id:
         try:
             if not _is_admin(bot_token, chat_id, sender_id):
                 return "❌ 仅群管理员可使用该命令"
@@ -364,6 +385,8 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
         return (
             "📡 盘口播报提醒配置\n\n"
             f"开关：{status}\n"
+            f"群ID：{config.get('chat_id', 0)}\n"
+            f"命令管理员ID：{', '.join(str(x) for x in config.get('allowed_sender_ids', [])) or '未设置'}\n"
             f"连大连小阈值：{config.get('streak_threshold', 4)}\n"
             f"配对规律阈值：{config.get('pair_trigger_consecutive', 3)}\n"
             f"周期播报间隔：{config.get('report_interval', 10)}\n"
@@ -416,7 +439,8 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
         "fa r 10\n"
         "fa m\n"
         "fa m + @user1 @user2\n"
-        "fa m - @user1"
+        "fa m - @user1\n"
+        "配置文件需填写：bot_token / chat_id / allowed_sender_ids"
     )
 
 
