@@ -5379,53 +5379,66 @@ def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -
     history = state.history if isinstance(state.history, list) else []
     resolved_logs = _get_resolved_strategy_bet_logs(state)
 
-    labels: List[int] = []
-    stats = {"连大": [], "连小": [], "连输": []}
-    all_ns = set()
+    def _build_section(title: str, categories: List[str], source_length: int, source_getter) -> List[str]:
+        labels: List[int] = []
+        section_stats = {category: [] for category in categories}
+        all_ns = set()
 
-    for window in windows:
-        actual = min(int(window), len(history))
-        if actual <= 0:
-            continue
-        if actual in labels:
-            continue
-        labels.append(actual)
+        for window in windows:
+            actual = min(int(window), source_length)
+            if actual <= 0 or actual in labels:
+                continue
+            labels.append(actual)
+            snapshot = source_getter(actual)
+            for category in categories:
+                bucket = snapshot.get(category, {})
+                section_stats[category].append(bucket)
+                all_ns.update(bucket.keys())
 
-        history_window = history[-actual:]
-        result_counts = count_consecutive(history_window)
-        lose_streaks = count_lose_streaks(resolved_logs[-actual:])
-        stats["连大"].append(result_counts["大"])
-        stats["连小"].append(result_counts["小"])
-        stats["连输"].append(lose_streaks)
-        all_ns.update(result_counts["大"].keys())
-        all_ns.update(result_counts["小"].keys())
-        all_ns.update(lose_streaks.keys())
+        if not labels:
+            return [title, "\u6682\u65e0\u6570\u636e", ""]
 
-    label_width = max(3, max(len(str(label)) for label in labels)) if labels else 3
-    header = "类别 |" + "".join(f" {str(label).rjust(label_width)} |" for label in labels)
-    divider = "-" * len(header)
+        label_width = max(3, max(len(str(label)) for label in labels))
+        header = "\u7c7b\u522b |" + "".join(f" {str(label).rjust(label_width)} |" for label in labels)
+        divider = "-" * len(header)
+        lines = [title, "=" * len(header), header, divider]
 
-    lines = ["最近局数“连大、连小、连输”统计", ""]
-    for category in ["连大", "连小", "连输"]:
-        lines.append(category)
-        lines.append("=" * len(header))
-        lines.append(header)
-        lines.append(divider)
-        for n in sorted(all_ns, reverse=True):
-            if any(n in stats[category][i] for i in range(len(labels))):
-                row = f" {str(n).center(2)}  |"
-                for i in range(len(labels)):
-                    count = stats[category][i].get(n, 0)
-                    value = str(count) if count > 0 else "-"
-                    row += f" {value.center(label_width)} |"
-                lines.append(row)
-        lines.append("")
-    pre_block = escape_html("\n".join(lines).rstrip())
-    return (
-        "📊 统计概览\n\n"
-        "说明：仅统计当前策略链中已结算记录；未结算和异常挂单不计入。\n\n"
-        f"<pre>{pre_block}</pre>"
+        for category in categories:
+            lines.append(category)
+            for n in sorted(all_ns, reverse=True):
+                if any(n in section_stats[category][i] for i in range(len(labels))):
+                    row = f" {str(n).center(2)}  |"
+                    for i in range(len(labels)):
+                        count = section_stats[category][i].get(n, 0)
+                        value = str(count) if count > 0 else "-"
+                        row += f" {value.center(label_width)} |"
+                    lines.append(row)
+            lines.append("")
+        return lines
+
+    market_lines = _build_section(
+        "\u76d8\u53e3\u7edf\u8ba1\uff08\u8fde\u5927 / \u8fde\u5c0f\uff09",
+        ["\u8fde\u5927", "\u8fde\u5c0f"],
+        len(history),
+        lambda actual: count_consecutive(history[-actual:]),
     )
+    bet_lines = _build_section(
+        "\u62bc\u6ce8\u7edf\u8ba1\uff08\u8fde\u8f93\uff09",
+        ["\u8fde\u8f93"],
+        len(resolved_logs),
+        lambda actual: {"\u8fde\u8f93": count_lose_streaks(resolved_logs[-actual:])},
+    )
+
+    lines = [
+        "\u6700\u8fd1\u5c40\u6570\u201c\u8fde\u5927\u3001\u8fde\u5c0f\u3001\u8fde\u8f93\u201d\u7edf\u8ba1",
+        "",
+        "\u8bf4\u660e\uff1a\u76d8\u53e3\u7edf\u8ba1\u57fa\u4e8e history\uff1b\u62bc\u6ce8\u7edf\u8ba1\u57fa\u4e8e\u5f53\u524d\u7b56\u7565\u94fe\u4e2d\u5df2\u7ed3\u7b97\u62bc\u6ce8\u8bb0\u5f55\u3002",
+        "",
+        *market_lines,
+        *bet_lines,
+    ]
+    pre_block = escape_html("\n".join(lines).rstrip())
+    return f"\U0001f4ca \u7edf\u8ba1\u6982\u89c8\n\n<pre>{pre_block}</pre>"
 
 
 def _clear_lose_recovery_tracking(rt: dict) -> None:
