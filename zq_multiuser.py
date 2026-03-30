@@ -1806,7 +1806,7 @@ def _build_help_card() -> str:
         "• <code>/status</code> 查看运行状态看板\n"
         "• <code>/pause</code> / <code>/resume</code> 暂停/恢复下注\n"
         "• <code>/balance</code> 刷新当前账户余额\n"
-        "• <code>/stats</code> 查看连赢、连输详细统计\n\n"
+        "• <code>/stats</code> 查看连大、连小、连输统计\n\n"
         "<b>💰 资金与阈值</b>\n"
         "• <code>/gf [金额]</code> 设置菠菜资金上限\n"
         "• <code>/stf [数字]</code> 设置本轮目标金额（单位：万）\n"
@@ -1833,7 +1833,7 @@ def _build_help_card() -> str:
         "• <code>/update [版本]</code> 更新版本\n"
         "• <code>/reback [版本]</code> 回退版本\n"
         "• <code>/explain</code> 查看最近判断依据\n"
-        "• <code>/users</code> 查看多用户状态\n"
+        "• <code>/users</code> 查看当前用户信息\n"
         "• <code>/xx</code> 执行辅助数据操作"
     )
 
@@ -1895,6 +1895,39 @@ async def _reply_ops_card(
             note=note,
         )
     )
+
+
+async def _send_command_ops_card(
+    client,
+    event,
+    user_ctx: UserContext,
+    global_config: dict,
+    title: str,
+    *,
+    summary: str = "",
+    fields: Optional[List[tuple[str, Any]]] = None,
+    action: str = "",
+    note: str = "",
+    ttl_seconds: int = 60,
+):
+    sent = await send_to_admin(
+        client,
+        _build_ops_card(
+            title,
+            summary=summary,
+            fields=fields,
+            action=action,
+            note=note,
+        ),
+        user_ctx,
+        global_config,
+    )
+    if sent and ttl_seconds > 0:
+        chat_id = getattr(sent, "chat_id", None)
+        message_id = getattr(sent, "id", None)
+        if chat_id is not None and message_id is not None:
+            asyncio.create_task(delete_later(client, chat_id, message_id, ttl_seconds))
+    return sent
 
 
 def _build_priority_summary(msg_type: str, text: str, account_prefix: str) -> str:
@@ -6027,7 +6060,7 @@ async def delete_later(client, chat_id, message_id, delay=10):
         pass
 
 
-async def handle_model_command_multiuser(event, args, user_ctx: UserContext, global_config: dict):
+async def handle_model_command_multiuser(client, event, args, user_ctx: UserContext, global_config: dict):
     """处理 model 命令 - 与master版本handle_model_command一致"""
     rt = user_ctx.state.runtime
     sub_cmd = args[0] if args else "list"
@@ -6053,8 +6086,11 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
                 current = "（当前）" if m.get('model_id') == current_model_id else ""
                 entries.append(f"{idx}. `{m.get('model_id', 'unknown')}` {current}".strip())
                 idx += 1
-        await _reply_ops_card(
+        await _send_command_ops_card(
+            client,
             event,
+            user_ctx,
+            global_config,
             "🤖 可用模型列表",
             summary="以下是当前账号可用的模型。",
             fields=[("模型", "\n".join(entries) if entries else "暂无可用模型")],
@@ -6063,8 +6099,11 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
         
     elif sub_cmd in ["select", "use", "switch"]:
         if len(args) < 2:
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ 缺少模型目标",
                 summary="当前没有提供要切换的模型编号或 ID。",
                 action="请执行 `model select 1` 或 `model select qwen3-coder-plus`。",
@@ -6081,8 +6120,11 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
             if 1 <= idx <= len(enabled_models):
                 target_id = enabled_models[idx-1].get('model_id', '')
             else:
-                await _reply_ops_card(
+                await _send_command_ops_card(
+                    client,
                     event,
+                    user_ctx,
+                    global_config,
                     "❌ 模型编号无效",
                     summary=f"编号 {idx} 不在当前可选范围内。",
                     action="请先执行 `model list` 查看可用编号。",
@@ -6092,16 +6134,22 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
         # 验证模型是否存在
         model_exists = any(m.get('model_id') == target_id for m in models.values() if m.get("enabled"))
         if not model_exists:
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ 模型不可用",
                 summary=f"模型 `{target_id}` 不存在或当前未启用。",
                 action="请先执行 `model list` 确认可用模型。",
             )
             return
             
-        await _reply_ops_card(
+        await _send_command_ops_card(
+            client,
             event,
+            user_ctx,
+            global_config,
             "🔄 正在切换模型",
             summary="系统正在切换默认模型。",
             fields=[("目标模型", f"`{target_id}`")],
@@ -6112,7 +6160,11 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
         rt["current_model_id"] = target_id
         user_ctx.save_state()
         
-        success_msg = _build_ops_card(
+        await _send_command_ops_card(
+            client,
+            event,
+            user_ctx,
+            global_config,
             "✅ 模型切换成功",
             summary="后续新局会使用这个模型继续判断。",
             fields=[
@@ -6121,12 +6173,14 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
             ],
             action="建议等待下一局生效，或执行 `status` 查看当前概览。",
         )
-        await event.reply(success_msg)
         log_event(logging.INFO, 'model', '切换模型', user_id=user_ctx.user_id, model=target_id)
             
     else:
-        await _reply_ops_card(
+        await _send_command_ops_card(
+            client,
             event,
+            user_ctx,
+            global_config,
             "❓ 未知模型命令",
             summary="当前子命令无法识别。",
             fields=[("用法", "`model list`\n`model select <id>`")],
@@ -6134,7 +6188,7 @@ async def handle_model_command_multiuser(event, args, user_ctx: UserContext, glo
         )
 
 
-async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
+async def handle_apikey_command_multiuser(client, event, args, user_ctx: UserContext, global_config: dict):
     """处理 apikey 命令：show/set/add/del。"""
     rt = user_ctx.state.runtime
     sub_cmd = (args[0].lower() if args else "show")
@@ -6143,8 +6197,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
 
     if sub_cmd in ("show", "list", "ls"):
         if not keys:
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "🔐 当前未配置 AI key",
                 summary="当前账号还没有可用的模型密钥。",
                 action="请执行 `apikey set <新key>`。",
@@ -6153,8 +6210,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
         lines = []
         for idx, key in enumerate(keys, 1):
             lines.append(f"{idx}. `{_mask_api_key(key)}`")
-        await _reply_ops_card(
+        await _send_command_ops_card(
+            client,
             event,
+            user_ctx,
+            global_config,
             "🔐 当前账号 AI key 列表",
             summary="已按脱敏方式展示，避免在聊天窗口泄露完整 key。",
             fields=[("Key", "\n".join(lines))],
@@ -6164,8 +6224,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
 
     if sub_cmd in ("set", "add"):
         if len(args) < 2:
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ 缺少 key 参数",
                 summary="当前没有提供新的 key。",
                 action=f"请执行 `apikey {sub_cmd} <新key>`。",
@@ -6174,8 +6237,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
 
         new_key = str(args[1]).strip()
         if not new_key:
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ key 不能为空",
                 summary="当前输入的 key 为空。",
                 action=f"请重新执行 `apikey {sub_cmd} <新key>`。",
@@ -6187,8 +6253,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
         else:
             updated_keys = list(keys)
             if new_key in updated_keys:
-                await _reply_ops_card(
+                await _send_command_ops_card(
+                    client,
                     event,
+                    user_ctx,
+                    global_config,
                     "⚠️ 无需重复添加",
                     summary="该 key 已经存在于当前账号配置中。",
                     action="如需覆盖全部 key，请使用 `apikey set <新key>`。",
@@ -6205,8 +6274,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             user_ctx.save_state()
             model_mgr = user_ctx.get_model_manager()
             model_mgr.load_models()
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "✅ AI key 已更新",
                 summary="新的 key 已写入配置并重新加载。",
                 fields=[
@@ -6217,8 +6289,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             )
         except Exception as e:
             log_event(logging.ERROR, 'apikey', '写入 key 失败', user_id=user_ctx.user_id, error=str(e))
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ AI key 更新失败",
                 summary="本次写入配置没有完成。",
                 fields=[("错误", str(e)[:160])],
@@ -6228,8 +6303,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
 
     if sub_cmd in ("del", "rm", "remove"):
         if len(args) < 2:
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ 缺少删除序号",
                 summary="当前没有提供要删除的 key 序号。",
                 action="请执行 `apikey del <序号>`。",
@@ -6238,8 +6316,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
         try:
             idx = int(str(args[1]).strip())
         except ValueError:
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ 序号格式错误",
                 summary="删除序号必须是整数。",
                 action="请执行 `apikey del <序号>`。",
@@ -6247,8 +6328,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             return
 
         if idx < 1 or idx > len(keys):
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ 序号超出范围",
                 summary=f"当前 key 数量只有 {len(keys)} 个。",
                 action="请先执行 `apikey show` 查看当前序号。",
@@ -6265,8 +6349,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             if not updated_keys:
                 _mark_ai_key_issue(rt, "管理员删除了全部 key")
             user_ctx.save_state()
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "✅ AI key 已删除",
                 summary=f"第 {idx} 个 key 已从当前账号配置中移除。",
                 fields=[
@@ -6277,8 +6364,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             )
         except Exception as e:
             log_event(logging.ERROR, 'apikey', '删除 key 失败', user_id=user_ctx.user_id, error=str(e))
-            await _reply_ops_card(
+            await _send_command_ops_card(
+                client,
                 event,
+                user_ctx,
+                global_config,
                 "❌ AI key 删除失败",
                 summary="本次删除没有完成。",
                 fields=[("错误", str(e)[:160])],
@@ -6286,8 +6376,11 @@ async def handle_apikey_command_multiuser(event, args, user_ctx: UserContext):
             )
         return
 
-    await _reply_ops_card(
+    await _send_command_ops_card(
+        client,
         event,
+        user_ctx,
+        global_config,
         "❓ 未知 key 命令",
         summary="当前子命令无法识别。",
         fields=[("用法", "`apikey show`\n`apikey set <key>`\n`apikey add <key>`\n`apikey del <序号>`")],
@@ -6734,12 +6827,12 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
         
         # model - 模型管理 - 使用与master一致的handle_model_command
         if cmd == "model":
-            await handle_model_command_multiuser(event, my[1:], user_ctx, global_config)
+            await handle_model_command_multiuser(client, event, my[1:], user_ctx, global_config)
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             return
 
         if cmd == "apikey":
-            await handle_apikey_command_multiuser(event, my[1:], user_ctx)
+            await handle_apikey_command_multiuser(client, event, my[1:], user_ctx, global_config)
             # 防止 key 在命令消息中长期可见
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 3))
             return

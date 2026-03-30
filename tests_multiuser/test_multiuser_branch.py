@@ -2985,6 +2985,85 @@ def test_process_user_command_users_uses_ops_card(tmp_path, monkeypatch):
     assert "胜率：12/20" in sent_messages[-1]
 
 
+def test_process_user_command_model_select_uses_send_to_admin_without_event_reply(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "model_cmd_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型命令用户"},
+            "telegram": {"user_id": 70161},
+            "groups": {"admin_chat": 70161},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {
+                "enabled": True,
+                "api_keys": ["k1"],
+                "models": {
+                    "1": {"model_id": "model-a", "enabled": True},
+                    "2": {"model_id": "model-b", "enabled": True},
+                },
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.state.runtime["current_model_id"] = "model-a"
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70161, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="model select 2", chat_id=70161, id=18)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert ctx.state.runtime["current_model_id"] == "model-b"
+    assert any("正在切换模型" in msg for msg in sent_messages)
+    assert any("模型切换成功" in msg for msg in sent_messages)
+
+
+def test_process_user_command_apikey_show_uses_send_to_admin_without_event_reply(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "apikey_cmd_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "密钥命令用户"},
+            "telegram": {"user_id": 70162},
+            "groups": {"admin_chat": 70162},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {
+                "enabled": True,
+                "api_keys": ["sk-test-abcdefghijklmnopqrstuvwxyz"],
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70162, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="apikey show", chat_id=70162, id=19)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert sent_messages
+    assert "当前账号 AI key 列表" in sent_messages[-1]
+    assert "***" in sent_messages[-1] or "..." in sent_messages[-1]
+
+
 def test_process_user_command_yss_uses_plain_preset_list_layout(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "preset_list_user"
     _write_json(
@@ -3165,9 +3244,11 @@ def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch
     assert "<b>📘 脚本命令指南</b>" in message
     assert "⚡ 基础控制（最常用）" in message
     assert "<code>/st [预设名]</code>" in message
+    assert "<code>/stats</code> 查看连大、连小、连输统计" in message
     assert "<code>/stf [数字]</code>" in message
     assert "<code>/model select [编号/ID]</code>" in message
     assert "<code>/res state</code>" in message
+    assert "<code>/users</code> 查看当前用户信息" in message
 
 
 def test_process_user_command_update_uses_release_card_fields(tmp_path, monkeypatch):

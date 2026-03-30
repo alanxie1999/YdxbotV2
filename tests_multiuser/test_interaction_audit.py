@@ -156,18 +156,23 @@ def test_process_user_command_records_masked_apikey_command(tmp_path, monkeypatc
 
     log_root = tmp_path / "logs" / "accounts"
     monkeypatch.setattr(zm, "ACCOUNT_LOG_ROOT", str(log_root))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=5008, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
 
     class DummyEvent:
         raw_text = "apikey add sk-test-secret"
         chat_id = 5008
         id = 88
-
-        def __init__(self):
-            self.replies = []
-
-        async def reply(self, message):
-            self.replies.append(message)
-            return SimpleNamespace(chat_id=self.chat_id, id=len(self.replies))
 
     event = DummyEvent()
     asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
@@ -177,7 +182,7 @@ def test_process_user_command_records_masked_apikey_command(tmp_path, monkeypatc
 
     assert "接收 | admin_chat | 命令 | apikey | 已脱敏 | chat_id=5008" in content
     assert "\napikey add ***\n" in content
-    assert event.replies
+    assert sent_messages
 
 
 def test_console_handler_uses_account_label_without_category():
