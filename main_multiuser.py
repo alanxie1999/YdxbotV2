@@ -842,6 +842,21 @@ def _apply_startup_balance_snapshot(user_ctx: UserContext, balance: int) -> int:
     return gambling_fund
 
 
+async def _run_market_broadcast_alert_background(user_ctx: UserContext) -> None:
+    try:
+        from market_broadcast_alert.market_broadcast_alert import run_forever as run_market_alert_forever
+
+        await asyncio.to_thread(run_market_alert_forever)
+    except Exception as e:
+        log_event(
+            logging.WARNING,
+            'start',
+            '盘口播报提醒模块已停止',
+            user_id=user_ctx.user_id,
+            error=str(e),
+        )
+
+
 async def start_user(user_ctx: UserContext, global_config: dict):
     lock_acquired = False
     try:
@@ -1008,12 +1023,11 @@ async def start_user(user_ctx: UserContext, global_config: dict):
         if MARKET_BROADCAST_ALERT_TASK is None or MARKET_BROADCAST_ALERT_TASK.done():
             try:
                 from market_broadcast_alert.market_broadcast_alert import load_config as load_market_alert_config
-                from market_broadcast_alert.market_broadcast_alert import run_forever as run_market_alert_forever
 
                 market_alert_cfg = load_market_alert_config()
                 if bool(market_alert_cfg.get("enable", False)):
                     MARKET_BROADCAST_ALERT_TASK = asyncio.create_task(
-                        asyncio.to_thread(run_market_alert_forever)
+                        _run_market_broadcast_alert_background(user_ctx)
                     )
                     log_event(
                         logging.INFO,

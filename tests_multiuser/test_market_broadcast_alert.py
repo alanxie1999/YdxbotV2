@@ -83,6 +83,20 @@ def test_process_group_message_updates_state_and_triggers_report():
     assert any(event.event_type == "report" for event in events)
 
 
+def test_validate_runtime_config_requires_full_bot_token():
+    config = {
+        "bot_token": "AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
+        "chat_id": -1001234567890,
+    }
+
+    try:
+        mba.validate_runtime_config(config)
+    except ValueError as exc:
+        assert "完整 token" in str(exc)
+    else:
+        raise AssertionError("expected invalid token to be rejected")
+
+
 def test_build_stats_report_separates_market_and_bet_statistics():
     state = SimpleNamespace(
         history=[1, 1, 1, 0, 0, 1, 1, 0],

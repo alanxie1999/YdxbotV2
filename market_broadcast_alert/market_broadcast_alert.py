@@ -9,6 +9,8 @@ This module is intentionally standalone:
 from __future__ import annotations
 
 import json
+import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,7 @@ MODULE_DIR = Path(__file__).resolve().parent
 CONFIG_EXAMPLE_PATH = MODULE_DIR / "market_broadcast_alert_config.example.json"
 CONFIG_PATH = MODULE_DIR / "market_broadcast_alert_config.json"
 STATE_PATH = MODULE_DIR / "market_broadcast_alert_state.json"
+logger = logging.getLogger("market_broadcast_alert")
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enable": False,
@@ -118,6 +121,20 @@ def load_state() -> Dict[str, Any]:
 
 def save_state(state: Dict[str, Any]) -> None:
     _write_json(STATE_PATH, state)
+
+
+def validate_runtime_config(config: Dict[str, Any]) -> tuple[str, int]:
+    bot_token = str(config.get("bot_token", "") or "").strip()
+    chat_id = int(config.get("chat_id", 0) or 0)
+    if not bot_token:
+        raise ValueError("盘口播报提醒未配置 bot_token")
+    if not re.fullmatch(r"\d{6,}:[A-Za-z0-9_-]{20,}", bot_token):
+        raise ValueError(
+            "盘口播报提醒 bot_token 格式无效，请填写 BotFather 提供的完整 token，格式应为“数字:密钥”"
+        )
+    if not chat_id:
+        raise ValueError("盘口播报提醒未配置 chat_id")
+    return bot_token, chat_id
 
 
 def parse_market_history(text: str) -> List[int]:
@@ -458,41 +475,50 @@ def process_group_message(message: Dict[str, Any], config: Dict[str, Any], state
 def run_forever(sleep_seconds: int = 3) -> None:
     config = load_config()
     state = load_state()
-    bot_token = str(config.get("bot_token", "") or "").strip()
-    chat_id = int(config.get("chat_id", 0) or 0)
-    if not bot_token or not chat_id:
-        raise RuntimeError("请先在 market_broadcast_alert_config.json 中配置 bot_token 和 chat_id")
+    bot_token, chat_id = validate_runtime_config(config)
 
     while True:
-        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-        response = requests.get(
-            url,
-            params={
-                "offset": int(state.get("last_update_id", 0) or 0),
-                "timeout": 20,
-                "allowed_updates": ["message"],
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        updates = payload.get("result", []) if isinstance(payload, dict) else []
-        for update in updates:
-            update_id = int(update.get("update_id", 0) or 0)
-            state["last_update_id"] = update_id + 1
-            message = update.get("message", {}) if isinstance(update.get("message", {}), dict) else {}
-            if int(message.get("chat", {}).get("id", 0) or 0) != chat_id:
-                continue
-            text = str(message.get("text", "") or "")
-            sender_id = int(message.get("from", {}).get("id", 0) or 0)
-            command_reply = handle_command(text, sender_id, config)
-            if command_reply:
-                _send_text(bot_token, chat_id, command_reply)
-                continue
-            for event in process_group_message(message, config, state):
-                _send_text(bot_token, chat_id, event.message)
-        save_state(state)
-        time.sleep(max(1, int(sleep_seconds)))
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+            response = requests.get(
+                url,
+                params={
+                    "offset": int(state.get("last_update_id", 0) or 0),
+                    "timeout": 20,
+                    "allowed_updates": ["message"],
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            updates = payload.get("result", []) if isinstance(payload, dict) else []
+            for update in updates:
+                update_id = int(update.get("update_id", 0) or 0)
+                state["last_update_id"] = update_id + 1
+                message = update.get("message", {}) if isinstance(update.get("message", {}), dict) else {}
+                if int(message.get("chat", {}).get("id", 0) or 0) != chat_id:
+                    continue
+                text = str(message.get("text", "") or "")
+                sender_id = int(message.get("from", {}).get("id", 0) or 0)
+                command_reply = handle_command(text, sender_id, config)
+                if command_reply:
+                    _send_text(bot_token, chat_id, command_reply)
+                    continue
+                for event in process_group_message(message, config, state):
+                    _send_text(bot_token, chat_id, event.message)
+            save_state(state)
+            time.sleep(max(1, int(sleep_seconds)))
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code == 404:
+                raise RuntimeError(
+                    "盘口播报提醒 bot_token 无效或已失效，请检查 market_broadcast_alert_config.json 中是否填写了完整 token（格式：数字:密钥）"
+                ) from exc
+            logger.warning("盘口播报提醒请求失败：%s", exc)
+            time.sleep(max(3, int(sleep_seconds)))
+        except requests.RequestException as exc:
+            logger.warning("盘口播报提醒网络异常：%s", exc)
+            time.sleep(max(3, int(sleep_seconds)))
 
 
 if __name__ == "__main__":
