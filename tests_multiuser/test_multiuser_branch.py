@@ -3070,7 +3070,7 @@ def test_process_user_command_stats_uses_html_preformatted_report(tmp_path, monk
     assert parse_mode == "html"
     assert message.startswith("📊 统计概览")
     assert "<pre>" in message
-    assert "类别 |  12 |" in message
+    assert "类别 | 1000 |  500 |  200 |  100 |" in message
 
 
 def test_count_lose_streaks_ignores_unsettled_entries():
@@ -3103,9 +3103,10 @@ def test_build_stats_report_uses_actual_window_labels_and_resolved_chain():
     report = zm._build_stats_report(state, windows=[1000, 5])
 
     assert "最近局数“连大、连小、连输”统计" in report
-    assert "类别 |  12 |   5 |" in report or "类别 |  12 |  5 |" in report
+    assert "类别 | 1000 |    5 |" in report or "类别 | 1000 |   5 |" in report
     assert "连输" in report
-    assert " 2  " in report
+    assert " --  |  0   |  0   |" in report
+    assert " 0 " in report
 
 
 def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch):

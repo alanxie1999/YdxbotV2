@@ -5407,13 +5407,13 @@ def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -
         all_ns = set()
 
         for window in windows:
-            actual = min(int(window), source_length)
-            if actual <= 0 or actual in labels:
+            label = int(window)
+            if label <= 0 or label in labels:
                 continue
-            labels.append(actual)
-            snapshot = source_getter(actual)
+            labels.append(label)
+            snapshot = source_getter(label) if source_length >= label else {}
             for category in categories:
-                bucket = snapshot.get(category, {})
+                bucket = snapshot.get(category, {}) if isinstance(snapshot, dict) else {}
                 section_stats[category].append(bucket)
                 all_ns.update(bucket.keys())
 
@@ -5427,14 +5427,17 @@ def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -
 
         for category in categories:
             lines.append(category)
+            if not all_ns:
+                row = " --  |" + "".join(f" {'0'.center(label_width)} |" for _ in labels)
+                lines.append(row)
+                lines.append("")
+                continue
             for n in sorted(all_ns, reverse=True):
-                if any(n in section_stats[category][i] for i in range(len(labels))):
-                    row = f" {str(n).center(2)}  |"
-                    for i in range(len(labels)):
-                        count = section_stats[category][i].get(n, 0)
-                        value = str(count) if count > 0 else "-"
-                        row += f" {value.center(label_width)} |"
-                    lines.append(row)
+                row = f" {str(n).center(2)}  |"
+                for i in range(len(labels)):
+                    count = section_stats[category][i].get(n, 0)
+                    row += f" {str(count).center(label_width)} |"
+                lines.append(row)
             lines.append("")
         return lines
 
