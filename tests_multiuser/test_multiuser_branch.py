@@ -3105,8 +3105,8 @@ def test_build_stats_report_uses_actual_window_labels_and_resolved_chain():
     assert "最近局数“连大、连小、连输”统计" in report
     assert "类别 | 1000 |    5 |" in report or "类别 | 1000 |   5 |" in report
     assert "连输" in report
-    assert " --  |  0   |  0   |" in report
-    assert " 0 " in report
+    assert " --  |  -   |  -   |" in report
+    assert " 0 " not in report
 
 
 def test_build_stats_report_uses_account_level_resolved_bet_logs_not_current_chain():

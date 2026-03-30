@@ -5428,7 +5428,7 @@ def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -
         for category in categories:
             lines.append(category)
             if not all_ns:
-                row = " --  |" + "".join(f" {'0'.center(label_width)} |" for _ in labels)
+                row = " --  |" + "".join(f" {'-'.center(label_width)} |" for _ in labels)
                 lines.append(row)
                 lines.append("")
                 continue
@@ -5436,7 +5436,8 @@ def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -
                 row = f" {str(n).center(2)}  |"
                 for i in range(len(labels)):
                     count = section_stats[category][i].get(n, 0)
-                    row += f" {str(count).center(label_width)} |"
+                    value = str(count) if count > 0 else "-"
+                    row += f" {value.center(label_width)} |"
                 lines.append(row)
             lines.append("")
         return lines
