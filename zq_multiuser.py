@@ -5445,7 +5445,10 @@ def _build_stats_report(state: UserState, windows: Optional[List[int]] = None) -
         "\u76d8\u53e3\u7edf\u8ba1\uff08\u8fde\u5927 / \u8fde\u5c0f\uff09",
         ["\u8fde\u5927", "\u8fde\u5c0f"],
         len(history),
-        lambda actual: count_consecutive(history[-actual:]),
+        lambda actual: {
+            "\u8fde\u5927": count_consecutive(history[-actual:]).get("\u5927", {}),
+            "\u8fde\u5c0f": count_consecutive(history[-actual:]).get("\u5c0f", {}),
+        },
     )
     bet_lines = _build_section(
         "\u62bc\u6ce8\u7edf\u8ba1\uff08\u8fde\u8f93\uff09",
