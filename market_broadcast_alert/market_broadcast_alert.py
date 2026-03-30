@@ -14,6 +14,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from html import escape as escape_html
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -28,12 +29,14 @@ CONFIG_PATH = MODULE_DIR / "market_broadcast_alert_config.json"
 STATE_PATH = MODULE_DIR / "market_broadcast_alert_state.json"
 logger = logging.getLogger("market_broadcast_alert")
 RUNTIME_LOCK = threading.RLock()
+AUTO_DELETE_SECONDS = 60
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enable": False,
     "bot_token": "",
     "chat_id": 0,
     "allowed_sender_ids": [],
+    "report_enable": True,
     "streak_threshold": 4,
     "pair_trigger_consecutive": 3,
     "report_interval": 10,
@@ -53,6 +56,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "last_pair_notified_count": 0,
     "last_report_round": 0,
     "last_alert_at": {},
+    "last_message_ids": {},
 }
 
 
@@ -60,6 +64,7 @@ DEFAULT_STATE: Dict[str, Any] = {
 class AlertEvent:
     event_type: str
     message: str
+    parse_mode: Optional[str] = "HTML"
 
 
 def _read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -80,6 +85,20 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "on", "yes", "y", "enable", "enabled"}:
+            return True
+        if normalized in {"0", "false", "off", "no", "n", "disable", "disabled"}:
+            return False
+    return bool(default)
+
+
 def load_config() -> Dict[str, Any]:
     if not CONFIG_EXAMPLE_PATH.exists():
         CONFIG_EXAMPLE_PATH.write_text(json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -91,6 +110,7 @@ def load_config() -> Dict[str, Any]:
     config["pair_trigger_consecutive"] = max(1, int(config.get("pair_trigger_consecutive", 3) or 3))
     config["report_interval"] = max(1, int(config.get("report_interval", 10) or 10))
     config["cooldown_seconds"] = max(0, int(config.get("cooldown_seconds", 600) or 600))
+    config["report_enable"] = _to_bool(config.get("report_enable", True), True)
     mention_users = config.get("mention_users", [])
     if not isinstance(mention_users, list):
         mention_users = []
@@ -118,6 +138,8 @@ def load_state() -> Dict[str, Any]:
         state["market_history"] = []
     if not isinstance(state.get("last_alert_at"), dict):
         state["last_alert_at"] = {}
+    if not isinstance(state.get("last_message_ids"), dict):
+        state["last_message_ids"] = {}
     return state
 
 
@@ -183,11 +205,53 @@ def _format_history_block(history: List[int], width: int = 10, rows: int = 4) ->
     return "\n".join(lines)
 
 
+def _format_history_grid_like_main(history: List[int]) -> str:
+    try:
+        return str(zm._build_recent_history_grid(history))
+    except Exception:
+        recent = history[-40:][::-1]
+        if not recent:
+            return "暂无数据"
+        icons = ["✅" if x == 1 else "❌" for x in recent]
+        return "\n".join(" ".join(icons[i:i + 10]) for i in range(0, len(icons), 10))
+
+
+def _build_history_html(history: List[int]) -> str:
+    history_grid = escape_html(_format_history_grid_like_main(history))
+    return (
+        "<b>📊 近期 40 次结果（由近及远）</b>\n"
+        "✅：大（1）  ❌：小（0）\n"
+        f"<pre>{history_grid}</pre>"
+    )
+
+
 def _format_mentions(config: Dict[str, Any]) -> str:
     mention_users = config.get("mention_users", [])
     if not mention_users:
         return ""
-    return "\n\n" + " ".join(mention_users)
+    return " ".join(mention_users)
+
+
+def _build_card_html(
+    title: str,
+    *,
+    summary: str = "",
+    fields: Optional[List[tuple[str, Any]]] = None,
+    history: Optional[List[int]] = None,
+    mentions: str = "",
+) -> str:
+    lines = [f"<b>{escape_html(str(title or '').strip())}</b>"]
+    if summary:
+        lines.extend(["", escape_html(summary)])
+    for label, value in fields or []:
+        if value in (None, ""):
+            continue
+        lines.append(f"{escape_html(str(label))}：{escape_html(str(value))}")
+    if history is not None:
+        lines.extend(["", _build_history_html(history[-40:])])
+    if mentions:
+        lines.extend(["", escape_html(mentions).replace("&commat;", "@")])
+    return "\n".join(lines).strip()
 
 
 def build_streak_alert(history: List[int], config: Dict[str, Any]) -> Optional[str]:
@@ -199,16 +263,17 @@ def build_streak_alert(history: List[int], config: Dict[str, Any]) -> Optional[s
     alert_type = "连大提醒" if side == 1 else "连小提醒"
     advice_side = "小" if side == 1 else "大"
     rule_text = f"当前盘口已出现 {streak_len} 连{'大' if side == 1 else '小'}"
-    return (
-        "🚨 群重点提醒 🚨\n\n"
-        f"类型：{alert_type}\n"
-        f"规律：{rule_text}\n"
-        "说明：盘口单边偏移明显，可能接近反切位\n"
-        "人工建议：可观察手动反投\n"
-        f"建议手动下注：{advice_side}\n\n"
-        "近40局（由近及远）\n"
-        f"{_format_history_block(history[-40:])}"
-        f"{_format_mentions(config)}"
+    return _build_card_html(
+        "🚨 群重点提醒 🚨",
+        fields=[
+            ("类型", alert_type),
+            ("规律", rule_text),
+            ("说明", "盘口单边偏移明显，可能接近反切位"),
+            ("人工建议", "可观察手动反投"),
+            ("建议手动下注", advice_side),
+        ],
+        history=history,
+        mentions=_format_mentions(config),
     )
 
 
@@ -224,27 +289,29 @@ def build_pair_alert(history: List[int], config: Dict[str, Any]) -> Optional[str
         if next_char not in {0, 1}:
             return None
         advice_side = "大" if int(next_char) == 0 else "小"
-        return (
-            "🚨 群重点提醒 🚨\n\n"
-            "类型：配对规律提醒\n"
-            f"规律：当前盘口连续识别为交替型（{rhythm.get('recent_seq', '')}）\n"
-            "说明：盘口处于明显交替节奏，当前可观察其结束交替的反切机会\n"
-            "人工建议：可观察手动反投，尝试结束交替规律\n"
-            f"建议手动下注：{advice_side}\n\n"
-            "近40局（由近及远）\n"
-            f"{_format_history_block(history[-40:])}"
-            f"{_format_mentions(config)}"
+        return _build_card_html(
+            "🚨 群重点提醒 🚨",
+            fields=[
+                ("类型", "配对规律提醒"),
+                ("规律", f"当前盘口连续识别为交替型（{rhythm.get('recent_seq', '')}）"),
+                ("说明", "盘口处于明显交替节奏，当前可观察其结束交替的反切机会"),
+                ("人工建议", "可观察手动反投，尝试结束交替规律"),
+                ("建议手动下注", advice_side),
+            ],
+            history=history,
+            mentions=_format_mentions(config),
         )
 
-    return (
-        "🚨 群重点提醒 🚨\n\n"
-        "类型：配对规律提醒\n"
-        f"规律：当前盘口连续识别为成双型（{rhythm.get('recent_seq', '')}）\n"
-        "说明：当前属于配对节奏，请人工观察，不直接给下注建议\n"
-        "人工建议：等待更明确的下一步节奏确认\n\n"
-        "近40局（由近及远）\n"
-        f"{_format_history_block(history[-40:])}"
-        f"{_format_mentions(config)}"
+    return _build_card_html(
+        "🚨 群重点提醒 🚨",
+        fields=[
+            ("类型", "配对规律提醒"),
+            ("规律", f"当前盘口连续识别为成双型（{rhythm.get('recent_seq', '')}）"),
+            ("说明", "当前属于配对节奏，请人工观察，不直接给下注建议"),
+            ("人工建议", "等待更明确的下一步节奏确认"),
+        ],
+        history=history,
+        mentions=_format_mentions(config),
     )
 
 
@@ -254,7 +321,6 @@ def build_market_stats_report(history: List[int], report_interval: int, config: 
     stats = {"连大": [], "连小": []}
     all_ns = set()
 
-    result_counts_full = zm.count_consecutive(history)
     for window in windows:
         actual = min(int(window), len(history))
         if actual <= 0:
@@ -288,13 +354,8 @@ def build_market_stats_report(history: List[int], report_interval: int, config: 
                 lines.append(row)
         lines.append("")
 
-    return (
-        "📊 群盘口统计播报 📊\n\n"
-        + "\n".join(lines).rstrip()
-        + "\n\n近40局（由近及远）\n"
-        + _format_history_block(history[-40:])
-        + _format_mentions(config)
-    )
+    table_block = escape_html("\n".join(lines).rstrip())
+    return f"<b>📊 群盘口统计播报 📊</b>\n\n<pre>{table_block}</pre>"
 
 
 def update_market_state(state: Dict[str, Any], history: List[int]) -> bool:
@@ -343,7 +404,11 @@ def evaluate_alerts(state: Dict[str, Any], config: Dict[str, Any], history: List
     report_interval = int(config.get("report_interval", 10) or 10)
     round_counter = int(state.get("round_counter", 0) or 0)
     last_report_round = int(state.get("last_report_round", 0) or 0)
-    if round_counter >= report_interval and round_counter - last_report_round >= report_interval:
+    if (
+        bool(config.get("report_enable", True))
+        and round_counter >= report_interval
+        and round_counter - last_report_round >= report_interval
+    ):
         events.append(AlertEvent("report", build_market_stats_report(history, report_interval, config)))
         state["last_report_round"] = round_counter
 
@@ -361,11 +426,31 @@ def _is_admin(bot_token: str, chat_id: int, user_id: int) -> bool:
     return status in {"administrator", "creator"}
 
 
-def _send_text(bot_token: str, chat_id: int, text: str) -> Dict[str, Any]:
+def _send_text(bot_token: str, chat_id: int, text: str, parse_mode: Optional[str] = None) -> Dict[str, Any]:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    response = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=15)
+    payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    response = requests.post(url, json=payload, timeout=15)
     response.raise_for_status()
     return response.json()
+
+
+def _delete_message(bot_token: str, chat_id: int, message_id: int) -> None:
+    url = f"https://api.telegram.org/bot{bot_token}/deleteMessage"
+    response = requests.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=15)
+    response.raise_for_status()
+
+
+def _schedule_delete(bot_token: str, chat_id: int, message_id: int, delay_seconds: int = AUTO_DELETE_SECONDS) -> None:
+    def _runner():
+        try:
+            time.sleep(max(1, int(delay_seconds)))
+            _delete_message(bot_token, chat_id, message_id)
+        except Exception:
+            return
+
+    threading.Thread(target=_runner, daemon=True).start()
 
 
 def _normalize_command(text: str) -> List[str]:
@@ -408,6 +493,7 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
             f"命令管理员ID：{', '.join(str(x) for x in config.get('allowed_sender_ids', [])) or '未设置'}\n"
             f"连大连小阈值：{config.get('streak_threshold', 4)}\n"
             f"配对规律阈值：{config.get('pair_trigger_consecutive', 3)}\n"
+            f"周期播报：{'ON' if bool(config.get('report_enable', True)) else 'OFF'}\n"
             f"周期播报间隔：{config.get('report_interval', 10)}\n"
             f"艾特名单：{mentions}"
         )
@@ -429,6 +515,11 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
         return f"✅ 配对规律提醒阈值已设置为 {config['pair_trigger_consecutive']}"
 
     if sub == "r" and len(tokens) >= 3:
+        arg = tokens[2].lower()
+        if arg in {"on", "off"}:
+            config["report_enable"] = arg == "on"
+            save_config(config)
+            return f"✅ 已{'开启' if config['report_enable'] else '关闭'}周期统计播报"
         config["report_interval"] = max(1, int(tokens[2]))
         save_config(config)
         return f"✅ 盘口统计播报间隔已设置为 {config['report_interval']}"
@@ -455,6 +546,7 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
         "fa on / fa off\n"
         "fa s 4\n"
         "fa p 3\n"
+        "fa r on / fa r off\n"
         "fa r 10\n"
         "fa m\n"
         "fa m + @user1 @user2\n"
@@ -499,7 +591,18 @@ def process_market_history_snapshot(history: List[int]) -> int:
         sent_count = 0
         for event in events:
             try:
-                _send_text(bot_token, chat_id, event.message)
+                last_message_ids = state.setdefault("last_message_ids", {})
+                previous_message_id = int(last_message_ids.get(event.event_type, 0) or 0)
+                if previous_message_id > 0:
+                    try:
+                        _delete_message(bot_token, chat_id, previous_message_id)
+                    except requests.RequestException:
+                        pass
+                response = _send_text(bot_token, chat_id, event.message, parse_mode=event.parse_mode)
+                message_id = int(response.get("result", {}).get("message_id", 0) or 0)
+                if message_id > 0:
+                    last_message_ids[event.event_type] = message_id
+                    _schedule_delete(bot_token, chat_id, message_id, AUTO_DELETE_SECONDS)
                 sent_count += 1
             except requests.RequestException as exc:
                 logger.warning("盘口播报提醒发送失败：%s", exc)
