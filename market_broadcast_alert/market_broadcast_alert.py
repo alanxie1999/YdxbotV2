@@ -270,6 +270,29 @@ def _build_card_html(
     return "\n".join(lines).strip()
 
 
+def _build_pattern_alert_html(
+    *,
+    alert_type: str,
+    rule_text: str,
+    advice_text: str,
+    history: List[int],
+    mentions: str,
+) -> str:
+    lines = [
+        "<b>🚨 盘口重点规律提醒 🚨</b>",
+        "",
+        f"⚠️类型：{escape_html(alert_type)}",
+        f"⚠️规律：{escape_html(rule_text)}",
+        "",
+        f"⚠️建议：{escape_html(advice_text)}",
+        "",
+        _build_history_html(history[-40:]),
+    ]
+    if mentions:
+        lines.extend(["", escape_html(mentions).replace("&commat;", "@")])
+    return "\n".join(lines).strip()
+
+
 def build_streak_alert(history: List[int], config: Dict[str, Any]) -> Optional[str]:
     streak_len, side = get_current_streak(history)
     threshold = int(config.get("streak_threshold", 4) or 4)
@@ -278,16 +301,11 @@ def build_streak_alert(history: List[int], config: Dict[str, Any]) -> Optional[s
 
     alert_type = "连大提醒" if side == 1 else "连小提醒"
     advice_side = "小" if side == 1 else "大"
-    rule_text = f"当前盘口已出现 {streak_len} 连{'大' if side == 1 else '小'}"
-    return _build_card_html(
-        "🚨 群重点提醒 🚨",
-        fields=[
-            ("类型", alert_type),
-            ("规律", rule_text),
-            ("说明", "盘口单边偏移明显，可能接近反切位"),
-            ("人工建议", "可观察手动反投"),
-            ("建议手动下注", advice_side),
-        ],
+    rule_text = f"已出现 {streak_len} 连{'大' if side == 1 else '小'}"
+    return _build_pattern_alert_html(
+        alert_type=alert_type,
+        rule_text=rule_text,
+        advice_text=f"可观察手动反投，建议押注：{advice_side}",
         history=history,
         mentions=_format_mentions(config),
     )
@@ -297,35 +315,17 @@ def build_pair_alert(history: List[int], config: Dict[str, Any]) -> Optional[str
     rhythm = zm.analyze_rhythm_context(history)
     threshold = int(config.get("pair_trigger_consecutive", 3) or 3)
     tag = str(rhythm.get("rhythm_tag", ""))
-    if tag not in {"ALTERNATION_RHYTHM", "PAIR_FORMATION"}:
+    if tag != "ALTERNATION_RHYTHM":
         return None
 
-    if tag == "ALTERNATION_RHYTHM":
-        next_char = rhythm.get("alternation_next")
-        if next_char not in {0, 1}:
-            return None
-        advice_side = "大" if int(next_char) == 0 else "小"
-        return _build_card_html(
-            "🚨 群重点提醒 🚨",
-            fields=[
-                ("类型", "配对规律提醒"),
-                ("规律", f"当前盘口连续识别为交替型（{rhythm.get('recent_seq', '')}）"),
-                ("说明", "盘口处于明显交替节奏，当前可观察其结束交替的反切机会"),
-                ("人工建议", "可观察手动反投，尝试结束交替规律"),
-                ("建议手动下注", advice_side),
-            ],
-            history=history,
-            mentions=_format_mentions(config),
-        )
-
-    return _build_card_html(
-        "🚨 群重点提醒 🚨",
-        fields=[
-            ("类型", "配对规律提醒"),
-            ("规律", f"当前盘口连续识别为成双型（{rhythm.get('recent_seq', '')}）"),
-            ("说明", "当前属于配对节奏，请人工观察，不直接给下注建议"),
-            ("人工建议", "等待更明确的下一步节奏确认"),
-        ],
+    next_char = rhythm.get("alternation_next")
+    if next_char not in {0, 1}:
+        return None
+    advice_side = "大" if int(next_char) == 0 else "小"
+    return _build_pattern_alert_html(
+        alert_type="配对规律提醒",
+        rule_text="当前盘口连续识别为交替型（010101 / 101010）",
+        advice_text=f"可观察手动反投，尝试结束交替规律，建议押注：{advice_side}",
         history=history,
         mentions=_format_mentions(config),
     )
@@ -354,7 +354,7 @@ def build_market_stats_report(history: List[int], report_interval: int, config: 
     header = "类别 |" + "".join(f" {str(label).rjust(label_width)} |" for label in labels)
     divider = "-" * len(header)
 
-    lines = [f"说明：最近新增 {report_interval} 局盘口，推送一次连大连小统计", ""]
+    lines: List[str] = []
     for category in ["连大", "连小"]:
         lines.append(category)
         lines.append("=" * len(header))

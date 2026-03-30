@@ -19,9 +19,10 @@ def test_build_streak_alert_recommends_reverse_side():
 
     message = mba.build_streak_alert(history, config)
 
-    assert "<b>🚨 群重点提醒 🚨</b>" in message
-    assert "连大提醒" in message
-    assert "建议手动下注：小" in message
+    assert "<b>🚨 盘口重点规律提醒 🚨</b>" in message
+    assert "⚠️类型：连大提醒" in message
+    assert "⚠️规律：已出现 4 连大" in message
+    assert "⚠️建议：可观察手动反投，建议押注：小" in message
     assert "✅" in message and "❌" in message
     assert message.rstrip().endswith("@a @b")
 
@@ -33,21 +34,18 @@ def test_build_pair_alert_for_alternation_gives_reverse_suggestion():
     message = mba.build_pair_alert(history, config)
 
     assert "配对规律提醒" in message
-    assert "交替型" in message
-    assert "建议手动下注：" in message
+    assert "⚠️规律：当前盘口连续识别为交替型（010101 / 101010）" in message
+    assert "⚠️建议：可观察手动反投，尝试结束交替规律，建议押注：大" in message
     assert message.rstrip().endswith("@a")
 
 
-def test_build_pair_alert_for_pair_formation_has_no_bet_side():
+def test_build_pair_alert_for_pair_formation_is_disabled():
     history = [1, 0, 1, 1, 0, 1, 1, 0, 1]
     config = {"pair_trigger_consecutive": 3, "mention_users": ["@a"]}
 
     message = mba.build_pair_alert(history, config)
 
-    assert "配对规律提醒" in message
-    assert "成双型" in message
-    assert "建议手动下注：" not in message
-    assert message.rstrip().endswith("@a")
+    assert message is None
 
 
 def test_handle_command_updates_threshold_and_mentions(tmp_path, monkeypatch):
