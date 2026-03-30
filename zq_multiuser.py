@@ -3287,6 +3287,23 @@ async def _refresh_dashboard_message_slim(client, user_ctx: UserContext, global_
     return user_ctx.dashboard_message
 
 
+async def _push_market_broadcast_snapshot(user_ctx: UserContext, history: List[int]) -> None:
+    if not history:
+        return
+    try:
+        from market_broadcast_alert.market_broadcast_alert import process_market_history_snapshot
+
+        await asyncio.to_thread(process_market_history_snapshot, list(history))
+    except Exception as e:
+        log_event(
+            logging.WARNING,
+            'market_alert',
+            '盘口播报快照处理失败',
+            user_id=user_ctx.user_id,
+            data=str(e),
+        )
+
+
 async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_config: dict):
     state = user_ctx.state
     rt = state.runtime
@@ -3331,12 +3348,17 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     text = event.message.message
     history_before = list(state.history)
     incoming_history: List[int] = []
+    history_changed = False
     try:
         incoming_history = _extract_history_from_bet_on_text(text)
         if incoming_history and len(incoming_history) >= len(history_before):
             state.history = incoming_history[-2000:]
+            history_changed = state.history != history_before
     except Exception as e:
         log_event(logging.WARNING, 'bet_on', '解析历史数据失败', user_id=user_ctx.user_id, data=str(e))
+
+    if history_changed:
+        await _push_market_broadcast_snapshot(user_ctx, state.history)
 
     next_bet_amount_snapshot = calculate_bet_amount(rt)
     if _verbose_runtime_diag_enabled():
@@ -5684,6 +5706,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
 
         state.history.append(result)
         state.history = state.history[-2000:]
+        await _push_market_broadcast_snapshot(user_ctx, state.history)
         lose_end_payload = None
 
         async def _apply_settle_fund_safety_guard() -> None:

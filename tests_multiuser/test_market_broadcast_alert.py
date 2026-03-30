@@ -97,6 +97,45 @@ def test_validate_runtime_config_requires_full_bot_token():
         raise AssertionError("expected invalid token to be rejected")
 
 
+def test_process_market_history_snapshot_uses_main_history_not_group_message(tmp_path, monkeypatch):
+    config_path = tmp_path / "cfg.json"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(mba, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(mba, "STATE_PATH", state_path)
+
+    sent_messages = []
+
+    def _fake_send_text(bot_token, chat_id, text):
+        sent_messages.append((bot_token, chat_id, text))
+        return {"ok": True}
+
+    monkeypatch.setattr(mba, "_send_text", _fake_send_text)
+
+    mba.save_config(
+        {
+            "enable": True,
+            "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
+            "chat_id": -1002310838908,
+            "allowed_sender_ids": [5721909476],
+            "streak_threshold": 4,
+            "pair_trigger_consecutive": 3,
+            "report_interval": 10,
+            "cooldown_seconds": 0,
+            "mention_users": ["@TrumpChe"],
+        }
+    )
+
+    sent = mba.process_market_history_snapshot([1, 0, 1, 1, 1, 1])
+
+    assert sent == 1
+    assert sent_messages
+    assert sent_messages[0][1] == -1002310838908
+    assert "连大提醒" in sent_messages[0][2]
+
+    sent_again = mba.process_market_history_snapshot([1, 0, 1, 1, 1, 1])
+    assert sent_again == 0
+
+
 def test_build_stats_report_separates_market_and_bet_statistics():
     state = SimpleNamespace(
         history=[1, 1, 1, 0, 0, 1, 1, 0],

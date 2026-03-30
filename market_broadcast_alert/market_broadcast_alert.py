@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ CONFIG_EXAMPLE_PATH = MODULE_DIR / "market_broadcast_alert_config.example.json"
 CONFIG_PATH = MODULE_DIR / "market_broadcast_alert_config.json"
 STATE_PATH = MODULE_DIR / "market_broadcast_alert_state.json"
 logger = logging.getLogger("market_broadcast_alert")
+RUNTIME_LOCK = threading.RLock()
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enable": False,
@@ -472,6 +474,41 @@ def process_group_message(message: Dict[str, Any], config: Dict[str, Any], state
     return evaluate_alerts(state, config, history)
 
 
+def process_market_history_snapshot(history: List[int]) -> int:
+    normalized_history = [int(x) for x in history if int(x) in {0, 1}]
+    if not normalized_history:
+        return 0
+
+    with RUNTIME_LOCK:
+        config = load_config()
+        if not bool(config.get("enable", False)):
+            return 0
+
+        try:
+            bot_token, chat_id = validate_runtime_config(config)
+        except ValueError as exc:
+            logger.warning("盘口播报提醒配置无效：%s", exc)
+            return 0
+
+        state = load_state()
+        if not update_market_state(state, normalized_history[-2000:]):
+            save_state(state)
+            return 0
+
+        events = evaluate_alerts(state, config, normalized_history[-2000:])
+        sent_count = 0
+        for event in events:
+            try:
+                _send_text(bot_token, chat_id, event.message)
+                sent_count += 1
+            except requests.RequestException as exc:
+                logger.warning("盘口播报提醒发送失败：%s", exc)
+                break
+
+        save_state(state)
+        return sent_count
+
+
 def run_forever(sleep_seconds: int = 3) -> None:
     config = load_config()
     state = load_state()
@@ -503,10 +540,7 @@ def run_forever(sleep_seconds: int = 3) -> None:
                 command_reply = handle_command(text, sender_id, config)
                 if command_reply:
                     _send_text(bot_token, chat_id, command_reply)
-                    continue
-                for event in process_group_message(message, config, state):
-                    _send_text(bot_token, chat_id, event.message)
-            save_state(state)
+                save_state(state)
             time.sleep(max(1, int(sleep_seconds)))
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
