@@ -305,7 +305,7 @@ def build_streak_alert(history: List[int], config: Dict[str, Any]) -> Optional[s
     return _build_pattern_alert_html(
         alert_type=alert_type,
         rule_text=rule_text,
-        advice_text=f"可观察手动反投，建议押注：{advice_side}",
+        advice_text=f"建议手动连续反向押注，押注：{advice_side}",
         history=history,
         mentions=_format_mentions(config),
     )
@@ -325,7 +325,7 @@ def build_pair_alert(history: List[int], config: Dict[str, Any]) -> Optional[str
     return _build_pattern_alert_html(
         alert_type="配对规律提醒",
         rule_text="当前盘口连续识别为交替型（010101 / 101010）",
-        advice_text=f"可观察手动反投，尝试结束交替规律，建议押注：{advice_side}",
+        advice_text=f"建议手动押注，结束交替规律，押注：{advice_side}",
         history=history,
         mentions=_format_mentions(config),
     )
@@ -460,7 +460,7 @@ def _build_bot_commands() -> List[Dict[str, str]]:
         {"command": "fas", "description": "设置连大连小提醒阈值"},
         {"command": "fap", "description": "设置配对规律提醒阈值"},
         {"command": "far", "description": "设置周期播报开关或间隔"},
-        {"command": "fam", "description": "查看或修改艾特名单"},
+        {"command": "fam", "description": "查看或修改@名单"},
     ]
 
 
@@ -523,6 +523,7 @@ def _extract_message_context(message: Dict[str, Any]) -> Dict[str, Any]:
         "chat_id": int(chat.get("id", 0) or 0),
         "chat_type": str(chat.get("type", "") or "").strip().lower(),
         "sender_id": int(sender.get("id", 0) or 0),
+        "message_id": int(message.get("message_id", 0) or 0),
         "text": str(message.get("text", "") or ""),
     }
 
@@ -578,7 +579,7 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
             f"配对规律阈值：{config.get('pair_trigger_consecutive', 3)}\n"
             f"周期播报：{'ON' if bool(config.get('report_enable', True)) else 'OFF'}\n"
             f"周期播报间隔：{config.get('report_interval', 10)}\n"
-            f"艾特名单：{mentions}"
+            f"@名单：{mentions}"
         )
 
     sub = tokens[1].lower()
@@ -610,18 +611,18 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
     if sub == "m":
         mention_users = list(config.get("mention_users", []))
         if len(tokens) == 2:
-            return "📡 当前艾特名单\n\n" + ("\n".join(mention_users) if mention_users else "未设置")
+            return "📡 当前@名单\n\n" + ("\n".join(mention_users) if mention_users else "未设置")
         action = tokens[2]
         payload = _normalize_mention_tokens(tokens[3:])
         if action == "+":
             merged = mention_users + [item for item in payload if item not in mention_users]
             config["mention_users"] = merged
             save_config(config)
-            return "✅ 已添加艾特名单\n\n" + ("\n".join(payload) if payload else "未添加任何用户")
+            return "✅ 已添加@名单\n\n" + ("\n".join(payload) if payload else "未添加任何用户")
         if action == "-":
             config["mention_users"] = [item for item in mention_users if item not in payload]
             save_config(config)
-            return "✅ 已删除艾特名单\n\n" + ("\n".join(payload) if payload else "未删除任何用户")
+            return "✅ 已删除@名单\n\n" + ("\n".join(payload) if payload else "未删除任何用户")
 
     return (
         "📡 fa 命令说明\n\n"
@@ -639,7 +640,14 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
     )
 
 
-def process_command_message(message: Dict[str, Any], config: Dict[str, Any]) -> Optional[tuple[int, str]]:
+def _command_reply_ttl(reply_text: str) -> int:
+    text = str(reply_text or "")
+    if "命令说明" in text:
+        return 12
+    return 5
+
+
+def process_command_message(message: Dict[str, Any], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     ctx = _extract_message_context(message)
     chat_ids = set(int(x) for x in config.get("chat_ids", []) if str(x).strip())
     is_private = ctx["chat_type"] == "private"
@@ -649,7 +657,13 @@ def process_command_message(message: Dict[str, Any], config: Dict[str, Any]) -> 
     reply = handle_command(ctx["text"], ctx["sender_id"], config)
     if not reply:
         return None
-    return ctx["chat_id"], reply
+    return {
+        "reply_chat_id": ctx["chat_id"],
+        "reply_text": reply,
+        "reply_ttl": _command_reply_ttl(reply),
+        "request_chat_id": ctx["chat_id"],
+        "request_message_id": ctx["message_id"],
+    }
 
 
 def process_group_message(message: Dict[str, Any], config: Dict[str, Any], state: Dict[str, Any]) -> List[AlertEvent]:
@@ -740,8 +754,26 @@ def run_forever(sleep_seconds: int = 3) -> None:
                 message = update.get("message", {}) if isinstance(update.get("message", {}), dict) else {}
                 command_result = process_command_message(message, config)
                 if command_result:
-                    reply_chat_id, command_reply = command_result
-                    _send_text(bot_token, reply_chat_id, command_reply)
+                    response = _send_text(
+                        bot_token,
+                        int(command_result["reply_chat_id"]),
+                        str(command_result["reply_text"]),
+                    )
+                    reply_message_id = int(response.get("result", {}).get("message_id", 0) or 0)
+                    if reply_message_id > 0:
+                        _schedule_delete(
+                            bot_token,
+                            int(command_result["reply_chat_id"]),
+                            reply_message_id,
+                            int(command_result.get("reply_ttl", 5) or 5),
+                        )
+                    request_message_id = int(command_result.get("request_message_id", 0) or 0)
+                    request_chat_id = int(command_result.get("request_chat_id", 0) or 0)
+                    if request_message_id > 0 and request_chat_id != 0:
+                        try:
+                            _schedule_delete(bot_token, request_chat_id, request_message_id, 5)
+                        except Exception:
+                            pass
                 save_state(state)
             time.sleep(max(1, int(sleep_seconds)))
         except requests.HTTPError as exc:

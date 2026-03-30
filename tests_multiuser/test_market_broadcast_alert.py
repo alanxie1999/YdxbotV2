@@ -22,7 +22,7 @@ def test_build_streak_alert_recommends_reverse_side():
     assert "<b>🚨 盘口重点规律提醒 🚨</b>" in message
     assert "⚠️类型：连大提醒" in message
     assert "⚠️规律：已出现 4 连大" in message
-    assert "⚠️建议：可观察手动反投，建议押注：小" in message
+    assert "⚠️建议：建议手动连续反向押注，押注：小" in message
     assert "✅" in message and "❌" in message
     assert message.rstrip().endswith("@a @b")
 
@@ -35,7 +35,7 @@ def test_build_pair_alert_for_alternation_gives_reverse_suggestion():
 
     assert "配对规律提醒" in message
     assert "⚠️规律：当前盘口连续识别为交替型（010101 / 101010）" in message
-    assert "⚠️建议：可观察手动反投，尝试结束交替规律，建议押注：大" in message
+    assert "⚠️建议：建议手动押注，结束交替规律，押注：大" in message
     assert message.rstrip().endswith("@a")
 
 
@@ -62,12 +62,12 @@ def test_handle_command_updates_threshold_and_mentions(tmp_path, monkeypatch):
     assert config["streak_threshold"] == 6
 
     result = mba.handle_command("fa m + @u1 @u2", sender_id=0, config=config)
-    assert "已添加艾特名单" in result
+    assert "已添加@名单" in result
     config = mba.load_config()
     assert config["mention_users"] == ["@u1", "@u2"]
 
     result = mba.handle_command("fa m + Su", sender_id=0, config=config)
-    assert "已添加艾特名单" in result
+    assert "已添加@名单" in result
     config = mba.load_config()
     assert config["mention_users"] == ["@u1", "@u2", "@Su"]
 
@@ -102,9 +102,9 @@ def test_process_command_message_allows_dm_even_when_alerts_disabled():
     result = mba.process_command_message(message, config)
 
     assert result is not None
-    chat_id, reply = result
-    assert chat_id == 5721909476
-    assert "盘口播报提醒配置" in reply
+    assert result["reply_chat_id"] == 5721909476
+    assert "盘口播报提醒配置" in result["reply_text"]
+    assert result["reply_ttl"] == 5
 
 
 def test_process_command_message_allows_notify_group_chat():
@@ -122,9 +122,8 @@ def test_process_command_message_allows_notify_group_chat():
 
     result = mba.process_command_message(message, config)
     assert result is not None
-    chat_id, reply = result
-    assert chat_id == -1003657725404
-    assert "盘口播报提醒配置" in reply
+    assert result["reply_chat_id"] == -1003657725404
+    assert "盘口播报提醒配置" in result["reply_text"]
 
 
 def test_process_command_message_ignores_unrelated_group_chat():
@@ -141,6 +140,27 @@ def test_process_command_message_ignores_unrelated_group_chat():
     }
 
     assert mba.process_command_message(message, config) is None
+
+
+def test_process_command_message_help_uses_longer_ttl():
+    config = {
+        "enable": True,
+        "bot_token": "8743311990:AAGZD7pquDgGxvn_QnjTIP5s7QQqUHB6K0A",
+        "chat_ids": [-1003657725404],
+        "allowed_sender_ids": [5721909476],
+    }
+    message = {
+        "chat": {"id": 5721909476, "type": "private"},
+        "from": {"id": 5721909476},
+        "text": "/fa help",
+        "message_id": 123,
+    }
+
+    result = mba.process_command_message(message, config)
+
+    assert result is not None
+    assert "命令说明" in result["reply_text"]
+    assert result["reply_ttl"] == 12
 
 
 def test_process_group_message_updates_state_and_triggers_report():
