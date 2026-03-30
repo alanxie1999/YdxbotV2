@@ -1,11 +1,14 @@
 {
+  "_comment": "盘口播报提醒配置。bot_token 与 chat_id 为群TGBot的凭据和目标群ID。streak_threshold=连大/连小达到该阈值后每局提醒；pair_trigger_consecutive=配对规律连续识别达到该阈值后提醒；report_interval=每新增多少局盘口推送一次连大连小统计；mention_users 会追加在消息最底部。",
   "enable": false,
-  "bot_token": "",
-  "chat_id": 0,
+  "bot_token": "请填写你的群TGBot Token",
+  "chat_id": -1001234567890,
   "streak_threshold": 4,
   "pair_trigger_consecutive": 3,
   "report_interval": 10,
   "cooldown_seconds": 600,
-  "mention_users": []
+  "mention_users": [
+    "@user1",
+    "@user2"
+  ]
 }
-
