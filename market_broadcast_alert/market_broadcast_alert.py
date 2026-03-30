@@ -463,6 +463,24 @@ def _normalize_command(text: str) -> List[str]:
     return [part.strip() for part in raw.split() if part.strip()]
 
 
+def _normalize_mention_tokens(tokens: List[str]) -> List[str]:
+    normalized: List[str] = []
+    for item in tokens:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        username = raw[1:] if raw.startswith("@") else raw
+        username = username.strip()
+        if not username:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_]{2,64}", username):
+            continue
+        mention = f"@{username}"
+        if mention not in normalized:
+            normalized.append(mention)
+    return normalized
+
+
 def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optional[str]:
     tokens = _normalize_command(text)
     if not tokens:
@@ -529,7 +547,7 @@ def handle_command(text: str, sender_id: int, config: Dict[str, Any]) -> Optiona
         if len(tokens) == 2:
             return "📡 当前艾特名单\n\n" + ("\n".join(mention_users) if mention_users else "未设置")
         action = tokens[2]
-        payload = [item for item in tokens[3:] if item.startswith("@")]
+        payload = _normalize_mention_tokens(tokens[3:])
         if action == "+":
             merged = mention_users + [item for item in payload if item not in mention_users]
             config["mention_users"] = merged

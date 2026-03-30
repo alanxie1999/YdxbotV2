@@ -68,6 +68,11 @@ def test_handle_command_updates_threshold_and_mentions(tmp_path, monkeypatch):
     config = mba.load_config()
     assert config["mention_users"] == ["@u1", "@u2"]
 
+    result = mba.handle_command("fa m + Su", sender_id=0, config=config)
+    assert "已添加艾特名单" in result
+    config = mba.load_config()
+    assert config["mention_users"] == ["@u1", "@u2", "@Su"]
+
     result = mba.handle_command("fa r off", sender_id=0, config=config)
     assert "关闭周期统计播报" in result
     config = mba.load_config()
