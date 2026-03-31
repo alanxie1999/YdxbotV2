@@ -61,6 +61,8 @@ ENV/
 # macOS
 .DS_Store
 
-# ?????????
+# 市场播报模块运行时文件
 market_broadcast_alert/market_broadcast_alert_config.json
 market_broadcast_alert/market_broadcast_alert_state.json
+
+.omx/

@@ -18,7 +18,7 @@ users/
     xu.session
 ```
 
-说明：
+各文件作用：
 
 - `*_config.json`：账号主配置
 - `state.json`：运行状态
@@ -27,14 +27,17 @@ users/
 
 ## 二、管理员入口：admin_console
 
-当前版本要求 `admin_console` 必配。
-
-只能二选一：
+管理员入口必须配置，只能二选一：
 
 - `telegram_id`
 - `telegram_bot`
 
-### 1. telegram_id 模式
+### 1. telegram_id
+
+适合：
+
+- 自己的 Telegram 私聊
+- 单独管理 chat
 
 ```json
 "admin_console": {
@@ -50,12 +53,12 @@ users/
 }
 ```
 
+### 2. telegram_bot
+
 适合：
 
-- 自己的 Telegram 私聊
-- 专用管理 chat
-
-### 2. telegram_bot 模式
+- 每个账号一个独立管理员 bot
+- 命令、状态和操作结果不想混在个人聊天里
 
 ```json
 "admin_console": {
@@ -71,14 +74,9 @@ users/
 }
 ```
 
-适合：
+当前限制：
 
-- 每个账号一个独立管理员 bot
-- 命令和管理消息不想混在个人聊天里
-
-说明：
-
-- 当前只支持 bot 私聊
+- 只支持 bot 私聊
 - 不支持群
 - 不支持双入口同时收命令
 
@@ -107,11 +105,11 @@ users/
 
 - `iyuu`：重点通知
 - `telegram_notify_bot`：Telegram 通知 bot
-- 这两个和 `admin_console.telegram_bot` 不是一回事
+- 它们和 `admin_console.telegram_bot` 不是一回事
 
 ## 四、AI 配置
 
-当前项目主要支持 OpenAI 兼容方式。
+当前主要通过 OpenAI 兼容方式接模型接口。
 
 典型结构：
 
@@ -146,7 +144,7 @@ users/
 
 ## 五、betting 时序配置
 
-当前默认值与 `v1.2.0` 对齐：
+当前默认值：
 
 ```json
 "betting": {
@@ -157,7 +155,7 @@ users/
 }
 ```
 
-说明：
+字段说明：
 
 - `prompt_wait_sec`：盘口消息没有按钮时的等待补偿
 - `predict_timeout_sec`：模型预测超时
@@ -166,7 +164,7 @@ users/
 
 ## 六、预设文件
 
-模板预设现在统一为：
+模板预设统一为：
 
 - `5k`
 - `1w`
@@ -179,4 +177,3 @@ users/
 - `30w`
 
 如果旧账号目录里还留着旧 `yc*` 预设，当前版本加载时会自动丢弃这些旧键。
-

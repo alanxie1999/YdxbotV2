@@ -1,19 +1,29 @@
 # YdxbotV2
 
-Ydxbot 是一个基于 Telegram 的多账号自动化脚本项目。
+YdxbotV2 是一个基于 Telegram 的多账号自动化脚本。
 
-## 说明
+它面向长期在群里手动盯盘、手动押注的使用者，核心目标是把重复操作、状态查看、风险提醒和多账号管理收进一套统一流程。
 
-本项目当前以开源形式提供，主要用于：
+## 主要功能
 
-- 自动化流程研究
-- 多账号架构实践
-- Telegram 交互与通知机制测试
-- 文档与运维流程演练
+- 自动接收盘口消息与结算消息
+- 按预设参数自动下注
+- 支持多账号独立运行
+- 支持模型预测与统计兜底
+- 支持连输告警、盈利暂停、炸号保护
+- 支持模型异常探测、自动切换与自动恢复
+- 支持管理员控制台与通知渠道分离
+- 支持版本更新、回退与运行状态查看
+
+## 适用场景
+
+- 长期人工盯盘、重复手动下注
+- 需要同时管理多个账号
+- 希望把告警、暂停、恢复、统计查看集中起来
 
 ## 免责声明
 
-本项目仅供学习、测试与技术研究使用。
+本项目以开源形式提供，仅供学习、测试与技术研究使用。
 
 使用者应自行判断其适用范围，并自行承担部署、运行、配置、更新及使用过程中产生的一切风险与责任。
 
@@ -21,15 +31,9 @@ Ydxbot 是一个基于 Telegram 的多账号自动化脚本项目。
 
 ## 文档入口
 
-完整使用说明、配置方式、命令参考、更新规范与后续文档，请查看 Wiki：
+详细文档请查看 Wiki：
 
 - Wiki 首页：[https://ibarnard.github.io/YdxbotV2/](https://ibarnard.github.io/YdxbotV2/)
 - 快速开始：[https://ibarnard.github.io/YdxbotV2/quick-start/](https://ibarnard.github.io/YdxbotV2/quick-start/)
 - 配置说明：[https://ibarnard.github.io/YdxbotV2/config/](https://ibarnard.github.io/YdxbotV2/config/)
 - 命令参考：[https://ibarnard.github.io/YdxbotV2/commands/](https://ibarnard.github.io/YdxbotV2/commands/)
-
-## 当前状态
-
-当前仓库 README 只保留项目说明与文档入口。
-
-详细内容统一在 Wiki 中维护，以避免 README、代码和发布说明长期分叉。
