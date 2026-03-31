@@ -286,6 +286,11 @@ HIGH_STEP_DOUBLE_CONFIRM_MIN_CONF = 70
 HIGH_STEP_DOUBLE_CONFIRM_PAUSE_ROUNDS = 2
 HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 5.0
 
+# 纯交替增强：当最近盘口“由近到远”出现 6 位纯交替时，
+# 主脚本强制按最新一手同向下注，尝试结束交替。
+ALTERNATION_BREAK_TRIGGER_WINDOW = 6
+ALTERNATION_BREAK_PATTERNS = {"010101", "101010"}
+
 # 同手位防卡死：避免 SKIP/超时导致长期不落单
 STALL_GUARD_SKIP_MAX = 2
 STALL_GUARD_TIMEOUT_MAX = 2
@@ -2789,6 +2794,67 @@ def analyze_rhythm_context(history, recent_window: int = 9, lookback_events: int
     }
 
 
+def _detect_alternation_break_signal(
+    history: list,
+    window: int = ALTERNATION_BREAK_TRIGGER_WINDOW,
+    order: str = "near_to_far",
+) -> Dict[str, Any]:
+    """识别盘口“由近到远”纯交替信号，并给出结束交替的同向下注方向。"""
+    if not isinstance(history, list) or len(history) < int(window):
+        return {"active": False}
+
+    normalized_order = str(order or "near_to_far").strip().lower()
+    if normalized_order == "chronological":
+        near_to_far = [int(x) for x in history[-int(window):][::-1]]
+    else:
+        near_to_far = [int(x) for x in history[:int(window)]]
+    seq = "".join(str(x) for x in near_to_far)
+    if seq not in ALTERNATION_BREAK_PATTERNS:
+        return {"active": False}
+
+    latest_value = int(near_to_far[0])
+    return {
+        "active": True,
+        "near_to_far_seq": seq,
+        "window": int(window),
+        "latest_value": latest_value,
+        "prediction": latest_value,
+    }
+
+
+def _clear_alternation_break_runtime(rt: dict) -> None:
+    rt["alternation_break_active"] = False
+    rt["alternation_break_seq"] = ""
+    rt["alternation_break_side"] = ""
+
+
+def _apply_alternation_break_override(
+    rt: dict,
+    history: list,
+    prediction: int,
+    *,
+    order: str = "near_to_far",
+) -> int:
+    """在纯交替盘面里，用“最新一手同向”增强主脚本，而不是替换整套模型。"""
+    signal = _detect_alternation_break_signal(history, order=order)
+    if not signal.get("active", False):
+        _clear_alternation_break_runtime(rt)
+        return int(prediction)
+
+    forced_prediction = int(signal.get("prediction", prediction))
+    side_text = "大" if forced_prediction == 1 else "小"
+    window = int(signal.get("window", ALTERNATION_BREAK_TRIGGER_WINDOW))
+    rt["alternation_break_active"] = True
+    rt["alternation_break_seq"] = str(signal.get("near_to_far_seq", ""))
+    rt["alternation_break_side"] = side_text
+    rt["last_predict_source"] = "alternation_break"
+    rt["last_predict_tag"] = "ALTERNATION_BREAK"
+    rt["last_predict_confidence"] = 100
+    rt["last_predict_reason"] = f"{window}位纯交替，按结束交替规则押同向"
+    rt["last_predict_info"] = f"{window}位纯交替，按结束交替规则押同向（{side_text}）"
+    return forced_prediction
+
+
 def fallback_prediction(history):
     """
     统计兜底预测。
@@ -3734,12 +3800,20 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         _ensure_model_probe_loop(client, user_ctx, global_config)
 
     if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
+        _clear_alternation_break_runtime(rt)
         _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, "模型连续兜底暂停")
         rt["bet"] = False
         rt["bet_on"] = False
         rt["mode_stop"] = True
         user_ctx.save_state()
         return
+
+    prediction = _apply_alternation_break_override(
+        rt,
+        incoming_history if incoming_history else state.history,
+        prediction,
+        order="near_to_far",
+    )
 
     if prediction == -1:
         skip_trigger = _record_hand_stall_block(rt, next_sequence, history_signature, "skip")

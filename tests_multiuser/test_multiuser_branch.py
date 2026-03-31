@@ -1018,7 +1018,7 @@ def test_process_bet_on_parses_history_and_places_bet(tmp_path, monkeypatch):
 
     class DummyEvent:
         def __init__(self):
-            history = " ".join((["0", "1"] * 20))
+            history = " ".join((["1", "1"] + (["0", "1"] * 19)))
             self.message = SimpleNamespace(message=f"[近 40 次结果][由近及远][0 小 1 大] {history}")
             self.reply_markup = object()
             self.chat_id = 1
@@ -1101,6 +1101,146 @@ def test_process_bet_on_allows_short_history_like_master(tmp_path, monkeypatch):
     assert len(ctx.state.history) == 3
     assert rt.get("bet") is True
     assert len(ctx.state.bet_sequence_log) == 1
+
+
+def test_process_bet_on_overrides_model_with_alternation_break_same_side(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "4010"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "交替增强用户"},
+            "telegram": {"user_id": 4010},
+            "groups": {"admin_chat": 4010},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["stop_count"] = 0
+    rt["bet_amount"] = 500
+    rt["lose_count"] = 0
+
+    sent_messages = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        user_ctx.state.runtime["last_predict_info"] = "模型原判断押大"
+        user_ctx.state.runtime["last_predict_source"] = "model"
+        user_ctx.state.runtime["last_predict_tag"] = "SINGLE_JUMP"
+        user_ctx.state.runtime["last_predict_confidence"] = 83
+        return 1
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=1, id=1)
+
+    async def fake_delete_later(*args, **kwargs):
+        return None
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "delete_later", fake_delete_later)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    class DummyEvent:
+        def __init__(self):
+            self.message = SimpleNamespace(message="[近 40 次结果][由近及远][0 小 1 大] 0 1 0 1 0 1 1 1")
+            self.reply_markup = object()
+            self.chat_id = 1
+            self.id = 101
+            self.clicks = []
+
+        async def click(self, data):
+            self.clicks.append(data)
+
+    event = DummyEvent()
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["bet"] is True
+    assert rt["bet_type"] == 0
+    assert rt["last_predict_source"] == "alternation_break"
+    assert "6位纯交替，按结束交替规则押同向（小）" in rt["last_predict_info"]
+    assert any("押注方向：小" in message for message in sent_messages)
+
+
+def test_process_bet_on_alternation_break_can_override_skip(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "4011"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "交替跳过用户"},
+            "telegram": {"user_id": 4011},
+            "groups": {"admin_chat": 4011},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["stop_count"] = 0
+    rt["bet_amount"] = 500
+    rt["lose_count"] = 0
+
+    sent_messages = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        user_ctx.state.runtime["last_predict_info"] = "模型建议观望"
+        user_ctx.state.runtime["last_predict_source"] = "model_skip"
+        user_ctx.state.runtime["last_predict_tag"] = "SINGLE_JUMP"
+        user_ctx.state.runtime["last_predict_confidence"] = 61
+        return -1
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=1, id=1)
+
+    async def fake_delete_later(*args, **kwargs):
+        return None
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm, "delete_later", fake_delete_later)
+    monkeypatch.setattr(zm.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    class DummyEvent:
+        def __init__(self):
+            self.message = SimpleNamespace(message="[近 40 次结果][由近及远][0 小 1 大] 1 0 1 0 1 0 0 0")
+            self.reply_markup = object()
+            self.chat_id = 1
+            self.id = 102
+            self.clicks = []
+
+        async def click(self, data):
+            self.clicks.append(data)
+
+    event = DummyEvent()
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["bet"] is True
+    assert rt["bet_type"] == 1
+    assert rt["last_predict_source"] == "alternation_break"
+    assert "6位纯交替，按结束交替规则押同向（大）" in rt["last_predict_info"]
+    assert any("押注方向：大" in message for message in sent_messages)
 
 
 def test_process_bet_on_recovers_when_source_message_id_invalid(tmp_path, monkeypatch):
@@ -2277,9 +2417,30 @@ def test_process_bet_on_force_unlocks_after_repeated_skip(tmp_path, monkeypatch)
             self.clicks.append(data)
 
     events = [
-        DummyEvent(" ".join((["0", "1"] * 20)), 1),
-        DummyEvent(" ".join((["1", "0"] * 20)), 2),
-        DummyEvent(" ".join((["1", "1"] + (["0", "1"] * 19))), 3),
+        DummyEvent(
+            " ".join(
+                ["1", "1", "0", "1", "0", "1"]
+                + (["0", "1"] * 11)
+                + ["0", "0", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1"]
+            ),
+            1,
+        ),
+        DummyEvent(
+            " ".join(
+                ["0", "0", "1", "0", "1", "0"]
+                + (["1", "0"] * 11)
+                + ["1", "1", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0"]
+            ),
+            2,
+        ),
+        DummyEvent(
+            " ".join(
+                ["1", "0", "0", "1", "0", "1"]
+                + (["1", "0"] * 11)
+                + ["1", "0", "0", "1", "0", "1", "1", "0", "1", "0", "1", "0"]
+            ),
+            3,
+        ),
     ]
 
     asyncio.run(zm.process_bet_on(SimpleNamespace(), events[0], ctx, {}))
@@ -2334,8 +2495,22 @@ def test_process_bet_on_high_step_skip_pauses_instead_of_unlock(tmp_path, monkey
             self.id = event_id
 
     events = [
-        DummyEvent(" ".join((["0", "1"] * 20)), 1),
-        DummyEvent(" ".join((["1", "0"] * 20)), 2),
+        DummyEvent(
+            " ".join(
+                ["1", "1", "0", "1", "0", "1"]
+                + (["0", "1"] * 11)
+                + ["0", "0", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1"]
+            ),
+            1,
+        ),
+        DummyEvent(
+            " ".join(
+                ["0", "0", "1", "0", "1", "0"]
+                + (["1", "0"] * 11)
+                + ["1", "1", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0"]
+            ),
+            2,
+        ),
     ]
 
     asyncio.run(zm.process_bet_on(SimpleNamespace(), events[0], ctx, {}))
@@ -4062,6 +4237,21 @@ def test_analyze_rhythm_context_prefers_alternation_for_pure_single_jump():
     assert result["rhythm_tag"] == "ALTERNATION_RHYTHM"
     assert result["alternation_score"] > result["pair_score"]
     assert result["alternation_next"] == 0
+
+
+def test_detect_alternation_break_signal_uses_near_to_far_six_window():
+    small_signal = zm._detect_alternation_break_signal([0, 1, 0, 1, 0, 1])
+    assert small_signal["active"] is True
+    assert small_signal["near_to_far_seq"] == "010101"
+    assert small_signal["prediction"] == 0
+
+    big_signal = zm._detect_alternation_break_signal([1, 0, 1, 0, 1, 0])
+    assert big_signal["active"] is True
+    assert big_signal["near_to_far_seq"] == "101010"
+    assert big_signal["prediction"] == 1
+
+    broken_signal = zm._detect_alternation_break_signal([0, 1, 1, 0, 1, 0])
+    assert broken_signal["active"] is False
 
 
 def test_analyze_rhythm_context_prefers_pair_for_pair_formation_sequence():
