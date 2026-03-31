@@ -36,13 +36,16 @@ nav:
       - 通知渠道: config-notification-channels.md
       - AI 与模型: config-ai.md
       - betting 时序配置: config-betting.md
+      - 预设与状态文件: config-presets-and-state.md
   - 命令参考: commands.md
   - 运行机制:
+      - 账号生命周期: ops-account-lifecycle.md
       - 投注与结算流程: runtime-betting-flow.md
       - 模型兜底与恢复: runtime-model-fallback.md
       - 统计口径说明: runtime-stats.md
+      - 通知与消息说明: runtime-notification-messages.md
   - 运维排障:
       - 更新与发布: ops-update-and-release.md
       - 常见故障排查: ops-troubleshooting.md
+      - 常见问题: faq.md
   - 更新日志: CHANGELOG.md
-  - 发布规范: RELEASE_POLICY.md
