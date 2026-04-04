@@ -938,6 +938,18 @@ def _build_strategy_watch_line(rt: Dict[str, Any]) -> str:
     return ""
 
 
+def _build_lose_warning_lines(rt: Dict[str, Any]) -> List[str]:
+    lose_count = int(rt.get("lose_count", 0) or 0)
+    warning_lose_count = int(rt.get("warning_lose_count", 3) or 3)
+    if warning_lose_count <= 0 or lose_count < warning_lose_count:
+        return []
+    return [
+        "⚠️ 连输预警：🟡 已触发",
+        f"当前连输：{lose_count} 次",
+        f"告警阈值：{warning_lose_count} 次",
+    ]
+
+
 def _get_model_probe_ids(user_ctx: UserContext) -> List[str]:
     model_mgr = user_ctx.get_model_manager()
     ids: List[str] = []
@@ -1407,6 +1419,15 @@ def _resolve_status_html_type(rt: Dict[str, Any]) -> tuple[str, int]:
 
 def _get_current_predict_display(rt: Dict[str, Any]) -> str:
     raw_info = str(rt.get("last_predict_info", "") or "").strip()
+    conclusion_match = re.search(r"押注结论：([^\n]+)", raw_info)
+    if conclusion_match:
+        conclusion = conclusion_match.group(1).strip()
+        if "观望" in conclusion:
+            return "观望"
+        if "押大" in conclusion:
+            return "大"
+        if "押小" in conclusion:
+            return "小"
     if any(word in raw_info for word in ("观望", "跳过", "SKIP", "skip")):
         return "观望"
 
@@ -1499,6 +1520,7 @@ def _build_status_html_data(user_ctx: UserContext) -> Dict[str, Any]:
         "account_balance_text": _format_account_balance_text(rt),
         "gambling_fund_text": _format_wan_value(rt.get("gambling_fund", 0)),
         "model_health_lines": _build_model_health_lines(rt),
+        "lose_warning_lines": _build_lose_warning_lines(rt),
         "strategy_watch_line": _build_strategy_watch_line(rt),
         "release_notice": _get_pending_release_notice(rt),
     }
@@ -1544,6 +1566,7 @@ def generate_status_html(data: Dict[str, Any]) -> str:
     stop = escape_html(str(data.get("stop", 0) or 0))
     lose_stop = escape_html(str(data.get("lose_stop", 0) or 0))
     model_health_lines = [escape_html(str(line)) for line in data.get("model_health_lines", []) if str(line).strip()]
+    lose_warning_lines = [escape_html(str(line)) for line in data.get("lose_warning_lines", []) if str(line).strip()]
     strategy_watch_line = escape_html(str(data.get("strategy_watch_line", "") or "").strip())
     release_notice = escape_html(str(data.get("release_notice", "") or "").strip())
 
@@ -1557,6 +1580,8 @@ def generate_status_html(data: Dict[str, Any]) -> str:
         model_health_block = "\n".join(model_health_lines) + "\n\n"
     if release_notice:
         model_health_block = f"{release_notice}\n\n" + model_health_block
+    if lose_warning_lines:
+        model_health_block += "\n".join(lose_warning_lines) + "\n\n"
     if strategy_watch_line:
         model_health_block += f"{strategy_watch_line}\n\n"
 
@@ -2851,7 +2876,13 @@ def _apply_alternation_break_override(
     rt["last_predict_tag"] = "ALTERNATION_BREAK"
     rt["last_predict_confidence"] = 100
     rt["last_predict_reason"] = f"{window}位纯交替，按结束交替规则押同向"
-    rt["last_predict_info"] = f"{window}位纯交替，按结束交替规则押同向（{side_text}）"
+    rt["last_predict_info"] = _build_predict_basis_text(
+        history=history,
+        prediction=forced_prediction,
+        source="alternation_break",
+        pattern_tag="ALTERNATION_BREAK",
+        rhythm_tag="ALTERNATION_RHYTHM",
+    )
     return forced_prediction
 
 
@@ -2874,6 +2905,111 @@ def fallback_prediction(history):
               user_id=0, data=f'big={big_count}, small={small_count}, fallback={prediction}')
     
     return prediction
+
+
+_PREDICT_PATTERN_LABELS = {
+    "ALTERNATION_RHYTHM": "交替偏强",
+    "PAIR_FORMATION": "配对偏强",
+    "DRAGON_TREND": "长龙偏强",
+    "LONG_DRAGON": "长龙明显",
+    "DRAGON_CANDIDATE": "连势抬头",
+    "DOUBLE_STREAK": "二连信号",
+    "SINGLE_JUMP": "交替偏强",
+    "SYMMETRIC_WRAP": "盘面偏乱",
+    "CHAOS_SWITCH": "盘面偏乱",
+    "CHAOS_NOISE": "盘面偏乱",
+    "ALTERNATION_BREAK": "6位纯交替",
+    "TIMEOUT_FALLBACK": "信号不足",
+    "INVALID_FALLBACK": "信号不足",
+    "FALLBACK": "信号不足",
+    "UNLOCK": "信号不足",
+}
+
+
+def _format_predict_near_window_text(history: list, window: int = 40) -> str:
+    if not isinstance(history, list) or not history:
+        return "样本不足"
+    actual = min(max(1, int(window)), len(history))
+    recent = [int(x) for x in history[-actual:]]
+    big_count = sum(recent)
+    small_count = actual - big_count
+    diff = abs(big_count - small_count)
+    if diff <= 1:
+        return "大小基本均衡"
+    if small_count > big_count:
+        return f"小比大多 {diff} 次"
+    return f"大比小多 {diff} 次"
+
+
+def _format_predict_far_window_text(history: list, window: int = 100) -> str:
+    if not isinstance(history, list) or not history:
+        return "样本不足"
+    actual = min(max(1, int(window)), len(history))
+    recent = [int(x) for x in history[-actual:]]
+    ratio = (sum(recent) / actual) if actual > 0 else 0.5
+    if _is_neutral_long_term_gap(ratio):
+        return "接近均衡"
+    return "偏大" if ratio > NEUTRAL_LONG_TERM_GAP_HIGH else "偏小"
+
+
+def _resolve_predict_pattern_text(
+    *,
+    source: str,
+    pattern_tag: str,
+    rhythm_tag: str,
+) -> str:
+    source_text = str(source or "").strip().lower()
+    if source_text == "alternation_break":
+        return "6位纯交替"
+    if source_text in {"timeout_fallback", "invalid_fallback", "hard_fallback", "fallback", "fallback_skip", "unlock_fallback"}:
+        return "信号不足"
+
+    rhythm_key = str(rhythm_tag or "").strip().upper()
+    if rhythm_key in _PREDICT_PATTERN_LABELS and rhythm_key not in {"CHAOS_NOISE"}:
+        return _PREDICT_PATTERN_LABELS[rhythm_key]
+
+    pattern_key = str(pattern_tag or "").strip().upper()
+    return _PREDICT_PATTERN_LABELS.get(pattern_key, "盘面偏乱")
+
+
+def _resolve_predict_conclusion_text(*, source: str, prediction: int) -> str:
+    source_text = str(source or "").strip().lower()
+    if source_text == "alternation_break":
+        return f"按结束交替规则押{'大' if int(prediction) == 1 else '小'}"
+    if source_text == "unlock_fallback":
+        return f"保守解锁押{'大' if int(prediction) == 1 else '小'}"
+    if source_text in {"timeout_fallback", "invalid_fallback", "hard_fallback", "fallback", "fallback_skip"}:
+        if int(prediction) == -1:
+            return "统计兜底后观望"
+        return f"统计兜底押{'大' if int(prediction) == 1 else '小'}"
+    if int(prediction) == -1:
+        return "本局观望"
+    return f"本局押{'大' if int(prediction) == 1 else '小'}"
+
+
+def _build_predict_basis_text(
+    *,
+    history: list,
+    prediction: int,
+    source: str,
+    pattern_tag: str = "",
+    rhythm_tag: str = "",
+) -> str:
+    pattern_text = _resolve_predict_pattern_text(
+        source=source,
+        pattern_tag=pattern_tag,
+        rhythm_tag=rhythm_tag,
+    )
+    near_text = _format_predict_near_window_text(history, 40)
+    far_text = _format_predict_far_window_text(history, 100)
+    conclusion_text = _resolve_predict_conclusion_text(source=source, prediction=prediction)
+    return (
+        "🤖 预测依据：\n"
+        f"├ 盘口规律：{pattern_text}\n"
+        f"├ 近 40 局：{near_text}\n"
+        f"├ 远 100局：{far_text}\n"
+        f"└ 押注结论：{conclusion_text}"
+    )
 
 
 _PATTERN_LABELS = {
@@ -3316,9 +3452,6 @@ Return JSON only:
         )
 
         # 构建预测信息
-        rt["last_predict_info"] = (
-            f"{user_reason} | 信:{confidence}% | 缺口:{gap:+d} | 统计倾向:{'大' if trend_gap['regression_target'] == 1 else '小'}"
-        )
         rt["last_predict_tag"] = pattern_tag
         rt["last_predict_confidence"] = int(confidence)
         if prediction == -1:
@@ -3330,6 +3463,13 @@ Return JSON only:
         rt["last_predict_long_term_gap"] = float(long_term_gap)
         rt["last_predict_tail_len"] = int(tail_streak_len)
         rt["last_predict_tail_char"] = int(tail_streak_char)
+        rt["last_predict_info"] = _build_predict_basis_text(
+            history=history,
+            prediction=int(prediction),
+            source=str(rt.get("last_predict_source", "") or ""),
+            pattern_tag=pattern_tag,
+            rhythm_tag=str(rhythm_context.get("rhythm_tag", "") or ""),
+        )
         
         # 审计日志
         audit_log = {
@@ -3361,11 +3501,17 @@ Return JSON only:
         recent_sum = sum(recent_20)
         fallback = 0 if recent_sum >= len(recent_20) / 2 else 1
         
-        rt["last_predict_info"] = f"模型最终兜底 | 强制预测:{fallback}"
         rt["last_predict_tag"] = "FALLBACK"
         rt["last_predict_confidence"] = 0
         rt["last_predict_source"] = "hard_fallback"
         rt["last_predict_reason"] = "模型异常最终兜底"
+        rt["last_predict_info"] = _build_predict_basis_text(
+            history=history,
+            prediction=int(fallback),
+            source="hard_fallback",
+            pattern_tag="FALLBACK",
+            rhythm_tag="CHAOS_NOISE",
+        )
         state.predictions.append(fallback)
         return fallback
 
@@ -3747,10 +3893,17 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
     except asyncio.TimeoutError:
         predict_ms = int((time.monotonic() - predict_started_at) * 1000)
         prediction = int(fallback_prediction(state.history))
-        rt["last_predict_info"] = f"预测超时，改用统计兜底（{'大' if prediction == 1 else '小'}）"
         rt["last_predict_source"] = "timeout_fallback"
         rt["last_predict_tag"] = "TIMEOUT_FALLBACK"
         rt["last_predict_confidence"] = 0
+        rt["last_predict_reason"] = "模型预测超时"
+        rt["last_predict_info"] = _build_predict_basis_text(
+            history=state.history,
+            prediction=int(prediction),
+            source="timeout_fallback",
+            pattern_tag="TIMEOUT_FALLBACK",
+            rhythm_tag="CHAOS_NOISE",
+        )
         _queue_model_notice(
             rt,
             "failure",
@@ -3761,10 +3914,17 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     if prediction not in (-1, 0, 1):
         prediction = int(fallback_prediction(state.history))
-        rt["last_predict_info"] = f"预测无效，改用统计兜底（{'大' if prediction == 1 else '小'}）"
         rt["last_predict_source"] = "invalid_fallback"
         rt["last_predict_tag"] = "INVALID_FALLBACK"
         rt["last_predict_confidence"] = 0
+        rt["last_predict_reason"] = "模型返回无效结果"
+        rt["last_predict_info"] = _build_predict_basis_text(
+            history=state.history,
+            prediction=int(prediction),
+            source="invalid_fallback",
+            pattern_tag="INVALID_FALLBACK",
+            rhythm_tag="CHAOS_NOISE",
+        )
         _queue_model_notice(
             rt,
             "failure",
@@ -4552,12 +4712,12 @@ def _prepare_force_unlock_prediction(state, rt: dict, next_sequence: int, trigge
     rt["last_predict_tag"] = "UNLOCK"
     rt["last_predict_confidence"] = 0
     rt["last_predict_reason"] = "低手位连续观望，保守解锁"
-    rt["last_predict_info"] = (
-        "低手位保守解锁 | "
-        f"第{next_sequence}手连续观望 "
-        f"(总:{trigger.get('no_bet_streak', 0)}, "
-        f"skip:{trigger.get('skip_streak', 0)}) "
-        f"| 兜底方向:{'大' if prediction == 1 else '小'}"
+    rt["last_predict_info"] = _build_predict_basis_text(
+        history=state.history,
+        prediction=int(prediction),
+        source="unlock_fallback",
+        pattern_tag="UNLOCK",
+        rhythm_tag="CHAOS_NOISE",
     )
     rt["stall_guard_force_unlock_total"] = int(rt.get("stall_guard_force_unlock_total", 0)) + 1
     rt["stall_guard_force_unlock_used"] = True

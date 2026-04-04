@@ -151,6 +151,21 @@ def test_format_dashboard_matches_status_html_layout(tmp_path):
     assert "<code>" not in text
 
 
+def test_get_current_predict_display_prefers_conclusion_line():
+    rt = {
+        "last_predict_info": (
+            "🤖 预测依据：\n"
+            "├ 盘口规律：交替偏强\n"
+            "├ 近 40 局：小比大多 4 次\n"
+            "├ 远 100局：接近均衡\n"
+            "└ 押注结论：本局押小"
+        ),
+        "bet_type": 1,
+    }
+
+    assert zm._get_current_predict_display(rt) == "小"
+
+
 def test_format_dashboard_shows_strategy_watch_line_when_skip_streak_active(tmp_path):
     user_dir = tmp_path / "users" / "status_watch_user"
     _write_json(
@@ -173,6 +188,51 @@ def test_format_dashboard_shows_strategy_watch_line_when_skip_streak_active(tmp_
     text = zm.format_dashboard(ctx)
 
     assert "策略观望：当前手位连续观望 2 次" in text
+
+
+def test_format_dashboard_shows_lose_warning_lines_only_after_threshold(tmp_path):
+    user_dir = tmp_path / "users" / "status_lose_warn_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态连输用户"},
+            "telegram": {"user_id": 6014},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_on"] = True
+    rt["warning_lose_count"] = 5
+    rt["lose_count"] = 5
+
+    text = zm.format_dashboard(ctx)
+
+    assert "⚠️ 连输预警：🟡 已触发" in text
+    assert "当前连输：5 次" in text
+    assert "告警阈值：5 次" in text
+
+
+def test_format_dashboard_hides_lose_warning_lines_before_threshold(tmp_path):
+    user_dir = tmp_path / "users" / "status_no_lose_warn_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态未触发用户"},
+            "telegram": {"user_id": 6015},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_on"] = True
+    rt["warning_lose_count"] = 5
+    rt["lose_count"] = 4
+
+    text = zm.format_dashboard(ctx)
+
+    assert "⚠️ 连输预警：🟡 已触发" not in text
+    assert "当前连输：4 次" not in text
 
 
 def test_format_dashboard_shows_pending_release_notice(tmp_path):
@@ -1169,7 +1229,8 @@ def test_process_bet_on_overrides_model_with_alternation_break_same_side(tmp_pat
     assert rt["bet"] is True
     assert rt["bet_type"] == 0
     assert rt["last_predict_source"] == "alternation_break"
-    assert "6位纯交替，按结束交替规则押同向（小）" in rt["last_predict_info"]
+    assert "├ 盘口规律：6位纯交替" in rt["last_predict_info"]
+    assert "└ 押注结论：按结束交替规则押小" in rt["last_predict_info"]
     assert any("押注方向：小" in message for message in sent_messages)
 
 
@@ -1239,7 +1300,8 @@ def test_process_bet_on_alternation_break_can_override_skip(tmp_path, monkeypatc
     assert rt["bet"] is True
     assert rt["bet_type"] == 1
     assert rt["last_predict_source"] == "alternation_break"
-    assert "6位纯交替，按结束交替规则押同向（大）" in rt["last_predict_info"]
+    assert "├ 盘口规律：6位纯交替" in rt["last_predict_info"]
+    assert "└ 押注结论：按结束交替规则押大" in rt["last_predict_info"]
     assert any("押注方向：大" in message for message in sent_messages)
 
 
@@ -4252,6 +4314,36 @@ def test_detect_alternation_break_signal_uses_near_to_far_six_window():
 
     broken_signal = zm._detect_alternation_break_signal([0, 1, 1, 0, 1, 0])
     assert broken_signal["active"] is False
+
+
+def test_build_predict_basis_text_uses_structured_multiline_copy():
+    text = zm._build_predict_basis_text(
+        history=[0, 1] * 20,
+        prediction=0,
+        source="model",
+        pattern_tag="SINGLE_JUMP",
+        rhythm_tag="ALTERNATION_RHYTHM",
+    )
+
+    assert text.startswith("🤖 预测依据：\n")
+    assert "├ 盘口规律：交替偏强" in text
+    assert "├ 近 40 局：" in text
+    assert "├ 远 100局：" in text
+    assert "└ 押注结论：本局押小" in text
+
+
+def test_build_predict_basis_text_hides_raw_parse_exception_for_fallback():
+    text = zm._build_predict_basis_text(
+        history=[0, 0, 1, 0, 0, 1, 0, 0],
+        prediction=0,
+        source="invalid_fallback",
+        pattern_tag="INVALID_FALLBACK",
+        rhythm_tag="CHAOS_NOISE",
+    )
+
+    assert "expecting value" not in text.lower()
+    assert "解析兜底" not in text
+    assert "└ 押注结论：统计兜底押小" in text
 
 
 def test_analyze_rhythm_context_prefers_pair_for_pair_formation_sequence():
