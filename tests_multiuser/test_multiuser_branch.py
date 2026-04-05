@@ -155,12 +155,12 @@ def test_get_current_predict_display_prefers_conclusion_line():
     rt = {
         "last_predict_info": (
             "🤖 决策依据\n"
-            "├ 📊 长线 (100局)： 长期分布接近均衡\n"
-            "├ 🌊 中期 (40局)： 数量分布偏小（小比大多 4 次）\n"
-            "├ ⚡ 短期 (20局)： 高频震荡状态，交替几率攀升\n"
-            "├ 🧬 微观 (规律)： 5 位单跳 [0 1 0 1 0]，动能反复拉锯\n"
-            "├ 🤖 大模型推演： 交替延续概率占优，等待节奏兑现\n"
-            "└ 🎯 押注结论： 多周期指标共振，本局坚决押【小】"
+            "├ 📊 100局： 长期分布接近均衡\n"
+            "├ 🌊 40局： 数量偏小（小比大多 4 次）\n"
+            "├ ⚡ 20局： 短线来回切换，交替还在延续\n"
+            "├ 🧬 5局： 5位单跳 [0 1 0 1 0]，还在来回跳\n"
+            "├ 🤖 大模型： 交替结构更强，先顺着节奏看\n"
+            "└ 🎯 押注结论： 本局坚决押【小】"
         ),
         "bet_type": 1,
     }
@@ -1231,9 +1231,9 @@ def test_process_bet_on_overrides_model_with_alternation_break_same_side(tmp_pat
     assert rt["bet"] is True
     assert rt["bet_type"] == 0
     assert rt["last_predict_source"] == "alternation_break"
-    assert "├ 🧬 微观 (规律)：" in rt["last_predict_info"]
-    assert "├ 🤖 大模型推演： 触及极值形态，触发量化熔断打断交替" in rt["last_predict_info"]
-    assert "└ 🎯 押注结论： 多周期指标共振，本局坚决押【小】" in rt["last_predict_info"]
+    assert "├ 🧬 5局：" in rt["last_predict_info"]
+    assert "├ 🤖 大模型： 交替拉满了，直接按打断规则走" in rt["last_predict_info"]
+    assert "└ 🎯 押注结论： 本局坚决押【小】" in rt["last_predict_info"]
     assert any("押注方向：小" in message for message in sent_messages)
 
 
@@ -1303,9 +1303,9 @@ def test_process_bet_on_alternation_break_can_override_skip(tmp_path, monkeypatc
     assert rt["bet"] is True
     assert rt["bet_type"] == 1
     assert rt["last_predict_source"] == "alternation_break"
-    assert "├ 🧬 微观 (规律)：" in rt["last_predict_info"]
-    assert "├ 🤖 大模型推演： 触及极值形态，触发量化熔断打断交替" in rt["last_predict_info"]
-    assert "└ 🎯 押注结论： 多周期指标共振，本局坚决押【大】" in rt["last_predict_info"]
+    assert "├ 🧬 5局：" in rt["last_predict_info"]
+    assert "├ 🤖 大模型： 交替拉满了，直接按打断规则走" in rt["last_predict_info"]
+    assert "└ 🎯 押注结论： 本局坚决押【大】" in rt["last_predict_info"]
     assert any("押注方向：大" in message for message in sent_messages)
 
 
@@ -4332,12 +4332,12 @@ def test_build_predict_basis_text_uses_structured_multiline_copy():
     )
 
     assert text.startswith("🤖 决策依据\n")
-    assert "├ 📊 长线 (100局)：" in text
-    assert "├ 🌊 中期 (40局)：" in text
-    assert "├ ⚡ 短期 (20局)：" in text
-    assert "├ 🧬 微观 (规律)：" in text
-    assert "├ 🤖 大模型推演：" in text
-    assert "└ 🎯 押注结论： 多周期指标共振，本局坚决押【小】" in text
+    assert "├ 📊 100局：" in text
+    assert "├ 🌊 40局：" in text
+    assert "├ ⚡ 20局：" in text
+    assert "├ 🧬 5局：" in text
+    assert "├ 🤖 大模型：" in text
+    assert "└ 🎯 押注结论： 本局坚决押【小】" in text
 
 
 def test_build_predict_basis_text_hides_raw_parse_exception_for_fallback():
@@ -4353,19 +4353,19 @@ def test_build_predict_basis_text_hides_raw_parse_exception_for_fallback():
 
     assert "expecting value" not in text.lower()
     assert "解析兜底" not in text
-    assert "├ 🤖 大模型推演： 多空混沌，依系统兜底权重输出" in text
-    assert "└ 🎯 押注结论： 多周期指标共振，本局坚决押【小】" in text
+    assert "├ 🤖 大模型： 模型这局没给稳定答案，先走系统兜底" in text
+    assert "└ 🎯 押注结论： 本局坚决押【小】" in text
 
 
 def test_build_ops_card_renders_multiline_block_without_duplicate_label():
     block = (
         "🤖 决策依据\n"
-        "├ 📊 长线 (100局)： 长期分布接近均衡\n"
-        "├ 🌊 中期 (40局)： 数量分布偏小（小比大多 4 次）\n"
-        "├ ⚡ 短期 (20局)： 高频震荡状态，交替几率攀升\n"
-        "├ 🧬 微观 (规律)： 5 位单跳 [0 1 0 1 0]，动能反复拉锯\n"
-        "├ 🤖 大模型推演： 交替延续概率占优，等待节奏兑现\n"
-        "└ 🎯 押注结论： 多周期指标共振，本局坚决押【小】"
+        "├ 📊 100局： 长期分布接近均衡\n"
+        "├ 🌊 40局： 数量偏小（小比大多 4 次）\n"
+        "├ ⚡ 20局： 短线来回切换，交替还在延续\n"
+        "├ 🧬 5局： 5位单跳 [0 1 0 1 0]，还在来回跳\n"
+        "├ 🤖 大模型： 交替结构更强，先顺着节奏看\n"
+        "└ 🎯 押注结论： 本局坚决押【小】"
     )
 
     card = zm._build_ops_card(
@@ -4380,7 +4380,7 @@ def test_build_ops_card_renders_multiline_block_without_duplicate_label():
     assert "⚡ 押注方向：小" in card
     assert "🤖 决策依据" in card
     assert "：🤖 决策依据" not in card
-    assert "└ 🎯 押注结论： 多周期指标共振，本局坚决押【小】" in card
+    assert "└ 🎯 押注结论： 本局坚决押【小】" in card
 
 
 def test_analyze_rhythm_context_prefers_pair_for_pair_formation_sequence():
