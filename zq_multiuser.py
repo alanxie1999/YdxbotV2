@@ -1787,7 +1787,23 @@ def _build_ops_card(
     for label, value in fields or []:
         if value in (None, ""):
             continue
-        lines.append(f"{label}：{value}")
+        label_text = str(label or "").strip()
+        value_text = str(value or "").rstrip()
+        if not value_text:
+            continue
+        if not label_text:
+            lines.extend(value_text.splitlines())
+            continue
+        if "\n" in value_text:
+            first_line = value_text.splitlines()[0].strip()
+            normalized_label = label_text.rstrip("：")
+            if first_line.startswith(f"{normalized_label}："):
+                lines.extend(value_text.splitlines())
+            else:
+                lines.append(f"{normalized_label}：")
+                lines.extend(value_text.splitlines())
+            continue
+        lines.append(f"{label_text}：{value_text}")
     if note:
         lines.extend(["", f"补充说明：{note}"])
     return "\n".join(lines).strip()
@@ -4079,7 +4095,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
                     fields=[
                         ("当前手位", f"{next_sequence} 手"),
                         ("连续观望", f"{int(skip_trigger.get('skip_streak', 0) or 0)} 次"),
-                        ("原因", rt.get("last_predict_info", "模型未给出可执行信号")),
+                        ("", rt.get("last_predict_info", "模型未给出可执行信号")),
                     ],
                 ),
                 ttl_seconds=120,
@@ -6188,7 +6204,7 @@ async def _process_settle_slim(client, event, user_ctx: UserContext, global_conf
                     ("💵 押注本金", _format_money_message(bet_amount)),
                     ("📉 输赢结果", f"{result_text} {result_amount}"),
                     ("🎲 开奖结果", result_type),
-                    ("🤖 预测依据", rt.get('last_predict_info', 'N/A')),
+                    ("", rt.get('last_predict_info', 'N/A')),
                 ],
                 action="如需继续观察，等待下一次盘口；如需复核当前状态，请执行 `status`。",
             )

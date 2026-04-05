@@ -4346,6 +4346,30 @@ def test_build_predict_basis_text_hides_raw_parse_exception_for_fallback():
     assert "└ 押注结论：统计兜底押小" in text
 
 
+def test_build_ops_card_renders_multiline_block_without_duplicate_label():
+    block = (
+        "🤖 预测依据：\n"
+        "├ 盘口规律：交替偏强\n"
+        "├ 近 40 局：小比大多 4 次\n"
+        "├ 远 100局：接近均衡\n"
+        "└ 押注结论：本局押小"
+    )
+
+    card = zm._build_ops_card(
+        "示例标题",
+        summary="示例摘要",
+        fields=[
+            ("⚡ 押注方向", "小"),
+            ("", block),
+        ],
+    )
+
+    assert "⚡ 押注方向：小" in card
+    assert "🤖 预测依据：" in card
+    assert "：🤖 预测依据：" not in card
+    assert "└ 押注结论：本局押小" in card
+
+
 def test_analyze_rhythm_context_prefers_pair_for_pair_formation_sequence():
     history = [1, 0, 1, 1, 0, 1, 1, 0, 1]
 
