@@ -156,8 +156,11 @@ def test_get_current_predict_display_prefers_conclusion_line():
         "last_predict_info": (
             "🤖 预测依据：\n"
             "├ 盘口规律：交替偏强\n"
+            "├ 近 20 局：来回切换明显\n"
             "├ 近 40 局：小比大多 4 次\n"
             "├ 远 100局：接近均衡\n"
+            "├ 尾部形态：单跳延续中\n"
+            "├ 模型判断：当前更像继续走交替\n"
             "└ 押注结论：本局押小"
         ),
         "bet_type": 1,
@@ -1230,6 +1233,9 @@ def test_process_bet_on_overrides_model_with_alternation_break_same_side(tmp_pat
     assert rt["bet_type"] == 0
     assert rt["last_predict_source"] == "alternation_break"
     assert "├ 盘口规律：6位纯交替" in rt["last_predict_info"]
+    assert "├ 近 20 局：交替延续明显" in rt["last_predict_info"]
+    assert "├ 尾部形态：纯交替未结束" in rt["last_predict_info"]
+    assert "├ 模型判断：当前进入结束交替规则" in rt["last_predict_info"]
     assert "└ 押注结论：按结束交替规则押小" in rt["last_predict_info"]
     assert any("押注方向：小" in message for message in sent_messages)
 
@@ -1301,6 +1307,9 @@ def test_process_bet_on_alternation_break_can_override_skip(tmp_path, monkeypatc
     assert rt["bet_type"] == 1
     assert rt["last_predict_source"] == "alternation_break"
     assert "├ 盘口规律：6位纯交替" in rt["last_predict_info"]
+    assert "├ 近 20 局：交替延续明显" in rt["last_predict_info"]
+    assert "├ 尾部形态：纯交替未结束" in rt["last_predict_info"]
+    assert "├ 模型判断：当前进入结束交替规则" in rt["last_predict_info"]
     assert "└ 押注结论：按结束交替规则押大" in rt["last_predict_info"]
     assert any("押注方向：大" in message for message in sent_messages)
 
@@ -4327,7 +4336,10 @@ def test_build_predict_basis_text_uses_structured_multiline_copy():
 
     assert text.startswith("🤖 预测依据：\n")
     assert "├ 盘口规律：交替偏强" in text
+    assert "├ 近 20 局：" in text
     assert "├ 近 40 局：" in text
+    assert "├ 尾部形态：" in text
+    assert "├ 模型判断：" in text
     assert "├ 远 100局：" in text
     assert "└ 押注结论：本局押小" in text
 
@@ -4343,6 +4355,7 @@ def test_build_predict_basis_text_hides_raw_parse_exception_for_fallback():
 
     assert "expecting value" not in text.lower()
     assert "解析兜底" not in text
+    assert "├ 模型判断：本局未拿到稳定模型结果" in text
     assert "└ 押注结论：统计兜底押小" in text
 
 
@@ -4350,8 +4363,11 @@ def test_build_ops_card_renders_multiline_block_without_duplicate_label():
     block = (
         "🤖 预测依据：\n"
         "├ 盘口规律：交替偏强\n"
+        "├ 近 20 局：来回切换明显\n"
         "├ 近 40 局：小比大多 4 次\n"
         "├ 远 100局：接近均衡\n"
+        "├ 尾部形态：单跳延续中\n"
+        "├ 模型判断：当前更像继续走交替\n"
         "└ 押注结论：本局押小"
     )
 
@@ -4425,6 +4441,7 @@ def test_predict_next_bet_core_prompt_contains_rhythm_layer(tmp_path, monkeypatc
     assert "pair_score" in captured["prompt"]
     assert "pair_would_form_double" in captured["prompt"]
     assert "PAIR_FORMATION" in captured["prompt"]
+    assert "near_term_40:" in captured["prompt"]
 
 
 def test_format_dashboard_prioritizes_runtime_over_detail_sections(tmp_path):
