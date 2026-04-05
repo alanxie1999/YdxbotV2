@@ -1424,9 +1424,9 @@ def _get_current_predict_display(rt: Dict[str, Any]) -> str:
         conclusion = conclusion_match.group(1).strip()
         if "观望" in conclusion:
             return "观望"
-        if "押大" in conclusion:
+        if "押【大】" in conclusion or "押大" in conclusion:
             return "大"
-        if "押小" in conclusion:
+        if "押【小】" in conclusion or "押小" in conclusion:
             return "小"
     if any(word in raw_info for word in ("观望", "跳过", "SKIP", "skip")):
         return "观望"
@@ -2898,9 +2898,8 @@ def _apply_alternation_break_override(
         source="alternation_break",
         pattern_tag="ALTERNATION_BREAK",
         rhythm_tag="ALTERNATION_RHYTHM",
-        short_text="交替延续明显",
-        model_text="当前进入结束交替规则",
-        tail_text="纯交替未结束",
+        tail_streak_len=window,
+        tail_streak_char=forced_prediction,
     )
     return forced_prediction
 
@@ -2945,6 +2944,14 @@ _PREDICT_PATTERN_LABELS = {
 }
 
 
+def _format_predict_sequence_block(history: list, window: int = 5) -> str:
+    if not isinstance(history, list) or not history:
+        return "[]"
+    actual = min(max(3, int(window)), len(history))
+    seq = [str(int(x)) for x in history[-actual:]]
+    return "[" + " ".join(seq) + "]"
+
+
 def _format_predict_window_text_from_counts(big_count: int, small_count: int) -> str:
     try:
         big_count = int(big_count)
@@ -2964,23 +2971,32 @@ def _format_predict_window_text_from_counts(big_count: int, small_count: int) ->
 
 def _format_predict_near_window_text(history: list, window: int = 40) -> str:
     if not isinstance(history, list) or not history:
-        return "样本不足"
+        return "中期样本不足，暂无法形成有效背景"
     actual = min(max(1, int(window)), len(history))
     recent = [int(x) for x in history[-actual:]]
     big_count = sum(recent)
     small_count = actual - big_count
-    return _format_predict_window_text_from_counts(big_count, small_count)
+    diff = abs(big_count - small_count)
+    if diff <= 1:
+        return "数量分布接近均衡，仅作中期背景"
+    if big_count > small_count:
+        return f"数量分布偏大（大比小多 {diff} 次）"
+    return f"数量分布偏小（小比大多 {diff} 次）"
 
 
 def _format_predict_far_window_text(history: list, window: int = 100) -> str:
     if not isinstance(history, list) or not history:
-        return "样本不足"
+        return "长线样本不足，长期背景尚不稳定"
     actual = min(max(1, int(window)), len(history))
     recent = [int(x) for x in history[-actual:]]
-    ratio = (sum(recent) / actual) if actual > 0 else 0.5
-    if _is_neutral_long_term_gap(ratio):
-        return "接近均衡"
-    return "偏大" if ratio > NEUTRAL_LONG_TERM_GAP_HIGH else "偏小"
+    big_count = sum(recent)
+    small_count = actual - big_count
+    diff = big_count - small_count
+    if diff > 5:
+        return "长期分布偏大，长线重心略向上"
+    if diff < -5:
+        return "长期分布偏小，长线重心略向下"
+    return "长期分布接近均衡"
 
 
 def _format_predict_short_window_text(
@@ -2990,27 +3006,24 @@ def _format_predict_short_window_text(
     rhythm_tag: str = "",
 ) -> str:
     if not isinstance(history, list) or not history:
-        return "样本不足"
+        return "短线样本不足，暂不具备稳定节奏"
 
     rhythm_key = str(rhythm_tag or "").strip().upper()
     pattern_key = str(pattern_tag or "").strip().upper()
-    if rhythm_key == "ALTERNATION_RHYTHM" or pattern_key == "SINGLE_JUMP":
-        return "来回切换明显"
-    if rhythm_key == "PAIR_FORMATION":
-        return "更像补成二连"
     if rhythm_key == "DRAGON_TREND" or pattern_key in {"LONG_DRAGON", "DRAGON_CANDIDATE"}:
-        return "顺势延续明显"
-    if pattern_key == "DOUBLE_STREAK":
-        return "二连刚形成"
+        return "顺势延伸率极高，未见反转信号"
+    if rhythm_key == "ALTERNATION_RHYTHM" or pattern_key in {"SINGLE_JUMP", "ALTERNATION_BREAK"}:
+        return "高频震荡状态，交替几率攀升"
+    if rhythm_key == "PAIR_FORMATION" or pattern_key == "DOUBLE_STREAK":
+        return "呈现 2-2 配对节奏，箱体震荡"
 
     actual = min(20, len(history))
     recent = [int(x) for x in history[-actual:]]
     big_count = sum(recent)
     small_count = actual - big_count
-    diff = abs(big_count - small_count)
-    if diff <= 2:
-        return "切换频繁"
-    return "短线偏大" if big_count > small_count else "短线偏小"
+    if abs(big_count - small_count) <= 2:
+        return "短线方向反复切换，优势尚未稳定"
+    return "短线单边力量抬升，但延续性仍需确认"
 
 
 def _format_predict_tail_shape_text(
@@ -3019,42 +3032,54 @@ def _format_predict_tail_shape_text(
     tail_streak_len: int = 0,
     tail_streak_char: Any = None,
     rhythm_tag: str = "",
+    history: Optional[list] = None,
 ) -> str:
     side_text = "大" if str(tail_streak_char) == "1" or tail_streak_char == 1 else "小"
+    seq_block = _format_predict_sequence_block(history or [], 5)
     pattern_key = str(pattern_tag or "").strip().upper()
     rhythm_key = str(rhythm_tag or "").strip().upper()
 
     if pattern_key in {"LONG_DRAGON", "DRAGON_CANDIDATE"} and int(tail_streak_len or 0) > 0:
-        return f"{int(tail_streak_len)}连{side_text}"
-    if pattern_key == "DOUBLE_STREAK":
-        return f"刚形成2连{side_text}"
-    if rhythm_key == "ALTERNATION_RHYTHM" or pattern_key == "SINGLE_JUMP":
-        return "单跳延续中"
-    if rhythm_key == "PAIR_FORMATION":
-        return "单双后偏向成对"
-    return "没有明显连势"
+        return f"{int(tail_streak_len)} 级阶梯 {seq_block}，龙身稳固"
+    if rhythm_key == "ALTERNATION_RHYTHM" or pattern_key in {"SINGLE_JUMP", "ALTERNATION_BREAK"}:
+        actual = min(max(3, 5), len(history or []))
+        return f"{actual} 位单跳 {seq_block}，动能反复拉锯"
+    if rhythm_key == "PAIR_FORMATION" or pattern_key == "DOUBLE_STREAK":
+        return f"{seq_block} 镜像对称结构"
+    return f"{seq_block} 形态破碎，暂未收敛"
 
 
 def _resolve_predict_model_judgment_text(
     *,
     source: str,
+    pattern_tag: str = "",
+    rhythm_tag: str = "",
     raw_reason: str = "",
     prediction: int,
 ) -> str:
     source_text = str(source or "").strip().lower()
     if source_text == "alternation_break":
-        return "当前进入结束交替规则"
+        return "触及极值形态，触发量化熔断打断交替"
     if source_text == "unlock_fallback":
-        return "连续观望后保守解锁"
+        return "多空混沌，依系统兜底权重输出"
     if source_text in {"timeout_fallback", "invalid_fallback", "hard_fallback", "fallback", "fallback_skip"}:
-        return "本局未拿到稳定模型结果"
+        return "多空混沌，依系统兜底权重输出"
+
+    rhythm_key = str(rhythm_tag or "").strip().upper()
+    pattern_key = str(pattern_tag or "").strip().upper()
+    if rhythm_key == "DRAGON_TREND" or pattern_key in {"LONG_DRAGON", "DRAGON_CANDIDATE"}:
+        return "锁定标准 [Long Dragon]，顺势阻力最小"
+    if rhythm_key == "PAIR_FORMATION" or pattern_key == "DOUBLE_STREAK":
+        return "识别 [Double Streak]，寻找逻辑单跳点"
+    if rhythm_key == "ALTERNATION_RHYTHM" or pattern_key == "SINGLE_JUMP":
+        return "交替结构占优，延续阻力相对更小"
+    if int(prediction) == -1:
+        return "多空混沌，依系统兜底权重输出"
 
     normalized = str(raw_reason or "").strip()
     if normalized:
         return normalized
-    if int(prediction) == -1:
-        return "当前证据冲突"
-    return "当前一侧更有优势"
+    return "多空混沌，依系统兜底权重输出"
 
 
 def _resolve_predict_pattern_text(
@@ -3078,18 +3103,11 @@ def _resolve_predict_pattern_text(
 
 
 def _resolve_predict_conclusion_text(*, source: str, prediction: int) -> str:
-    source_text = str(source or "").strip().lower()
-    if source_text == "alternation_break":
-        return f"按结束交替规则押{'大' if int(prediction) == 1 else '小'}"
-    if source_text == "unlock_fallback":
-        return f"保守解锁押{'大' if int(prediction) == 1 else '小'}"
-    if source_text in {"timeout_fallback", "invalid_fallback", "hard_fallback", "fallback", "fallback_skip"}:
-        if int(prediction) == -1:
-            return "统计兜底后观望"
-        return f"统计兜底押{'大' if int(prediction) == 1 else '小'}"
     if int(prediction) == -1:
-        return "本局观望"
-    return f"本局押{'大' if int(prediction) == 1 else '小'}"
+        return "风控保护机制启动，建议【观望】"
+    if int(prediction) == 1:
+        return "多周期指标共振，本局坚决押【大】"
+    return "多周期指标共振，本局坚决押【小】"
 
 
 def _build_predict_basis_text(
@@ -3105,6 +3123,9 @@ def _build_predict_basis_text(
     short_text: str = "",
     tail_text: str = "",
     model_text: str = "",
+    raw_reason: str = "",
+    tail_streak_len: int = 0,
+    tail_streak_char: Any = None,
 ) -> str:
     pattern_display = str(pattern_text or "").strip() or _resolve_predict_pattern_text(
         source=source,
@@ -3120,22 +3141,27 @@ def _build_predict_basis_text(
     far_display = str(far_text or "").strip() or _format_predict_far_window_text(history, 100)
     tail_display = str(tail_text or "").strip() or _format_predict_tail_shape_text(
         pattern_tag=pattern_tag,
+        tail_streak_len=tail_streak_len,
+        tail_streak_char=tail_streak_char,
         rhythm_tag=rhythm_tag,
+        history=history,
     )
     model_display = str(model_text or "").strip() or _resolve_predict_model_judgment_text(
         source=source,
+        pattern_tag=pattern_tag,
+        rhythm_tag=rhythm_tag,
+        raw_reason=raw_reason,
         prediction=prediction,
     )
     conclusion_text = _resolve_predict_conclusion_text(source=source, prediction=prediction)
     return (
-        "🤖 预测依据：\n"
-        f"├ 盘口规律：{pattern_display}\n"
-        f"├ 近 20 局：{short_display}\n"
-        f"├ 近 40 局：{near_display}\n"
-        f"├ 远 100局：{far_display}\n"
-        f"├ 尾部形态：{tail_display}\n"
-        f"├ 模型判断：{model_display}\n"
-        f"└ 押注结论：{conclusion_text}"
+        "🤖 决策依据\n"
+        f"├ 📊 长线 (100局)： {far_display}\n"
+        f"├ 🌊 中期 (40局)： {near_display}\n"
+        f"├ ⚡ 短期 (20局)： {short_display}\n"
+        f"├ 🧬 微观 (规律)： {tail_display}\n"
+        f"├ 🤖 大模型推演： {model_display}\n"
+        f"└ 🎯 押注结论： {conclusion_text}"
     )
 
 
@@ -3618,8 +3644,11 @@ Return JSON only:
                 rhythm_tag=str(rhythm_context.get("rhythm_tag", "") or ""),
                 tail_streak_len=tail_streak_len,
                 tail_streak_char=tail_streak_char,
+                history=history,
             ),
-            model_text=user_reason,
+            raw_reason=user_reason,
+            tail_streak_len=tail_streak_len,
+            tail_streak_char=tail_streak_char,
         )
         
         # 审计日志
@@ -3662,7 +3691,8 @@ Return JSON only:
             source="hard_fallback",
             pattern_tag="FALLBACK",
             rhythm_tag="CHAOS_NOISE",
-            model_text="本局未拿到稳定模型结果",
+            tail_streak_len=int(pattern_features.get("tail_streak_len", 0) or 0) if 'pattern_features' in locals() else 0,
+            tail_streak_char=pattern_features.get("tail_streak_char", None) if 'pattern_features' in locals() else None,
         )
         state.predictions.append(fallback)
         return fallback
@@ -4055,7 +4085,8 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             source="timeout_fallback",
             pattern_tag="TIMEOUT_FALLBACK",
             rhythm_tag="CHAOS_NOISE",
-            model_text="本局未拿到稳定模型结果",
+            tail_streak_len=int(rt.get("last_predict_tail_len", 0) or 0),
+            tail_streak_char=rt.get("last_predict_tail_char", None),
         )
         _queue_model_notice(
             rt,
@@ -4077,7 +4108,8 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             source="invalid_fallback",
             pattern_tag="INVALID_FALLBACK",
             rhythm_tag="CHAOS_NOISE",
-            model_text="本局未拿到稳定模型结果",
+            tail_streak_len=int(rt.get("last_predict_tail_len", 0) or 0),
+            tail_streak_char=rt.get("last_predict_tail_char", None),
         )
         _queue_model_notice(
             rt,
@@ -4872,7 +4904,8 @@ def _prepare_force_unlock_prediction(state, rt: dict, next_sequence: int, trigge
         source="unlock_fallback",
         pattern_tag="UNLOCK",
         rhythm_tag="CHAOS_NOISE",
-        model_text="连续观望后保守解锁",
+        tail_streak_len=int(rt.get("last_predict_tail_len", 0) or 0),
+        tail_streak_char=rt.get("last_predict_tail_char", None),
     )
     rt["stall_guard_force_unlock_total"] = int(rt.get("stall_guard_force_unlock_total", 0)) + 1
     rt["stall_guard_force_unlock_used"] = True
