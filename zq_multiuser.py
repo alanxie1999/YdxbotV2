@@ -943,11 +943,8 @@ def _build_lose_warning_lines(rt: Dict[str, Any]) -> List[str]:
     warning_lose_count = int(rt.get("warning_lose_count", 3) or 3)
     if warning_lose_count <= 0 or lose_count < warning_lose_count:
         return []
-    return [
-        "⚠️ 连输预警：🟡 已触发",
-        f"当前连输：{lose_count} 次",
-        f"告警阈值：{warning_lose_count} 次",
-    ]
+    lights = " ".join(["🟡"] * max(1, lose_count))
+    return [f"连输：{lights}"]
 
 
 def _get_model_probe_ids(user_ctx: UserContext) -> List[str]:
@@ -1575,17 +1572,20 @@ def generate_status_html(data: Dict[str, Any]) -> str:
     else:
         account_balance_line = f"{escape_html(str(data.get('acc_bal', '0.00')))} 万"
 
+    top_warning_block = ""
+    if lose_warning_lines:
+        top_warning_block = "\n".join(lose_warning_lines) + "\n"
+
     model_health_block = ""
     if model_health_lines:
         model_health_block = "\n".join(model_health_lines) + "\n\n"
     if release_notice:
         model_health_block = f"{release_notice}\n\n" + model_health_block
-    if lose_warning_lines:
-        model_health_block += "\n".join(lose_warning_lines) + "\n\n"
     if strategy_watch_line:
         model_health_block += f"{strategy_watch_line}\n\n"
 
     html = (
+        f"{top_warning_block}"
         f"<b>【 状态监控 】</b> {status_line}\n"
         f"<b>更新：</b> {current_time}\n"
         f"<b>版本：</b>{version}\n"

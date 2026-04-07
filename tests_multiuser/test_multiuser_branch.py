@@ -210,9 +210,8 @@ def test_format_dashboard_shows_lose_warning_lines_only_after_threshold(tmp_path
 
     text = zm.format_dashboard(ctx)
 
-    assert "⚠️ 连输预警：🟡 已触发" in text
-    assert "当前连输：5 次" in text
-    assert "告警阈值：5 次" in text
+    assert text.startswith("连输：🟡 🟡 🟡 🟡 🟡\n")
+    assert "<b>【 状态监控 】</b>" in text
 
 
 def test_format_dashboard_hides_lose_warning_lines_before_threshold(tmp_path):
@@ -233,8 +232,7 @@ def test_format_dashboard_hides_lose_warning_lines_before_threshold(tmp_path):
 
     text = zm.format_dashboard(ctx)
 
-    assert "⚠️ 连输预警：🟡 已触发" not in text
-    assert "当前连输：4 次" not in text
+    assert "连输：🟡" not in text
 
 
 def test_format_dashboard_shows_pending_release_notice(tmp_path):
