@@ -307,6 +307,10 @@ COUNTED_MODEL_FALLBACK_SOURCES = {
     "hard_fallback",
     "fallback",
     "fallback_skip",
+    "timeout_wait",
+    "invalid_wait",
+    "hard_wait",
+    "model_wait",
 }
 MODEL_PROBE_INTERVAL_SECONDS = 3
 MODEL_PROBE_FAILURE_NOTIFY_INTERVAL_SECONDS = 60
@@ -887,6 +891,8 @@ def _mark_model_failure(rt: Dict[str, Any], source: str, reason: str) -> int:
 def _build_model_health_lines(rt: Dict[str, Any]) -> List[str]:
     status = str(rt.get("model_health_status", "unknown") or "unknown").strip().lower()
     fallback_streak = int(rt.get("model_fallback_streak", 0) or 0)
+    stat_fallback_enabled = bool(rt.get("stat_fallback_bet_enabled", True))
+    streak_label = "连续兜底" if stat_fallback_enabled else "连续异常"
     current_model = str(rt.get("current_model_id", "unknown") or "unknown")
     last_fail_reason = str(rt.get("model_last_fail_reason", "") or "").strip()
     last_ok_at = _format_event_time_text(rt.get("model_last_ok_at", ""))
@@ -905,7 +911,7 @@ def _build_model_health_lines(rt: Dict[str, Any]) -> List[str]:
     elif status == "recovered":
         lines = ["🤖 模型状态：🟢 已恢复"]
     elif status == "fallback":
-        lines = [f"🤖 模型状态：🟠 连续兜底 {fallback_streak} 次"]
+        lines = [f"🤖 模型状态：🟠 {streak_label} {fallback_streak} 次"]
     elif status == "down":
         lines = ["🤖 模型状态：🔴 不可用（已自动暂停）"]
     else:
@@ -962,6 +968,14 @@ def _get_model_probe_ids(user_ctx: UserContext) -> List[str]:
             if model_id and model_id not in ids and cfg.get("enabled", True):
                 ids.append(model_id)
     return ids
+
+
+def _is_stat_fallback_bet_enabled(user_ctx: UserContext) -> bool:
+    ai_cfg = user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {}
+    return bool(ai_cfg.get("enable_stat_fallback_bet", True))
+
+
+MODEL_WAIT_SOURCES = {"model_wait", "timeout_wait", "invalid_wait", "hard_wait"}
 
 
 async def _probe_single_model(user_ctx: UserContext, model_id: str) -> Dict[str, Any]:
@@ -1193,15 +1207,27 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
         return
 
     if notice_type == "failure":
-        message = _build_ops_card(
-            "🚨 模型链不可用，已切统计兜底",
-            summary="当前主模型和备用模型都未返回可用结果，本局已改用统计兜底继续运行。",
-            fields=[
-                ("连续兜底", f"{int(rt.get('model_fallback_streak', 0) or 0)} 次"),
-                ("当前模型", from_model),
-                ("最近异常", detail),
-            ],
-        )
+        stat_fallback_enabled = bool(rt.get("stat_fallback_bet_enabled", True))
+        if stat_fallback_enabled:
+            message = _build_ops_card(
+                "🚨 模型链不可用，已切统计兜底",
+                summary="当前主模型和备用模型都未返回可用结果，本局已改用统计兜底继续运行。",
+                fields=[
+                    ("连续兜底", f"{int(rt.get('model_fallback_streak', 0) or 0)} 次"),
+                    ("当前模型", from_model),
+                    ("最近异常", detail),
+                ],
+            )
+        else:
+            message = _build_ops_card(
+                "🚨 模型链不可用，已等待模型恢复",
+                summary="当前主模型和备用模型都未返回可用结果，本局不会再用统计兜底下注。",
+                fields=[
+                    ("连续异常", f"{int(rt.get('model_fallback_streak', 0) or 0)} 次"),
+                    ("当前模型", from_model),
+                    ("最近异常", detail),
+                ],
+            )
         await _send_transient_admin_notice(
             client,
             user_ctx,
@@ -1214,9 +1240,15 @@ async def _flush_model_runtime_notice(client, user_ctx: UserContext, global_conf
         return
 
     if notice_type == "pause":
+        stat_fallback_enabled = bool(rt.get("stat_fallback_bet_enabled", True))
+        summary = (
+            f"当前已连续 {int(rt.get('model_fallback_streak', 0) or 0)} 次使用统计兜底，系统已自动暂停。"
+            if stat_fallback_enabled
+            else f"当前已连续 {int(rt.get('model_fallback_streak', 0) or 0)} 次等待模型恢复，系统已自动暂停。"
+        )
         message = _build_ops_card(
             "🔴 模型连续异常，已自动暂停",
-            summary=f"当前已连续 {int(rt.get('model_fallback_streak', 0) or 0)} 次使用统计兜底，系统已自动暂停。",
+            summary=summary,
             fields=[
                 ("处理结果", f"已自动暂停 {MODEL_FALLBACK_PAUSE_ROUNDS} 局"),
                 ("当前模型", from_model),
@@ -1419,6 +1451,8 @@ def _get_current_predict_display(rt: Dict[str, Any]) -> str:
     conclusion_match = re.search(r"押注结论：([^\n]+)", raw_info)
     if conclusion_match:
         conclusion = conclusion_match.group(1).strip()
+        if "等待模型恢复" in conclusion:
+            return "等待恢复"
         if "观望" in conclusion:
             return "观望"
         if "押【大】" in conclusion or "押大" in conclusion:
@@ -1516,7 +1550,7 @@ def _build_status_html_data(user_ctx: UserContext) -> Dict[str, Any]:
         "stop": int(rt.get("stop", 3) or 3),
         "account_balance_text": _format_account_balance_text(rt),
         "gambling_fund_text": _format_wan_value(rt.get("gambling_fund", 0)),
-        "model_health_lines": _build_model_health_lines(rt),
+        "model_health_lines": _build_model_health_lines({**rt, "stat_fallback_bet_enabled": _is_stat_fallback_bet_enabled(user_ctx)}),
         "lose_warning_lines": _build_lose_warning_lines(rt),
         "strategy_watch_line": _build_strategy_watch_line(rt),
         "release_notice": _get_pending_release_notice(rt),
@@ -1859,6 +1893,7 @@ def _build_help_card() -> str:
         "<i>例：/stf 100</i>\n"
         "• <code>/wlc [n]</code> 连输相关阈值\n\n"
         "<b>🤖 模型与策略（进阶）</b>\n"
+        "• <code>/mfb [on/off]</code> 模型链异常时是否继续统计兜底下注\n"
         "• <code>/model list</code> 查看可用模型\n"
         "• <code>/model select [编号/ID]</code> 切换模型（支持编号）\n"
         "<i>例：/model select 1</i>\n"
@@ -3058,6 +3093,8 @@ def _resolve_predict_model_judgment_text(
     prediction: int,
 ) -> str:
     source_text = str(source or "").strip().lower()
+    if source_text in MODEL_WAIT_SOURCES:
+        return "当前模型链不可用，等待恢复"
     if source_text == "alternation_break":
         return "交替拉满了，直接按打断规则走"
     if source_text == "unlock_fallback":
@@ -3089,6 +3126,8 @@ def _resolve_predict_pattern_text(
     rhythm_tag: str,
 ) -> str:
     source_text = str(source or "").strip().lower()
+    if source_text in MODEL_WAIT_SOURCES:
+        return "模型不可用"
     if source_text == "alternation_break":
         return "6位纯交替"
     if source_text in {"timeout_fallback", "invalid_fallback", "hard_fallback", "fallback", "fallback_skip", "unlock_fallback"}:
@@ -3103,6 +3142,9 @@ def _resolve_predict_pattern_text(
 
 
 def _resolve_predict_conclusion_text(*, source: str, prediction: int) -> str:
+    source_text = str(source or "").strip().lower()
+    if source_text in MODEL_WAIT_SOURCES:
+        return "等待模型恢复后再下注"
     if int(prediction) == -1:
         return "这局先【观望】"
     if int(prediction) == 1:
@@ -3339,6 +3381,9 @@ async def predict_next_bet_core(user_ctx: UserContext, global_config: dict, curr
     history = state.history
     
     try:
+        stat_fallback_enabled = _is_stat_fallback_bet_enabled(user_ctx)
+        rt["stat_fallback_bet_enabled"] = stat_fallback_enabled
+
         # 第一步：构建历史窗口快照。
         
         # 短期窗口（20局）
@@ -3586,14 +3631,22 @@ Return JSON only:
                 from_model=current_model_id,
                 detail=_summarize_model_error(err_text),
             )
-            _mark_model_failure(rt, "fallback", err_text)
-            log_event(logging.WARNING, 'predict_core', '模型调用失败，统计兜底', 
+            _mark_model_failure(rt, "fallback" if stat_fallback_enabled else "model_wait", err_text)
+            log_event(logging.WARNING, 'predict_core', '模型调用失败', 
                       user_id=user_ctx.user_id, data=err_text)
-            final_result = {
-                'prediction': trend_gap['regression_target'],
-                'confidence': 50,
-                'reason': '模型异常，统计回归兜底'
-            }
+            if stat_fallback_enabled:
+                final_result = {
+                    'prediction': trend_gap['regression_target'],
+                    'confidence': 50,
+                    'reason': '模型异常，统计回归兜底'
+                }
+            else:
+                final_result = {
+                    'prediction': -1,
+                    'confidence': 0,
+                    'reason': '模型链不可用，等待恢复',
+                    'wait_for_model': True,
+                }
         
         # 第五步：校验输出并写回运行态。
         
@@ -3617,7 +3670,9 @@ Return JSON only:
         # 构建预测信息
         rt["last_predict_tag"] = pattern_tag
         rt["last_predict_confidence"] = int(confidence)
-        if prediction == -1:
+        if final_result.get("wait_for_model", False):
+            rt["last_predict_source"] = "model_wait"
+        elif prediction == -1:
             rt["last_predict_source"] = "model_skip" if model_used else "fallback_skip"
         else:
             rt["last_predict_source"] = "model" if model_used else "fallback"
@@ -4064,6 +4119,8 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     next_sequence = int(rt.get("bet_sequence_count", 0) or 0) + 1
     history_signature = "".join(str(x) for x in state.history[-12:])
+    stat_fallback_enabled = _is_stat_fallback_bet_enabled(user_ctx)
+    rt["stat_fallback_bet_enabled"] = stat_fallback_enabled
 
     predict_started_at = time.monotonic()
     try:
@@ -4074,15 +4131,15 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         predict_ms = int((time.monotonic() - predict_started_at) * 1000)
     except asyncio.TimeoutError:
         predict_ms = int((time.monotonic() - predict_started_at) * 1000)
-        prediction = int(fallback_prediction(state.history))
-        rt["last_predict_source"] = "timeout_fallback"
+        prediction = int(fallback_prediction(state.history)) if stat_fallback_enabled else -1
+        rt["last_predict_source"] = "timeout_fallback" if stat_fallback_enabled else "timeout_wait"
         rt["last_predict_tag"] = "TIMEOUT_FALLBACK"
         rt["last_predict_confidence"] = 0
-        rt["last_predict_reason"] = "模型预测超时"
+        rt["last_predict_reason"] = "模型预测超时" if stat_fallback_enabled else "模型链不可用，等待恢复"
         rt["last_predict_info"] = _build_predict_basis_text(
             history=state.history,
             prediction=int(prediction),
-            source="timeout_fallback",
+            source=rt["last_predict_source"],
             pattern_tag="TIMEOUT_FALLBACK",
             rhythm_tag="CHAOS_NOISE",
             tail_streak_len=int(rt.get("last_predict_tail_len", 0) or 0),
@@ -4093,19 +4150,19 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             "failure",
             signature=f"timeout|{rt.get('current_model_id', 'unknown')}",
             from_model=str(rt.get("current_model_id", "unknown")),
-            detail="模型预测超时，已改用统计兜底。",
+            detail="模型预测超时，已改用统计兜底。" if stat_fallback_enabled else "模型预测超时，已等待模型恢复。",
         )
 
     if prediction not in (-1, 0, 1):
-        prediction = int(fallback_prediction(state.history))
-        rt["last_predict_source"] = "invalid_fallback"
+        prediction = int(fallback_prediction(state.history)) if stat_fallback_enabled else -1
+        rt["last_predict_source"] = "invalid_fallback" if stat_fallback_enabled else "invalid_wait"
         rt["last_predict_tag"] = "INVALID_FALLBACK"
         rt["last_predict_confidence"] = 0
-        rt["last_predict_reason"] = "模型返回无效结果"
+        rt["last_predict_reason"] = "模型返回无效结果" if stat_fallback_enabled else "模型链不可用，等待恢复"
         rt["last_predict_info"] = _build_predict_basis_text(
             history=state.history,
             prediction=int(prediction),
-            source="invalid_fallback",
+            source=rt["last_predict_source"],
             pattern_tag="INVALID_FALLBACK",
             rhythm_tag="CHAOS_NOISE",
             tail_streak_len=int(rt.get("last_predict_tail_len", 0) or 0),
@@ -4116,11 +4173,11 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             "failure",
             signature=f"invalid|{rt.get('current_model_id', 'unknown')}",
             from_model=str(rt.get("current_model_id", "unknown")),
-            detail="模型返回无效结果，已改用统计兜底。",
+            detail="模型返回无效结果，已改用统计兜底。" if stat_fallback_enabled else "模型返回无效结果，已等待模型恢复。",
         )
 
     current_predict_source = str(rt.get("last_predict_source", "") or "").strip()
-    if current_predict_source in {"timeout_fallback", "invalid_fallback", "hard_fallback"}:
+    if current_predict_source in {"timeout_fallback", "invalid_fallback", "hard_fallback", "timeout_wait", "invalid_wait", "hard_wait"}:
         _mark_model_failure(rt, current_predict_source, rt.get("last_predict_info", "模型已改用统计兜底。"))
     elif current_predict_source and current_predict_source not in {"unlock_fallback"}:
         if str(rt.get("model_health_status", "")).strip().lower() not in {"switched"}:
@@ -4147,11 +4204,41 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
         _clear_alternation_break_runtime(rt)
-        _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, "模型连续兜底暂停")
+        pause_reason = "模型连续兜底暂停" if stat_fallback_enabled else "模型连续异常暂停"
+        _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, pause_reason)
         rt["bet"] = False
         rt["bet_on"] = False
         rt["mode_stop"] = True
         user_ctx.save_state()
+        return
+
+    if current_predict_source in MODEL_WAIT_SOURCES:
+        _emit_bet_timing(
+            "model_wait",
+            timing_sequence=int(next_sequence),
+            timing_predict_source=str(rt.get("last_predict_source", "")),
+        )
+        rt["bet"] = False
+        rt["bet_on"] = True
+        rt["mode_stop"] = True
+        user_ctx.save_state()
+        await _send_transient_admin_notice(
+            client,
+            user_ctx,
+            global_config,
+            _build_ops_card(
+                "⏸️ 本局等待模型恢复",
+                summary="当前模型链不可用，本局未执行下注。",
+                fields=[
+                    ("当前模型", str(rt.get("current_model_id", "unknown") or "unknown")),
+                    ("最近异常", str(rt.get("model_last_fail_reason", "") or "模型链未返回可用结果")),
+                ],
+                note="系统会继续后台探测模型恢复情况。",
+            ),
+            ttl_seconds=120,
+            attr_name="model_wait_notice_message",
+            msg_type="info",
+        )
         return
 
     prediction = _apply_alternation_break_override(
@@ -7245,6 +7332,64 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
             if message:
                 asyncio.create_task(delete_later(client, message.chat_id, message.id, 10))
+            return
+
+        if cmd == "mfb":
+            ai_cfg = user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {}
+            current_enabled = bool(ai_cfg.get("enable_stat_fallback_bet", True))
+            if len(my) == 1:
+                state_text = "开启" if current_enabled else "关闭"
+                action_text = (
+                    "模型链不可用时，改用统计兜底继续下注"
+                    if current_enabled
+                    else "模型链不可用时不再统计兜底下注，等待模型恢复后继续"
+                )
+                mes = _build_ops_card(
+                    "📌 模型兜底开关",
+                    fields=[
+                        ("当前状态", state_text),
+                        ("异常时动作", action_text),
+                    ],
+                )
+            elif len(my) == 2 and my[1].lower() in {"on", "off"}:
+                enabled = my[1].lower() == "on"
+                new_ai = dict(ai_cfg)
+                new_ai["enable_stat_fallback_bet"] = enabled
+                try:
+                    user_ctx.update_ai_config(new_ai)
+                    rt["stat_fallback_bet_enabled"] = enabled
+                    user_ctx.save_state()
+                    mes = _build_ops_card(
+                        f"✅ 模型兜底开关已{'开启' if enabled else '关闭'}",
+                        summary=(
+                            "当前策略：模型链不可用时，改用统计兜底继续下注"
+                            if enabled
+                            else "当前策略：模型链不可用时不再统计兜底下注，等待模型恢复后继续"
+                        ),
+                    )
+                    log_event(
+                        logging.INFO,
+                        'user_cmd',
+                        '设置模型兜底开关',
+                        user_id=user_ctx.user_id,
+                        enabled=enabled,
+                    )
+                except Exception as e:
+                    mes = _build_ops_card(
+                        "❌ 模型兜底开关设置失败",
+                        summary=f"配置写入失败：{str(e)[:80]}",
+                        action="正确用法：`mfb [on/off]`，例如 `mfb off`。",
+                    )
+            else:
+                mes = _build_ops_card(
+                    "❌ 模型兜底开关设置失败",
+                    summary="当前参数数量或格式不正确。",
+                    action="正确用法：`mfb [on/off]`，例如 `mfb off`。",
+                )
+            message = await send_to_admin(client, mes, user_ctx, global_config)
+            asyncio.create_task(delete_later(client, event.chat_id, event.id, 10))
+            if message:
+                asyncio.create_task(delete_later(client, message.chat_id, message.id, 20))
             return
         
         # model - 模型管理 - 使用与master一致的handle_model_command

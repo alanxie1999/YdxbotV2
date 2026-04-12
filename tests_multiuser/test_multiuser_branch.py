@@ -286,6 +286,29 @@ def test_format_dashboard_shows_model_probe_progress(tmp_path):
     assert "下次重试：约 3 秒后" in text
 
 
+def test_format_dashboard_shows_continuous_exception_when_stat_fallback_disabled(tmp_path):
+    user_dir = tmp_path / "users" / "status_model_wait_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "状态等待用户"},
+            "telegram": {"user_id": 6007},
+            "ai": {"enable_stat_fallback_bet": False},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["bet_on"] = True
+    rt["model_health_status"] = "fallback"
+    rt["model_fallback_streak"] = 2
+    rt["current_model_id"] = "model-x"
+
+    text = zm.format_dashboard(ctx)
+
+    assert "🤖 模型状态：🟠 连续异常 2 次" in text
+
+
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
     users_dir = tmp_path / "users"
     config_dir = tmp_path / "config"
@@ -3485,9 +3508,86 @@ def test_process_user_command_help_uses_quick_start_layout(tmp_path, monkeypatch
     assert "<code>/st [预设名]</code>" in message
     assert "<code>/stats</code> 查看连大、连小、连输统计" in message
     assert "<code>/stf [数字]</code>" in message
+    assert "<code>/mfb [on/off]</code>" in message
     assert "<code>/model select [编号/ID]</code>" in message
     assert "<code>/res state</code>" in message
     assert "<code>/users</code> 查看当前用户信息" in message
+
+
+def test_process_user_command_mfb_off_persists_ai_setting(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "mfb_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型兜底用户"},
+            "telegram": {"user_id": 70163},
+            "groups": {"admin_chat": 70163},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {
+                "enabled": True,
+                "api_keys": ["k1"],
+                "enable_stat_fallback_bet": True,
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70163, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="mfb off", chat_id=70163, id=21)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert ctx.config.ai["enable_stat_fallback_bet"] is False
+    assert ctx.state.runtime["stat_fallback_bet_enabled"] is False
+    assert "✅ 模型兜底开关已关闭" in sent_messages[-1]
+    assert "等待模型恢复后继续" in sent_messages[-1]
+
+
+def test_process_user_command_mfb_show_reports_current_mode(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "mfb_show_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型兜底查看用户"},
+            "telegram": {"user_id": 70164},
+            "groups": {"admin_chat": 70164},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {
+                "enabled": True,
+                "api_keys": ["k1"],
+                "enable_stat_fallback_bet": False,
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    sent_messages = []
+
+    async def fake_send_to_admin(client, message, user_ctx, global_cfg):
+        sent_messages.append(message)
+        return SimpleNamespace(chat_id=70164, id=len(sent_messages))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "send_to_admin", fake_send_to_admin)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(raw_text="mfb", chat_id=70164, id=22)
+    asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
+
+    assert "📌 模型兜底开关" in sent_messages[-1]
+    assert "当前状态：关闭" in sent_messages[-1]
 
 
 def test_process_user_command_update_uses_release_card_fields(tmp_path, monkeypatch):
@@ -3956,6 +4056,50 @@ def test_predict_next_bet_core_queues_failure_notice_when_model_chain_unavailabl
     assert rt["model_fallback_streak"] >= 1
 
 
+def test_predict_next_bet_core_waits_for_model_when_stat_fallback_disabled(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "fallback_wait_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型等待用户"},
+            "telegram": {"user_id": 70126},
+            "groups": {"admin_chat": 70126},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {
+                "enabled": True,
+                "api_keys": ["k1"],
+                "enable_stat_fallback_bet": False,
+                "models": {
+                    "1": {"model_id": "model-1", "enabled": True},
+                    "2": {"model_id": "model-2", "enabled": True},
+                },
+                "fallback_chain": ["1", "2"],
+            },
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    ctx.state.history = [0, 1] * 30
+    rt = ctx.state.runtime
+    rt["current_model_id"] = "model-1"
+
+    class FakeModelManager:
+        async def call_model(self, model_id, messages, **kwargs):
+            return {
+                "success": False,
+                "error": "model-1 调用失败: 超时 | model-2 调用失败: 429",
+                "content": "",
+            }
+
+    monkeypatch.setattr(ctx, "get_model_manager", lambda: FakeModelManager())
+
+    prediction = asyncio.run(zm.predict_next_bet_core(ctx, {}))
+
+    assert prediction == -1
+    assert rt["last_predict_source"] == "model_wait"
+    assert "等待模型恢复后再下注" in rt["last_predict_info"]
+    assert rt["model_fallback_streak"] >= 1
+
+
 def test_process_bet_on_timeout_fallback_pauses_after_threshold(tmp_path, monkeypatch):
     user_dir = tmp_path / "users" / "model_pause_user"
     _write_json(
@@ -4010,6 +4154,63 @@ def test_process_bet_on_timeout_fallback_pauses_after_threshold(tmp_path, monkey
     assert rt["model_health_status"] == "down"
     assert rt["stop_count"] > 0
     assert any(msg_type == "model_pause" for msg_type, _ in sent)
+
+
+def test_process_bet_on_timeout_waits_for_model_when_stat_fallback_disabled(tmp_path, monkeypatch):
+    user_dir = tmp_path / "users" / "model_wait_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "模型等待下注用户"},
+            "telegram": {"user_id": 70202},
+            "groups": {"admin_chat": 70202},
+            "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
+            "ai": {"enable_stat_fallback_bet": False},
+        },
+    )
+    ctx = UserContext(str(user_dir))
+    rt = ctx.state.runtime
+    rt["switch"] = True
+    rt["bet_on"] = True
+    rt["mode_stop"] = True
+    rt["manual_pause"] = False
+    rt["initial_amount"] = 50000
+    rt["bet_amount"] = 50000
+    rt["lose_count"] = 0
+    rt["current_model_id"] = "model-x"
+    ctx.state.history = [0, 1] * 20
+
+    sent = []
+
+    async def fake_predict(user_ctx, global_cfg):
+        raise asyncio.TimeoutError()
+
+    async def fake_notice(client, user_ctx, global_cfg, message, ttl_seconds=120, attr_name="x", msg_type="info"):
+        sent.append((msg_type, message))
+        return SimpleNamespace(chat_id=70202, id=len(sent))
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(zm, "predict_next_bet_core", fake_predict)
+    monkeypatch.setattr(zm, "_send_transient_admin_notice", fake_notice)
+    monkeypatch.setattr(zm.asyncio, "create_task", fake_create_task)
+
+    event = SimpleNamespace(
+        id=99002,
+        chat_id=70202,
+        reply_markup=SimpleNamespace(rows=[]),
+        message=SimpleNamespace(message="[0 小 1 大] 0 1 0 1 0 1"),
+    )
+
+    asyncio.run(zm.process_bet_on(SimpleNamespace(), event, ctx, {}))
+
+    assert rt["bet"] is False
+    assert rt["bet_on"] is True
+    assert rt["last_predict_source"] == "timeout_wait"
+    assert rt["stall_guard_skip_streak"] == 0
+    assert any("⏸️ 本局等待模型恢复" in message for _, message in sent)
 
 
 def test_model_probe_loop_auto_resumes_after_recovery(tmp_path, monkeypatch):

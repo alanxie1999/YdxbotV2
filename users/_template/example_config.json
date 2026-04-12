@@ -68,6 +68,8 @@
         "base_url": "https://api.openai.com/v1",
         "timeout": 30,
         "max_retries": 3,
+        # 模型链异常时是否继续走统计兜底下注
+        "enable_stat_fallback_bet": true,
         "models": {
             "1": {
                 "model_id": "gpt-4o-mini",
