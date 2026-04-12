@@ -299,6 +299,7 @@ def test_format_dashboard_shows_continuous_exception_when_stat_fallback_disabled
 
     ctx = UserContext(str(user_dir))
     rt = ctx.state.runtime
+    rt["stat_fallback_bet_enabled"] = False
     rt["bet_on"] = True
     rt["model_health_status"] = "fallback"
     rt["model_fallback_streak"] = 2
@@ -307,6 +308,23 @@ def test_format_dashboard_shows_continuous_exception_when_stat_fallback_disabled
     text = zm.format_dashboard(ctx)
 
     assert "🤖 模型状态：🟠 连续异常 2 次" in text
+
+
+def test_legacy_ai_stat_fallback_setting_is_still_readable(tmp_path):
+    user_dir = tmp_path / "users" / "legacy_mfb_user"
+    _write_json(
+        user_dir / "config.json",
+        {
+            "account": {"name": "旧配置用户"},
+            "telegram": {"user_id": 6008},
+            "ai": {"enable_stat_fallback_bet": False},
+        },
+    )
+
+    ctx = UserContext(str(user_dir))
+    ctx.state.runtime.pop("stat_fallback_bet_enabled", None)
+
+    assert zm._is_stat_fallback_bet_enabled(ctx) is False
 
 
 def test_user_manager_get_iflow_config_compatible_with_ai_key(tmp_path):
@@ -3547,7 +3565,6 @@ def test_process_user_command_mfb_off_persists_ai_setting(tmp_path, monkeypatch)
     event = SimpleNamespace(raw_text="mfb off", chat_id=70163, id=21)
     asyncio.run(zm.process_user_command(SimpleNamespace(), event, ctx, {}))
 
-    assert ctx.config.ai["enable_stat_fallback_bet"] is False
     assert ctx.state.runtime["stat_fallback_bet_enabled"] is False
     assert "✅ 模型兜底开关已关闭" in sent_messages[-1]
     assert "等待模型恢复后继续" in sent_messages[-1]
@@ -3562,14 +3579,11 @@ def test_process_user_command_mfb_show_reports_current_mode(tmp_path, monkeypatc
             "telegram": {"user_id": 70164},
             "groups": {"admin_chat": 70164},
             "notification": {"iyuu": {"enable": False}, "tg_bot": {"enable": False}},
-            "ai": {
-                "enabled": True,
-                "api_keys": ["k1"],
-                "enable_stat_fallback_bet": False,
-            },
+            "ai": {"enabled": True, "api_keys": ["k1"]},
         },
     )
     ctx = UserContext(str(user_dir))
+    ctx.state.runtime["stat_fallback_bet_enabled"] = False
     sent_messages = []
 
     async def fake_send_to_admin(client, message, user_ctx, global_cfg):
@@ -4080,6 +4094,7 @@ def test_predict_next_bet_core_waits_for_model_when_stat_fallback_disabled(tmp_p
     ctx = UserContext(str(user_dir))
     ctx.state.history = [0, 1] * 30
     rt = ctx.state.runtime
+    rt["stat_fallback_bet_enabled"] = False
     rt["current_model_id"] = "model-1"
 
     class FakeModelManager:
@@ -4170,6 +4185,7 @@ def test_process_bet_on_timeout_waits_for_model_when_stat_fallback_disabled(tmp_
     )
     ctx = UserContext(str(user_dir))
     rt = ctx.state.runtime
+    rt["stat_fallback_bet_enabled"] = False
     rt["switch"] = True
     rt["bet_on"] = True
     rt["mode_stop"] = True

@@ -469,6 +469,7 @@ def get_default_runtime() -> Dict[str, Any]:
         "model_probe_position": 0,
         "model_probe_round_failures": 0,
         "model_probe_last_notify_at": 0,
+        "stat_fallback_bet_enabled": True,
         
         # 预设相关
         "current_preset_name": "",

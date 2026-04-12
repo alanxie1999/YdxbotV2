@@ -971,6 +971,9 @@ def _get_model_probe_ids(user_ctx: UserContext) -> List[str]:
 
 
 def _is_stat_fallback_bet_enabled(user_ctx: UserContext) -> bool:
+    rt = user_ctx.state.runtime if isinstance(getattr(user_ctx, "state", None), UserState) else {}
+    if isinstance(rt, dict) and "stat_fallback_bet_enabled" in rt:
+        return bool(rt.get("stat_fallback_bet_enabled", True))
     ai_cfg = user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {}
     return bool(ai_cfg.get("enable_stat_fallback_bet", True))
 
@@ -7335,8 +7338,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
             return
 
         if cmd == "mfb":
-            ai_cfg = user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {}
-            current_enabled = bool(ai_cfg.get("enable_stat_fallback_bet", True))
+            current_enabled = bool(rt.get("stat_fallback_bet_enabled", _is_stat_fallback_bet_enabled(user_ctx)))
             if len(my) == 1:
                 state_text = "开启" if current_enabled else "关闭"
                 action_text = (
@@ -7353,10 +7355,7 @@ async def process_user_command(client, event, user_ctx: UserContext, global_conf
                 )
             elif len(my) == 2 and my[1].lower() in {"on", "off"}:
                 enabled = my[1].lower() == "on"
-                new_ai = dict(ai_cfg)
-                new_ai["enable_stat_fallback_bet"] = enabled
                 try:
-                    user_ctx.update_ai_config(new_ai)
                     rt["stat_fallback_bet_enabled"] = enabled
                     user_ctx.save_state()
                     mes = _build_ops_card(
