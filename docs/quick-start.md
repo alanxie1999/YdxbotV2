@@ -17,6 +17,18 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+如果遇到权限问题（如 `ERROR: Could not install packages due to EnvironmentPermissionError`），可以使用：
+
+```bash
+pip install -r requirements.txt --break-system-packages
+```
+
+安装完成后，可以通过以下命令验证依赖是否安装成功：
+
+```bash
+python3 -c "import telethon; print('Telethon version:', telethon.__version__)"
+```
+
 ## 3. 准备通用配置
 
 ```bash

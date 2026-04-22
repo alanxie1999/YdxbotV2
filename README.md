@@ -29,6 +29,37 @@ YdxbotV2 是一个基于 Telegram 的多账号自动化脚本。
 
 项目维护者与贡献者不对任何直接或间接损失、封禁、数据异常、账户风险、平台风险或其他后果承担责任。
 
+## 快速开始
+
+### 1. 克隆仓库
+
+```bash
+git clone https://github.com/ibarnard/YdxbotV2.git
+cd YdxbotV2
+```
+
+### 2. 安装依赖
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+如果遇到权限问题，可以使用：
+
+```bash
+pip install -r requirements.txt --break-system-packages
+```
+
+### 3. 配置并启动
+
+详细配置步骤请查看 [快速开始文档](docs/quick-start.md)
+
+```bash
+python3 main_multiuser.py
+```
+
 ## 文档入口
 
 详细文档请查看 Wiki：
@@ -37,3 +68,19 @@ YdxbotV2 是一个基于 Telegram 的多账号自动化脚本。
 - 快速开始：[https://ibarnard.github.io/YdxbotV2/quick-start/](https://ibarnard.github.io/YdxbotV2/quick-start/)
 - 配置说明：[https://ibarnard.github.io/YdxbotV2/config/](https://ibarnard.github.io/YdxbotV2/config/)
 - 命令参考：[https://ibarnard.github.io/YdxbotV2/commands/](https://ibarnard.github.io/YdxbotV2/commands/)
+
+## 常见问题
+
+### ModuleNotFoundError: No module named 'telethon'
+
+这是因为依赖包未安装，请执行：
+
+```bash
+pip install -r requirements.txt
+```
+
+如果仍有问题，尝试：
+
+```bash
+pip install -r requirements.txt --break-system-packages
+```
