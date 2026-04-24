@@ -291,6 +291,14 @@ HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 5.0
 ALTERNATION_BREAK_TRIGGER_WINDOW = 6
 ALTERNATION_BREAK_PATTERNS = {"010101", "101010"}
 
+# 固定数据规律：检测到特定 6 位序列后，按照规律下注（不下相反的数）
+FIXED_PATTERN_TRIGGER_WINDOW = 6
+FIXED_PATTERNS = {
+    "101010": {"follow": "101010", "label": "交替循环"},
+    "111111": {"follow": "1", "label": "大龙延续"},
+    "000000": {"follow": "0", "label": "小龙延续"},
+}
+
 # 同手位防卡死：避免 SKIP/超时导致长期不落单
 STALL_GUARD_SKIP_MAX = 2
 STALL_GUARD_TIMEOUT_MAX = 2
@@ -2907,6 +2915,82 @@ def _clear_alternation_break_runtime(rt: dict) -> None:
     rt["alternation_break_side"] = ""
 
 
+def _detect_fixed_pattern_signal(
+    history: list,
+    window: int = FIXED_PATTERN_TRIGGER_WINDOW,
+) -> Dict[str, Any]:
+    """识别固定数据序列信号（101010、111111、000000），并给出相应的下注方向。"""
+    if not isinstance(history, list) or len(history) < int(window):
+        return {"active": False}
+
+    near_to_far = [int(x) for x in history[-int(window):]]
+    seq = "".join(str(x) for x in near_to_far)
+    
+    if seq not in FIXED_PATTERNS:
+        return {"active": False}
+
+    pattern_info = FIXED_PATTERNS[seq]
+    follow_pattern = pattern_info["follow"]
+    label = pattern_info["label"]
+    
+    if len(follow_pattern) == 1:
+        prediction = int(follow_pattern)
+    else:
+        prediction = int(near_to_far[0])
+    
+    return {
+        "active": True,
+        "detected_seq": seq,
+        "window": int(window),
+        "follow_pattern": follow_pattern,
+        "label": label,
+        "prediction": prediction,
+    }
+
+
+def _apply_fixed_pattern_override(
+    rt: dict,
+    history: list,
+    prediction: int,
+) -> int:
+    """在固定数据盘面里，按照检测到的规律下注，不下相反的数。"""
+    signal = _detect_fixed_pattern_signal(history)
+    if not signal.get("active", False):
+        return int(prediction)
+
+    forced_prediction = int(signal.get("prediction", prediction))
+    side_text = "大" if forced_prediction == 1 else "小"
+    detected_seq = str(signal.get("detected_seq", ""))
+    label = str(signal.get("label", "固定规律"))
+    follow_pattern = str(signal.get("follow_pattern", ""))
+    
+    rt["fixed_pattern_active"] = True
+    rt["fixed_pattern_seq"] = detected_seq
+    rt["fixed_pattern_side"] = side_text
+    rt["fixed_pattern_label"] = label
+    rt["last_predict_source"] = "fixed_pattern"
+    rt["last_predict_tag"] = "FIXED_PATTERN"
+    rt["last_predict_confidence"] = 100
+    rt["last_predict_reason"] = f"检测到{label}（{detected_seq}），按照规律下注{'大' if forced_prediction == 1 else '小'}"
+    rt["last_predict_info"] = _build_predict_basis_text(
+        history=history,
+        prediction=forced_prediction,
+        source="fixed_pattern",
+        pattern_tag="FIXED_PATTERN",
+        rhythm_tag=label,
+        tail_streak_len=len(follow_pattern) if len(follow_pattern) > 1 else 1,
+        tail_streak_char=forced_prediction,
+    )
+    return forced_prediction
+
+
+def _clear_fixed_pattern_runtime(rt: dict) -> None:
+    rt["fixed_pattern_active"] = False
+    rt["fixed_pattern_seq"] = ""
+    rt["fixed_pattern_side"] = ""
+    rt["fixed_pattern_label"] = ""
+
+
 def _apply_alternation_break_override(
     rt: dict,
     history: list,
@@ -4207,6 +4291,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
         _clear_alternation_break_runtime(rt)
+        _clear_fixed_pattern_runtime(rt)
         pause_reason = "模型连续兜底暂停" if stat_fallback_enabled else "模型连续异常暂停"
         _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, pause_reason)
         rt["bet"] = False
@@ -4249,6 +4334,12 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         incoming_history if incoming_history else state.history,
         prediction,
         order="near_to_far",
+    )
+
+    prediction = _apply_fixed_pattern_override(
+        rt,
+        incoming_history if incoming_history else state.history,
+        prediction,
     )
 
     if prediction == -1:
