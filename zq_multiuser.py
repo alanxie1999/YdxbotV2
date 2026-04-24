@@ -291,10 +291,11 @@ HIGH_STEP_DOUBLE_CONFIRM_MODEL_TIMEOUT_SEC = 5.0
 ALTERNATION_BREAK_TRIGGER_WINDOW = 6
 ALTERNATION_BREAK_PATTERNS = {"010101", "101010"}
 
-# 固定数据规律：检测到特定 6 位序列后，按照规律下注（不下相反的数）
+# 固定数据规律：检测到特定 6 位序列后，按照规律下注
 FIXED_PATTERN_TRIGGER_WINDOW = 6
 FIXED_PATTERNS = {
-    "101010": {"follow": "101010", "label": "交替循环"},
+    "010101": {"follow": "reverse", "label": "交替循环反转"},  # 按最新一手反向下注
+    "101010": {"follow": "reverse", "label": "交替循环反转"},  # 按最新一手反向下注
     "111111": {"follow": "1", "label": "大龙延续"},
     "000000": {"follow": "0", "label": "小龙延续"},
 }
@@ -2919,7 +2920,7 @@ def _detect_fixed_pattern_signal(
     history: list,
     window: int = FIXED_PATTERN_TRIGGER_WINDOW,
 ) -> Dict[str, Any]:
-    """识别固定数据序列信号（101010、111111、000000），并给出相应的下注方向。"""
+    """识别固定数据序列信号，并给出相应的下注方向。"""
     if not isinstance(history, list) or len(history) < int(window):
         return {"active": False}
 
@@ -2933,10 +2934,17 @@ def _detect_fixed_pattern_signal(
     follow_pattern = pattern_info["follow"]
     label = pattern_info["label"]
     
-    if len(follow_pattern) == 1:
+    latest_value = int(near_to_far[-1])  # 最新一手
+    
+    if follow_pattern == "reverse":
+        # 反向下注：与最新一手相反
+        prediction = 1 - latest_value
+    elif len(follow_pattern) == 1:
+        # 固定方向下注
         prediction = int(follow_pattern)
     else:
-        prediction = int(near_to_far[0])
+        # 默认按最新一手同向
+        prediction = latest_value
     
     return {
         "active": True,
@@ -2953,7 +2961,7 @@ def _apply_fixed_pattern_override(
     history: list,
     prediction: int,
 ) -> int:
-    """在固定数据盘面里，按照检测到的规律下注，不下相反的数。"""
+    """在固定数据盘面里，按照检测到的规律下注（010101/101010 反向下注，111111/000000 延续下注）。"""
     signal = _detect_fixed_pattern_signal(history)
     if not signal.get("active", False):
         return int(prediction)
@@ -2963,6 +2971,16 @@ def _apply_fixed_pattern_override(
     detected_seq = str(signal.get("detected_seq", ""))
     label = str(signal.get("label", "固定规律"))
     follow_pattern = str(signal.get("follow_pattern", ""))
+    near_to_far = [int(x) for x in history[-6:]]
+    latest_value = int(near_to_far[-1])  # 最新一手
+    
+    # 构建原因说明
+    if follow_pattern == "reverse":
+        latest_side = "大" if latest_value == 1 else "小"
+        predict_side = "小" if latest_side == "大" else "大"
+        reason_text = f"检测到{label}（{detected_seq}），反向下注{predict_side}"
+    else:
+        reason_text = f"检测到{label}（{detected_seq}），按照规律下注{side_text}"
     
     rt["fixed_pattern_active"] = True
     rt["fixed_pattern_seq"] = detected_seq
@@ -2971,7 +2989,7 @@ def _apply_fixed_pattern_override(
     rt["last_predict_source"] = "fixed_pattern"
     rt["last_predict_tag"] = "FIXED_PATTERN"
     rt["last_predict_confidence"] = 100
-    rt["last_predict_reason"] = f"检测到{label}（{detected_seq}），按照规律下注{'大' if forced_prediction == 1 else '小'}"
+    rt["last_predict_reason"] = reason_text
     rt["last_predict_info"] = _build_predict_basis_text(
         history=history,
         prediction=forced_prediction,
