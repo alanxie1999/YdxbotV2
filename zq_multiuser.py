@@ -3065,6 +3065,29 @@ def fallback_prediction(history):
     return prediction
 
 
+def simple_prediction(history):
+    """
+    简易预测逻辑：
+    1. 检测 10101 或 01010 模式，第 6 次强制交替
+    2. 默认追注：开 1 下 1，开 0 下 0
+    """
+    if not isinstance(history, list) or len(history) < 1:
+        return 1
+    
+    # 检测交替循环模式（10101 或 01010）
+    if len(history) >= 5:
+        recent_5 = history[-5:]
+        seq = "".join(str(x) for x in recent_5)
+        
+        if seq in {"10101", "01010"}:
+            # 第 6 次强制交替
+            last_value = recent_5[-1]
+            return 1 - last_value
+    
+    # 默认追注：跟最新一手相同
+    return history[-1]
+
+
 _PREDICT_PATTERN_LABELS = {
     "ALTERNATION_RHYTHM": "交替偏强",
     "PAIR_FORMATION": "配对偏强",
@@ -3479,386 +3502,63 @@ def parse_analysis_result_insight(resp_text, default_prediction=1):
 # 主预测函数
 async def predict_next_bet_core(user_ctx: UserContext, global_config: dict, current_round: int = 1) -> int:
     """
-    根据历史节奏、统计特征和模型输出来决定本局方向。
+    简化预测：使用简易逻辑决定下注方向
+    1. 检测 10101 或 01010 模式，第 6 次强制交替
+    2. 默认追注：开 1 下 1，开 0 下 0
     """
     state = user_ctx.state
     rt = state.runtime
     history = state.history
     
     try:
-        stat_fallback_enabled = _is_stat_fallback_bet_enabled(user_ctx)
-        rt["stat_fallback_bet_enabled"] = stat_fallback_enabled
-
-        # 第一步：构建历史窗口快照。
+        # 使用简易预测逻辑
+        prediction = simple_prediction(history)
         
-        # 短期窗口（20局）
-        short_term_20 = history[-20:] if len(history) >= 20 else history[:]
-        short_str = "".join(['1' if x == 1 else '0' for x in short_term_20])
-
-        # 近端平衡窗口（40局）
-        near_40_gap = calculate_trend_gap(history, window=40)
-        near_40_big = int(near_40_gap.get("big_count", 0) or 0)
-        near_40_small = int(near_40_gap.get("small_count", 0) or 0)
-        near_40_text = _format_predict_window_text_from_counts(near_40_big, near_40_small)
-        
-        # 中期窗口（50局）
-        medium_term_50 = history[-50:] if len(history) >= 50 else history[:]
-        medium_str = "".join(['1' if x == 1 else '0' for x in medium_term_50])
-        
-        # 长期窗口（100局）
-        long_term_100 = history[-100:] if len(history) >= 100 else history[:]
-        long_term_gap = round(sum(long_term_100) / len(long_term_100), 3) if long_term_100 else 0.5
-        
-        # 趋势缺口
-        trend_gap = calculate_trend_gap(history, window=100)
-        big_cnt = trend_gap['big_count']
-        small_cnt = trend_gap['small_count']
-        gap = trend_gap['gap']
-        
-        # 形态与节奏特征
-        pattern_features = extract_pattern_features(history)
-        pattern_tag = pattern_features['pattern_tag']
-        tail_streak_len = pattern_features['tail_streak_len']
-        tail_streak_char = pattern_features['tail_streak_char']
-        double_streak_stats = analyze_double_streak_followups(history)
-        rhythm_context = analyze_rhythm_context(history)
-        
-        # 当前连押压力标签
-        lose_count = rt.get('lose_count', 0)
-        entropy_tag = "Pattern_Breaking" if lose_count > 2 else "Stability"
-        
-        # 第二步：整理模型输入上下文。
-        
-        payload = {
-            "current_status": {
-                "martingale_step": lose_count + 1,
-                "total_profit_to_date": rt.get('earnings', 0),
-                "entropy_tag": entropy_tag
-            },
-            "history_views": {
-                "short_term_20": short_str,
-                "near_term_40_text": near_40_text,
-                "near_term_40_big_count": near_40_big,
-                "near_term_40_small_count": near_40_small,
-                "medium_term_50": medium_str,
-                "long_term_gap": long_term_gap,
-                "big_count_100": big_cnt,
-                "small_count_100": small_cnt
-            },
-            "pattern_analysis": {
-                "tag": pattern_tag,
-                "tail_streak_len": tail_streak_len,
-                "tail_streak_char": tail_streak_char,
-                "gap": f"{gap:+d}"
-            },
-            "double_streak_analysis": {
-                "current_side": double_streak_stats["current_side"],
-                "sample_count": double_streak_stats["current_side_total"],
-                "continue_count": double_streak_stats["current_continue"],
-                "reverse_count": double_streak_stats["current_reverse"],
-                "continue_rate": double_streak_stats["current_continue_rate"],
-                "reverse_rate": double_streak_stats["current_reverse_rate"],
-                "preference": double_streak_stats["current_preference"],
-            },
-            "rhythm_analysis": {
-                "tag": rhythm_context["rhythm_tag"],
-                "recent_seq": rhythm_context["recent_seq"],
-                "alternation_score": rhythm_context["alternation_score"],
-                "alternation_pattern": rhythm_context["alternation_pattern"],
-                "alternation_next": rhythm_context["alternation_next"],
-                "alternation_hit_rate": rhythm_context["alternation_hit_rate"],
-                "alternation_samples": rhythm_context["alternation_samples"],
-                "pair_score": rhythm_context["pair_score"],
-                "pair_pattern": rhythm_context["pair_pattern"],
-                "pair_next": rhythm_context["pair_next"],
-                "pair_hit_rate": rhythm_context["pair_hit_rate"],
-                "pair_samples": rhythm_context["pair_samples"],
-                "dragon_score": rhythm_context["dragon_score"],
-                "chaos_score": rhythm_context["chaos_score"],
-                "pair_would_form_double": rhythm_context["pair_would_form_double"],
-                "pair_would_chase_triple": rhythm_context["pair_would_chase_triple"],
-            }
-        }
-        
-        # 第三步：构建推理提示词。
-        
-        current_model_id = rt.get('current_model_id', 'qwen3-coder-plus')
-        actual_model_id = current_model_id
-        prompt = f"""[System Instruction]
-You are a quantitative trading analyst for a binary big/small game. First identify the dominant rhythm of the board, then decide whether it deserves a bet. If evidence is weak or conflicting, output SKIP (-1).
-
-[Pattern Priority]
-1. LONG_DRAGON: tail streak >= 4. This is now a mature dragon pattern.
-2. DRAGON_CANDIDATE: tail streak == 3.
-3. DOUBLE_STREAK: tail streak == 2. This is useful, but it is not enough by itself.
-4. Rhythm layer: alternation rhythm vs pair formation rhythm.
-5. SINGLE_JUMP / SYMMETRIC_WRAP / CHAOS_SWITCH are weaker transition structures.
-
-[Rhythm Layer]
-- rhythm_tag: {rhythm_context['rhythm_tag']}
-- recent_seq: {rhythm_context['recent_seq']}
-- alternation_score: {rhythm_context['alternation_score']:.3f}
-- alternation_pattern: {rhythm_context['alternation_pattern']}
-- alternation_expected_next: {rhythm_context['alternation_next']}
-- alternation_hit_rate: {rhythm_context['alternation_hit_rate']:.3f} (samples={rhythm_context['alternation_samples']})
-- pair_score: {rhythm_context['pair_score']:.3f}
-- pair_pattern: {rhythm_context['pair_pattern']}
-- pair_expected_next: {rhythm_context['pair_next']}
-- pair_hit_rate: {rhythm_context['pair_hit_rate']:.3f} (samples={rhythm_context['pair_samples']})
-- pair_would_form_double: {str(rhythm_context['pair_would_form_double']).lower()}
-- pair_would_chase_triple: {str(rhythm_context['pair_would_chase_triple']).lower()}
-- dragon_score: {rhythm_context['dragon_score']:.3f}
-- chaos_score: {rhythm_context['chaos_score']:.3f}
-
-[Rhythm Rules]
-1. If alternation_score is clearly stronger than pair_score and the history hit rate also supports it, treat the board as ALTERNATION_RHYTHM. Follow alternation_expected_next instead of guessing that alternation will suddenly break.
-2. If pair_score is clearly stronger than alternation_score and the history hit rate supports it, treat the board as PAIR_FORMATION. Favor pair_expected_next only when it is trying to form the next double.
-3. If pair_would_chase_triple is true, reduce confidence sharply. Pair logic is mainly for forming the next 2-streak, not for aggressively chasing 3-streak.
-4. If recent_seq is a long pure alternation chain and no real double has appeared yet, be very cautious about betting against alternation. Pair bets need clearly better evidence.
-5. If alternation_score and pair_score are close, or rhythm_tag is CHAOS_NOISE, lower confidence first. Only output SKIP when neither side has a usable edge.
-
-[Double Streak Rule]
-- side: {double_streak_stats['current_side']}
-- sample_count: {double_streak_stats['current_side_total']}
-- continue_count: {double_streak_stats['current_continue']}
-- reverse_count: {double_streak_stats['current_reverse']}
-- continue_rate: {double_streak_stats['current_continue_rate']:.3f}
-- reverse_rate: {double_streak_stats['current_reverse_rate']:.3f}
-- preference: {double_streak_stats['current_preference']}
-Interpretation:
-- DOUBLE_STREAK is a supporting clue, not the only clue.
-- If pair rhythm is strong and the next hand would form a fresh double, DOUBLE_STREAK can be weighted higher.
-- If DOUBLE_STREAK already exists and the next hand would directly chase a triple, lower its weight.
-
-[Hard Risk Rules]
-1. If martingale_step >= {HIGH_PRESSURE_SKIP_MIN_STEP} and confidence < {HIGH_PRESSURE_SKIP_MIN_CONF}, do not rush to SKIP. First check whether one side still has clearer rhythm support; if yes, you may still bet with reduced confidence.
-2. If pattern tag is CHAOS_SWITCH / SINGLE_JUMP / SYMMETRIC_WRAP and martingale_step >= 3, be conservative but do not default to SKIP. Only SKIP when the board is both unstable and direction evidence is clearly conflicting.
-3. DRAGON_CANDIDATE is not enough by itself in high-pressure hands, but it can still support a bet when rhythm evidence points in the same direction.
-4. If long_term_gap is near neutral [{NEUTRAL_LONG_TERM_GAP_LOW:.2f}, {NEUTRAL_LONG_TERM_GAP_HIGH:.2f}], treat long-term distribution as weak evidence, not zero evidence.
-5. If trend evidence and reversal evidence conflict sharply, output SKIP. If one side still has a slight but usable edge, keep prediction 0 or 1 and lower confidence.
-
-[Data Evidence]
-short_term_20: {short_str}
-near_term_40: big={near_40_big}, small={near_40_small}, summary={near_40_text}
-medium_term_50: {medium_str}
-long_term_big_ratio: {long_term_gap:.2f}
-pattern_tag: {pattern_tag}
-tail_streak_len: {tail_streak_len}
-tail_side: {'big' if tail_streak_char == 1 else 'small'}
-gap: {gap:+d}
-martingale_step: {lose_count + 1}
-entropy_tag: {entropy_tag}
-
-[Output Policy]
-- Decide the dominant board rhythm first: dragon / alternation / pair / chaos.
-- If alternation rhythm dominates, prefer the alternation continuation side.
-- If pair rhythm dominates, prefer the side that forms the next double.
-- Prefer giving prediction 0 or 1 whenever one side still has a usable edge.
-- Only output SKIP when the board is truly unreadable, evidence is sharply conflicting, or both directions lack usable support.
-
-[Language Rules]
-- reasoning 必须使用简体中文，面向普通用户，避免英文术语和标签名。
-- reasoning 尽量短，控制在 12 到 28 个汉字左右。
-- 可以像这样表达：`盘面偏乱，配对信号弱，先观望一局`。
-
-[Response Format]
-Return JSON only:
-{{"logic": "short summary", "reasoning": "why bet or skip", "confidence": 1-100, "prediction": -1 or 0 or 1}}"""
-
-        messages = [
-            {'role': 'system', 'content': '你是专门破解博弈陷阱的量化交易员，只输出纯JSON。prediction 仅允许 -1/0/1。'},
-            {'role': 'user', 'content': prompt}
-        ]
-        
-        log_event(logging.INFO, 'predict_core', f'模型分析调用: {current_model_id}', 
-                  user_id=user_ctx.user_id, data=f'形态:{pattern_tag} 缺口:{gap:+d} 压力:{lose_count + 1}次')
-        
-        # 第四步：调用模型并处理降级。
-
-        model_used = True
-        try:
-            configured_keys = _normalize_ai_keys(user_ctx.config.ai if isinstance(user_ctx.config.ai, dict) else {})
-            if not configured_keys:
-                raise Exception("AI_KEY_MISSING")
-
-            result = await user_ctx.get_model_manager().call_model(
-                current_model_id,
-                messages,
-                temperature=0.1,
-                max_tokens=500
-            )
-            if not result['success']:
-                raise Exception(f"Model Error: {result['error']}")
-
-            _clear_ai_key_issue(rt)
-            rt["last_model_notice_sig_failure"] = ""
-            actual_model_id = str(result.get("model_id") or current_model_id)
-            if actual_model_id != current_model_id:
-                switch_detail = "旧模型已不可用，已切到当前备用模型。"
-                if str(result.get("requested_model_id") or "") != actual_model_id:
-                    switch_detail = "原模型不可用，系统已按当前降级链自动切换。"
-                _queue_model_notice(
-                    rt,
-                    "switch",
-                    signature=f"{current_model_id}->{actual_model_id}",
-                    from_model=current_model_id,
-                    to_model=actual_model_id,
-                    detail=switch_detail,
-                )
-                rt["current_model_id"] = actual_model_id
-                _mark_model_success(rt, actual_model_id, switched_from=current_model_id)
-                log_event(
-                    logging.WARNING,
-                    'predict_core',
-                    '主模型不可用，已按排序自动降级',
-                    user_id=user_ctx.user_id,
-                    data=f'{current_model_id} -> {actual_model_id}'
-                )
-                user_ctx.save_state()
-                current_model_id = actual_model_id
-            else:
-                _mark_model_success(rt, actual_model_id)
-            
-            default_pred = trend_gap['regression_target']
-            final_result = parse_analysis_result_insight(result['content'], default_prediction=default_pred)
-            
-        except Exception as model_error:
-            model_used = False
-            err_text = str(model_error)
-            if "AI_KEY_MISSING" in err_text:
-                _mark_ai_key_issue(rt, "未配置可用 api_keys")
-            elif _looks_like_ai_key_issue(err_text):
-                _mark_ai_key_issue(rt, err_text)
-            _queue_model_notice(
-                rt,
-                "failure",
-                signature=f"{current_model_id}|{_summarize_model_error(err_text)}",
-                from_model=current_model_id,
-                detail=_summarize_model_error(err_text),
-            )
-            _mark_model_failure(rt, "fallback" if stat_fallback_enabled else "model_wait", err_text)
-            log_event(logging.WARNING, 'predict_core', '模型调用失败', 
-                      user_id=user_ctx.user_id, data=err_text)
-            if stat_fallback_enabled:
-                final_result = {
-                    'prediction': trend_gap['regression_target'],
-                    'confidence': 50,
-                    'reason': '模型异常，统计回归兜底'
-                }
-            else:
-                final_result = {
-                    'prediction': -1,
-                    'confidence': 0,
-                    'reason': '模型链不可用，等待恢复',
-                    'wait_for_model': True,
-                }
-        
-        # 第五步：校验输出并写回运行态。
-        
-        prediction = final_result['prediction']
-        confidence = final_result['confidence']
-        reason = final_result.get('reason', final_result.get('logic', '深度分析'))
-        
+        # 确保预测有效
         if prediction not in [-1, 0, 1]:
-            prediction = trend_gap['regression_target']
-            confidence = 50
-            reason = '强制校正：统计回归'
+            prediction = 1 if history and history[-1] == 1 else 0 if history else 1
         
-        user_reason = _humanize_predict_reason(
-            reason,
-            pattern_tag,
-            rhythm_context['rhythm_tag'],
-            int(prediction),
-            int(confidence),
-        )
-
-        # 构建预测信息
-        rt["last_predict_tag"] = pattern_tag
-        rt["last_predict_confidence"] = int(confidence)
-        if final_result.get("wait_for_model", False):
-            rt["last_predict_source"] = "model_wait"
-        elif prediction == -1:
-            rt["last_predict_source"] = "model_skip" if model_used else "fallback_skip"
+        # 更新运行态信息
+        rt["last_predict_tag"] = "SIMPLE_FOLLOW"
+        rt["last_predict_confidence"] = 100 if len(history) >= 5 else 80
+        rt["last_predict_source"] = "simple_prediction"
+        
+        # 构建预测原因
+        if len(history) >= 5:
+            recent_5 = history[-5:]
+            seq = "".join(str(x) for x in recent_5)
+            if seq in {"10101", "01010"}:
+                rt["last_predict_reason"] = f"检测到交替循环{seq}，第 6 次强制交替"
+            else:
+                last_side = "大" if history[-1] == 1 else "小"
+                rt["last_predict_reason"] = f"追注：上一手开{last_side}"
         else:
-            rt["last_predict_source"] = "model" if model_used else "fallback"
-        rt["last_predict_reason"] = user_reason
-        rt["last_predict_gap"] = int(gap)
-        rt["last_predict_long_term_gap"] = float(long_term_gap)
-        rt["last_predict_tail_len"] = int(tail_streak_len)
-        rt["last_predict_tail_char"] = int(tail_streak_char)
-        rt["last_predict_info"] = _build_predict_basis_text(
-            history=history,
-            prediction=int(prediction),
-            source=str(rt.get("last_predict_source", "") or ""),
-            pattern_tag=pattern_tag,
-            rhythm_tag=str(rhythm_context.get("rhythm_tag", "") or ""),
-            near_text=near_40_text,
-            far_text=_format_predict_far_window_text(long_term_100, 100),
-            short_text=_format_predict_short_window_text(
-                history,
-                pattern_tag=pattern_tag,
-                rhythm_tag=str(rhythm_context.get("rhythm_tag", "") or ""),
-            ),
-            tail_text=_format_predict_tail_shape_text(
-                pattern_tag=pattern_tag,
-                rhythm_tag=str(rhythm_context.get("rhythm_tag", "") or ""),
-                tail_streak_len=tail_streak_len,
-                tail_streak_char=tail_streak_char,
-                history=history,
-            ),
-            raw_reason=user_reason,
-            tail_streak_len=tail_streak_len,
-            tail_streak_char=tail_streak_char,
-        )
-        
-        # 审计日志
-        audit_log = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "round": current_round,
-            "mode": "core_predictor",
-            "input_payload": payload,
-            "output": final_result,
-            "model_id": actual_model_id,
-            "prediction_source": rt.get("last_predict_source", "unknown"),
-            "pattern_tag": pattern_tag,
-        }
-        rt["last_logic_audit"] = json.dumps(audit_log, ensure_ascii=False, indent=2)
+            last_side = "大" if history and history[-1] == 1 else "小"
+            rt["last_predict_reason"] = f"追注：上一手开{last_side}"
         
         # 记录预测
         state.predictions.append(prediction)
         
-        if _verbose_runtime_diag_enabled():
-            log_event(logging.INFO, 'predict_core', '模型分析完成', 
-                      user_id=user_ctx.user_id, data=f'pred={prediction}, conf={confidence}, pattern={pattern_tag}')
+        log_event(logging.INFO, 'predict_core', '简易预测完成', 
+                  user_id=user_ctx.user_id, data=f'pred={prediction}, history_len={len(history)}')
         
         return prediction
         
     except Exception as e:
-        log_event(logging.ERROR, 'predict_core', '核心预测异常，使用最终保底', 
+        log_event(logging.ERROR, 'predict_core', '简易预测异常，使用最终兜底', 
                   user_id=user_ctx.user_id, data=str(e))
         
-        recent_20 = history[-20:] if len(history) >= 20 else history
-        recent_sum = sum(recent_20)
-        fallback = 0 if recent_sum >= len(recent_20) / 2 else 1
-        
+        # 最终兜底
+        fallback = 1 if history and history[-1] == 1 else 0 if history else 1
         rt["last_predict_tag"] = "FALLBACK"
         rt["last_predict_confidence"] = 0
         rt["last_predict_source"] = "hard_fallback"
-        rt["last_predict_reason"] = "模型异常最终兜底"
-        rt["last_predict_info"] = _build_predict_basis_text(
-            history=history,
-            prediction=int(fallback),
-            source="hard_fallback",
-            pattern_tag="FALLBACK",
-            rhythm_tag="CHAOS_NOISE",
-            tail_streak_len=int(pattern_features.get("tail_streak_len", 0) or 0) if 'pattern_features' in locals() else 0,
-            tail_streak_char=pattern_features.get("tail_streak_char", None) if 'pattern_features' in locals() else None,
-        )
+        rt["last_predict_reason"] = "异常兜底"
         state.predictions.append(fallback)
         return fallback
 
 
-# 押注处理
+
 async def _refresh_dashboard_message_slim(client, user_ctx: UserContext, global_config: dict):
     dashboard = format_dashboard(user_ctx)
     if hasattr(user_ctx, "dashboard_message") and user_ctx.dashboard_message:
@@ -4224,141 +3924,9 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     next_sequence = int(rt.get("bet_sequence_count", 0) or 0) + 1
     history_signature = "".join(str(x) for x in state.history[-12:])
-    stat_fallback_enabled = _is_stat_fallback_bet_enabled(user_ctx)
-    rt["stat_fallback_bet_enabled"] = stat_fallback_enabled
-
-    predict_started_at = time.monotonic()
-    try:
-        prediction = await asyncio.wait_for(
-            predict_next_bet_core(user_ctx, global_config),
-            timeout=predict_timeout_sec,
-        )
-        predict_ms = int((time.monotonic() - predict_started_at) * 1000)
-    except asyncio.TimeoutError:
-        predict_ms = int((time.monotonic() - predict_started_at) * 1000)
-        prediction = int(fallback_prediction(state.history)) if stat_fallback_enabled else -1
-        rt["last_predict_source"] = "timeout_fallback" if stat_fallback_enabled else "timeout_wait"
-        rt["last_predict_tag"] = "TIMEOUT_FALLBACK"
-        rt["last_predict_confidence"] = 0
-        rt["last_predict_reason"] = "模型预测超时" if stat_fallback_enabled else "模型链不可用，等待恢复"
-        rt["last_predict_info"] = _build_predict_basis_text(
-            history=state.history,
-            prediction=int(prediction),
-            source=rt["last_predict_source"],
-            pattern_tag="TIMEOUT_FALLBACK",
-            rhythm_tag="CHAOS_NOISE",
-            tail_streak_len=int(rt.get("last_predict_tail_len", 0) or 0),
-            tail_streak_char=rt.get("last_predict_tail_char", None),
-        )
-        _queue_model_notice(
-            rt,
-            "failure",
-            signature=f"timeout|{rt.get('current_model_id', 'unknown')}",
-            from_model=str(rt.get("current_model_id", "unknown")),
-            detail="模型预测超时，已改用统计兜底。" if stat_fallback_enabled else "模型预测超时，已等待模型恢复。",
-        )
-
-    if prediction not in (-1, 0, 1):
-        prediction = int(fallback_prediction(state.history)) if stat_fallback_enabled else -1
-        rt["last_predict_source"] = "invalid_fallback" if stat_fallback_enabled else "invalid_wait"
-        rt["last_predict_tag"] = "INVALID_FALLBACK"
-        rt["last_predict_confidence"] = 0
-        rt["last_predict_reason"] = "模型返回无效结果" if stat_fallback_enabled else "模型链不可用，等待恢复"
-        rt["last_predict_info"] = _build_predict_basis_text(
-            history=state.history,
-            prediction=int(prediction),
-            source=rt["last_predict_source"],
-            pattern_tag="INVALID_FALLBACK",
-            rhythm_tag="CHAOS_NOISE",
-            tail_streak_len=int(rt.get("last_predict_tail_len", 0) or 0),
-            tail_streak_char=rt.get("last_predict_tail_char", None),
-        )
-        _queue_model_notice(
-            rt,
-            "failure",
-            signature=f"invalid|{rt.get('current_model_id', 'unknown')}",
-            from_model=str(rt.get("current_model_id", "unknown")),
-            detail="模型返回无效结果，已改用统计兜底。" if stat_fallback_enabled else "模型返回无效结果，已等待模型恢复。",
-        )
-
-    current_predict_source = str(rt.get("last_predict_source", "") or "").strip()
-    if current_predict_source in {"timeout_fallback", "invalid_fallback", "hard_fallback", "timeout_wait", "invalid_wait", "hard_wait"}:
-        _mark_model_failure(rt, current_predict_source, rt.get("last_predict_info", "模型已改用统计兜底。"))
-    elif current_predict_source and current_predict_source not in {"unlock_fallback"}:
-        if str(rt.get("model_health_status", "")).strip().lower() not in {"switched"}:
-            rt["model_health_status"] = "ok"
-        rt["model_fallback_streak"] = 0
-        rt["model_pause_notified"] = False
-
-    if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
-        rt["model_health_status"] = "down"
-        rt["model_pause_active"] = True
-        if not rt.get("model_pause_notified", False):
-            _queue_model_notice(
-                rt,
-                "pause",
-                signature=f"pause|{rt.get('current_model_id', 'unknown')}|{rt.get('model_fallback_streak', 0)}",
-                from_model=str(rt.get("current_model_id", "unknown")),
-                detail=str(rt.get("model_last_fail_reason", "") or "连续多次统计兜底"),
-            )
-            rt["model_pause_notified"] = True
-
-    await _flush_model_runtime_notice(client, user_ctx, global_config)
-    if int(rt.get("model_fallback_streak", 0) or 0) > 0 or rt.get("model_pause_active", False):
-        _ensure_model_probe_loop(client, user_ctx, global_config)
-
-    if int(rt.get("model_fallback_streak", 0) or 0) >= MODEL_FALLBACK_PAUSE_THRESHOLD:
-        _clear_alternation_break_runtime(rt)
-        _clear_fixed_pattern_runtime(rt)
-        pause_reason = "模型连续兜底暂停" if stat_fallback_enabled else "模型连续异常暂停"
-        _enter_pause(rt, MODEL_FALLBACK_PAUSE_ROUNDS, pause_reason)
-        rt["bet"] = False
-        rt["bet_on"] = False
-        rt["mode_stop"] = True
-        user_ctx.save_state()
-        return
-
-    if current_predict_source in MODEL_WAIT_SOURCES:
-        _emit_bet_timing(
-            "model_wait",
-            timing_sequence=int(next_sequence),
-            timing_predict_source=str(rt.get("last_predict_source", "")),
-        )
-        rt["bet"] = False
-        rt["bet_on"] = True
-        rt["mode_stop"] = True
-        user_ctx.save_state()
-        await _send_transient_admin_notice(
-            client,
-            user_ctx,
-            global_config,
-            _build_ops_card(
-                "⏸️ 本局等待模型恢复",
-                summary="当前模型链不可用，本局未执行下注。",
-                fields=[
-                    ("当前模型", str(rt.get("current_model_id", "unknown") or "unknown")),
-                    ("最近异常", str(rt.get("model_last_fail_reason", "") or "模型链未返回可用结果")),
-                ],
-                note="系统会继续后台探测模型恢复情况。",
-            ),
-            ttl_seconds=120,
-            attr_name="model_wait_notice_message",
-            msg_type="info",
-        )
-        return
-
-    prediction = _apply_alternation_break_override(
-        rt,
-        incoming_history if incoming_history else state.history,
-        prediction,
-        order="near_to_far",
-    )
-
-    prediction = _apply_fixed_pattern_override(
-        rt,
-        incoming_history if incoming_history else state.history,
-        prediction,
-    )
+    
+    # 执行预测（简易模式：追注 + 交替循环检测）
+    prediction = await predict_next_bet_core(user_ctx, global_config)
 
     if prediction == -1:
         skip_trigger = _record_hand_stall_block(rt, next_sequence, history_signature, "skip")
