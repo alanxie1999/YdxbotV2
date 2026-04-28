@@ -1,0 +1,963 @@
+"""
+user_manager.py - 多用户管理模块
+版本: 2.4.3
+日期: 2026-02-21
+功能: 用户配置加载、状态管理、多用户隔离
+"""
+
+import os
+import json
+import threading
+import logging
+import importlib.util
+import re
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List
+from logging.handlers import TimedRotatingFileHandler
+import constants
+
+# 日志配置
+logger = logging.getLogger('user_manager')
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
+file_handler = TimedRotatingFileHandler('user_manager.log', when='midnight', interval=1, backupCount=3, encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+ACCOUNT_LOG_ROOT = os.path.join("logs", "accounts")
+MAX_BET_SEQUENCE_LOG = 5000
+ACCOUNT_LOG_BACKUP_DAYS = 3
+_USER_LOG_SLUG_REGISTRY: Dict[str, str] = {}
+
+
+def _sanitize_account_slug(text: str, fallback: str = "unknown") -> str:
+    raw = str(text or "").strip().lower().replace(" ", "-")
+    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in {"-", "_"})
+    return cleaned or fallback
+
+
+def _build_account_label(account_slug: str) -> str:
+    return f"ydx-{account_slug}"
+
+
+def _build_user_dir_slug(user_dir: str, fallback: str = "unknown") -> str:
+    dir_name = os.path.basename(os.path.normpath(str(user_dir or "")))
+    return _sanitize_account_slug(dir_name, fallback=fallback)
+
+
+def _parse_user_id_from_text(*parts: Any) -> str:
+    for part in parts:
+        match = re.search(r"user_id=(\d+)", str(part or ""))
+        if match:
+            return match.group(1)
+    return "0"
+
+
+def _resolve_user_identity(user_id: Any = 0, account_name: str = "") -> Dict[str, str]:
+    user_id_text = str(user_id or 0)
+    resolved_name = str(account_name or "").strip()
+    account_slug = _USER_LOG_SLUG_REGISTRY.get(user_id_text, "").strip()
+    if not account_slug:
+        if not resolved_name and user_id_text not in {"", "0"}:
+            resolved_name = f"user-{user_id_text}"
+        account_slug = _sanitize_account_slug(
+            resolved_name,
+            fallback=(f"user-{user_id_text}" if user_id_text not in {"", "0"} else "unknown"),
+        )
+    return {
+        "user_id": user_id_text,
+        "account_slug": account_slug,
+        "account_label": _build_account_label(account_slug),
+        "account_tag": f"【ydx-{account_slug}】",
+    }
+
+
+def trim_bet_sequence_log(logs: Any, runtime: Optional[Dict[str, Any]] = None, max_len: int = MAX_BET_SEQUENCE_LOG) -> List[Dict[str, Any]]:
+    """
+    将押注日志裁剪到固定长度，并同步修正 res bet 使用的切片起点。
+    这样在日志滚动裁剪后，新的策略链不会被旧的绝对下标“卡死”。
+    """
+    if not isinstance(logs, list):
+        if isinstance(runtime, dict):
+            runtime["bet_reset_log_index"] = 0
+        return []
+
+    if not isinstance(runtime, dict):
+        runtime = {}
+
+    try:
+        reset_index = int(runtime.get("bet_reset_log_index", 0) or 0)
+    except (TypeError, ValueError):
+        reset_index = 0
+
+    if max_len > 0 and len(logs) > max_len:
+        drop_count = len(logs) - max_len
+        logs = logs[-max_len:]
+        reset_index = max(0, reset_index - drop_count)
+
+    reset_index = max(0, min(reset_index, len(logs)))
+    runtime["bet_reset_log_index"] = reset_index
+    return logs
+
+
+class _UserManagerLogDefaultsFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "user_id"):
+            record.user_id = "0"
+        if not hasattr(record, "module_name"):
+            record.module_name = "user_manager"
+        if not hasattr(record, "event"):
+            record.event = "general"
+        if not hasattr(record, "data"):
+            record.data = ""
+        if not hasattr(record, "category"):
+            record.category = "warning" if int(getattr(record, "levelno", logging.INFO)) >= logging.WARNING else "runtime"
+        if not hasattr(record, "account_slug"):
+            fallback_slug = f"user-{record.user_id}" if str(record.user_id) != "0" else "unknown"
+            record.account_slug = _sanitize_account_slug("", fallback=fallback_slug)
+        record.account_label = _build_account_label(record.account_slug)
+        record.account_tag = f"【ydx-{record.account_slug}】"
+        return True
+
+
+class _UserManagerAccountRouterHandler(logging.Handler):
+    def __init__(self, root_dir: str, backup_count: int = 7):
+        super().__init__(level=logging.DEBUG)
+        self.root_dir = root_dir
+        self.backup_count = backup_count
+        self._handlers: Dict[tuple, TimedRotatingFileHandler] = {}
+        self._default_filter = _UserManagerLogDefaultsFilter()
+        self._formatter = logging.Formatter(
+            '%(asctime)s | %(levelname)s | [%(account_tag)s] [%(module_name)s:%(event)s] %(message)s | %(data)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+
+    def _get_handler(self, account_slug: str, category: str) -> TimedRotatingFileHandler:
+        key = (account_slug, category)
+        if key in self._handlers:
+            return self._handlers[key]
+        account_dir = os.path.join(self.root_dir, account_slug)
+        os.makedirs(account_dir, exist_ok=True)
+        log_path = os.path.join(account_dir, f"{category}.log")
+        handler = TimedRotatingFileHandler(
+            log_path,
+            when='midnight',
+            interval=1,
+            backupCount=self.backup_count,
+            encoding='utf-8'
+        )
+        handler.setFormatter(self._formatter)
+        handler.addFilter(self._default_filter)
+        self._handlers[key] = handler
+        return handler
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            self._default_filter.filter(record)
+            account_slug = str(getattr(record, "account_slug", "unknown") or "unknown")
+            if account_slug == "unknown":
+                return
+            category = str(getattr(record, "category", "runtime") or "runtime")
+            handler = self._get_handler(account_slug, category)
+            handler.emit(record)
+        except Exception:
+            self.handleError(record)
+
+    def close(self):
+        for handler in self._handlers.values():
+            try:
+                handler.close()
+            except Exception:
+                pass
+        self._handlers.clear()
+        super().close()
+
+
+_user_manager_log_filter = _UserManagerLogDefaultsFilter()
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s | %(levelname)s | %(account_label)s | %(message)s',
+    datefmt='%H:%M:%S'
+))
+console_handler.setLevel(logging.INFO)
+console_handler.addFilter(_user_manager_log_filter)
+logger.addHandler(console_handler)
+
+account_category_handler = _UserManagerAccountRouterHandler(ACCOUNT_LOG_ROOT, backup_count=ACCOUNT_LOG_BACKUP_DAYS)
+account_category_handler.addFilter(_user_manager_log_filter)
+logger.addHandler(account_category_handler)
+try:
+    logger.removeHandler(file_handler)
+    file_handler.close()
+except Exception:
+    pass
+
+
+def log_event(level, module, event, message=None, **kwargs):
+    if message is None:
+        message = event
+        event = module
+        module = 'user_manager'
+    user_id = kwargs.pop("user_id", None)
+    user_id_text = _parse_user_id_from_text(user_id, message, kwargs)
+    identity = _resolve_user_identity(user_id=user_id_text)
+    category = "warning" if level >= logging.WARNING else "runtime"
+    data = ', '.join(f'{k}={v}' for k, v in kwargs.items())
+    logger.log(
+        level,
+        message,
+        extra={
+            "user_id": identity["user_id"],
+            "module_name": module,
+            "event": event,
+            "data": data,
+            "category": category,
+            "account_slug": identity["account_slug"],
+            "account_label": identity["account_label"],
+            "account_tag": identity["account_tag"],
+        },
+    )
+    return
+    # 兼容旧调用: log_event(level, event, message, data)
+    if message is None:
+        message = event
+        event = module
+        module = 'user_manager'
+    data = ', '.join(f'{k}={v}' for k, v in kwargs.items())
+    logger.log(level, f"[{module}:{event}] {message} | {data}")
+
+
+def load_json_with_comments(filepath: str) -> Dict[str, Any]:
+    """
+    读取支持注释的 JSON 文件。
+    说明：
+    - 支持整行注释：# ... 或 // ...
+    - 支持行尾注释：... # ... 或 ... // ...
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        raw_text = f.read()
+
+    cleaned_lines = []
+    for raw_line in raw_text.splitlines():
+        stripped = raw_line.lstrip()
+        if stripped.startswith('#') or stripped.startswith('//'):
+            continue
+
+        in_string = False
+        escaped = False
+        cleaned = []
+        i = 0
+        while i < len(raw_line):
+            ch = raw_line[i]
+            if escaped:
+                cleaned.append(ch)
+                escaped = False
+                i += 1
+                continue
+            if ch == '\\':
+                cleaned.append(ch)
+                escaped = True
+                i += 1
+                continue
+            if ch == '"':
+                in_string = not in_string
+                cleaned.append(ch)
+                i += 1
+                continue
+            if not in_string:
+                if ch == '#':
+                    break
+                if ch == '/' and i + 1 < len(raw_line) and raw_line[i + 1] == '/':
+                    break
+            cleaned.append(ch)
+            i += 1
+
+        line = ''.join(cleaned).rstrip()
+        if line:
+            cleaned_lines.append(line)
+
+    return json.loads('\n'.join(cleaned_lines))
+
+
+def merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """深度合并字典: override 覆盖 base。"""
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(result.get(key), dict) and isinstance(value, dict):
+            result[key] = merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _normalize_chat_target(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        if text.lstrip("-").isdigit():
+            try:
+                return int(text)
+            except Exception:
+                return value
+        return text
+    return value
+
+
+@dataclass
+class UserConfig:
+    user_id: int
+    name: str
+    telegram: Dict[str, Any] = field(default_factory=dict)
+    groups: Dict[str, Any] = field(default_factory=dict)
+    zhuque: Dict[str, Any] = field(default_factory=dict)
+    admin_console: Dict[str, Any] = field(default_factory=dict)
+    notification: Dict[str, Any] = field(default_factory=dict)
+    ai: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class UserState:
+    """
+    用户状态数据类
+    包含所有运行时变量，与 master 分支 variable.py 保持一致
+    """
+    # 历史数据
+    history: List[int] = field(default_factory=list)
+    bet_type_history: List[int] = field(default_factory=list)
+    predictions: List[int] = field(default_factory=list)
+    bet_sequence_log: List[Dict] = field(default_factory=list)
+    
+    # 运行时变量（存储在 runtime 字典中）
+    runtime: Dict[str, Any] = field(default_factory=dict)
+    
+    def get_runtime(self, key: str, default: Any = None) -> Any:
+        """获取运行时变量，支持类型转换"""
+        value = self.runtime.get(key, default)
+        # 如果默认值是 int，但存储的是字符串，进行转换
+        if default is not None and isinstance(default, int) and isinstance(value, str):
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                return default
+        if default is not None and isinstance(default, float) and isinstance(value, str):
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return default
+        return value
+    
+    def set_runtime(self, key: str, value: Any):
+        """设置运行时变量"""
+        self.runtime[key] = value
+
+
+def get_default_runtime() -> Dict[str, Any]:
+    """
+    获取默认运行时变量
+    与 master 分支 variable.py 保持一致
+    """
+    from datetime import datetime
+    return {
+        # 核心控制变量
+        "switch": True,
+        "manual_pause": False,
+        
+        # 历史和状态管理
+        "current_round": 1,
+        "current_bet_seq": 1,
+        "last_reset_date": datetime.now().strftime("%Y%m%d"),
+        
+        # 押注参数
+        "bet": False,
+        "bet_on": False,
+        "mode": 1,
+        "mode_stop": True,
+        "bet_type": 0,
+        "initial_amount": 500,
+        "bet_amount": 0,
+        "bet_sequence_count": 0,
+        "bet_reset_log_index": 0,
+        "lose_stop": 20,
+        "warning_lose_count": 3,
+        "lose_notify_pending": False,
+        "lose_start_info": {},
+        "last_logic_audit": "",
+        "last_settle_message_id": 0,
+        # 自动风控暂停周期状态
+        "risk_pause_acc_rounds": 0,
+        "risk_pause_snapshot_count": -1,
+        "risk_pause_cycle_active": False,
+        "risk_pause_recovery_passes": 0,
+        "risk_base_hit_streak": 0,
+        # 账号级默认风控开关：脚本启动时会按该默认值恢复当前开关状态。
+        "risk_base_default_enabled": True,
+        "risk_deep_default_enabled": True,
+        "risk_base_enabled": True,
+        "risk_deep_enabled": True,
+        "risk_pause_level1_hit": False,
+        "risk_deep_triggered_milestones": [],
+        "risk_pause_priority_notified": False,
+        "risk_pause_block_hits": 0,
+        "risk_pause_block_rounds": 0,
+        "risk_pause_last_100_report_total": 0,
+        "lose_once": 2.5,
+        "lose_twice": 2.5,
+        "lose_three": 2.5,
+        "lose_four": 2.1,
+        "continuous": 10,
+        "explode": 1,
+        "stop": 3,
+        "profit_stop": 2,
+        "explode_count": 0,
+        "stop_count": 0,
+        "flag": True,
+        "pause_count": 0,
+        "pause_resume_pending": False,
+        "pause_resume_pending_reason": "",
+        "pause_resume_probe_settled": -1,
+        "pause_countdown_active": False,
+        "pause_countdown_reason": "",
+        "pause_countdown_total_rounds": 0,
+        "pause_countdown_last_remaining": -1,
+        "entry_timeout_gate_last_seq": -1,
+        "entry_timeout_gate_last_settled": -1,
+        "stall_guard_sequence": -1,
+        "stall_guard_last_history_len": -1,
+        "stall_guard_last_history_sig": "",
+        "stall_guard_no_bet_streak": 0,
+        "stall_guard_skip_streak": 0,
+        "stall_guard_timeout_streak": 0,
+        "stall_guard_gate_streak": 0,
+        "stall_guard_force_unlock_total": 0,
+        "stall_guard_force_unlock_used": False,
+        "last_skip_notice_settled": -1,
+        "model_monitor_last_settled": 0,
+        "fund_pause_notified": False,
+        "limit_stop_notified": False,
+        
+        # 统计和仪表盘变量
+        "total": 0,
+        "stats_last_report_total": 0,
+        "win_total": 0,
+        "earnings": 0,
+        "period_profit": 0,
+        "profit": 1000000,
+        "win_count": 0,
+        "lose_count": 0,
+        "gambling_fund": 25000000,
+        "account_balance": 0,
+        "balance_status": "unknown",
+        "status": 0,
+        
+        # 算法相关变量
+        "last_predict_info": "等待本局预测",
+        "api_key_index": 0,
+        "current_model_id": "qwen3-coder-plus",
+        "model_health_status": "unknown",
+        "model_fallback_streak": 0,
+        "model_last_ok_at": "",
+        "model_last_fail_at": "",
+        "model_last_fail_reason": "",
+        "model_last_switch_from": "",
+        "model_last_switch_to": "",
+        "model_pause_notified": False,
+        "model_probe_active": False,
+        "model_probe_index": 0,
+        "model_pause_active": False,
+        "model_probe_current_target": "",
+        "model_probe_total": 0,
+        "model_probe_position": 0,
+        "model_probe_round_failures": 0,
+        "model_probe_last_notify_at": 0,
+        "stat_fallback_bet_enabled": True,
+        
+        # 预设相关
+        "current_preset_name": "",
+    }
+
+
+class UserContext:
+    def __init__(self, user_dir: str, global_config: Optional[Dict[str, Any]] = None):
+        self.user_dir = user_dir
+        self.global_config = global_config or {}
+        self.user_id = 0  # 临时值，将在加载配置后更新
+        self.account_slug = _build_user_dir_slug(self.user_dir)
+        self.config: Optional[UserConfig] = None
+        self.state: Optional[UserState] = None
+        self.presets: Dict[str, List] = {}
+        self.client = None
+        self._model_manager = None
+        self._model_manager_ai_sig = ""
+        self._config_path = ""
+        self._config_data = {}
+        self._lock = threading.Lock()
+        self._load_all()
+    
+    def _load_all(self):
+        self._load_config()
+        self._load_state()
+        self._load_presets()
+
+    def _resolve_user_config_path(self) -> str:
+        """
+        仅读取 <账号目录名>_config.json。
+        """
+        dir_name = os.path.basename(os.path.normpath(self.user_dir))
+        preferred = os.path.join(self.user_dir, f"{dir_name}_config.json")
+
+        if os.path.exists(preferred):
+            return preferred
+
+        # 兜底：若目录下仅存在一个 *_config.json，也可直接使用。
+        try:
+            matches = [
+                os.path.join(self.user_dir, name)
+                for name in os.listdir(self.user_dir)
+                if name.endswith("_config.json")
+            ]
+            if len(matches) == 1 and os.path.exists(matches[0]):
+                return matches[0]
+        except Exception:
+            pass
+
+        raise FileNotFoundError(
+            f"配置文件不存在，期望: {preferred}"
+        )
+    
+    def _load_config(self):
+        config_path = self._resolve_user_config_path()
+
+        data = load_json_with_comments(config_path)
+        self._config_path = config_path
+        self._config_data = dict(data) if isinstance(data, dict) else {}
+        global_cfg = self.global_config or {}
+
+        account_cfg = merge_dict(global_cfg.get("account", {}), data.get("account", {}))
+        telegram_cfg = merge_dict(global_cfg.get("telegram", {}), data.get("telegram", {}))
+        groups_cfg = merge_dict(global_cfg.get("groups", {}), data.get("groups", {}))
+        zhuque_cfg = merge_dict(global_cfg.get("zhuque", {}), data.get("zhuque", {}))
+        # 精简规则：管理员控制台、通知和 AI 仅从账号配置读取（不走全局继承）
+        admin_console_cfg = data.get("admin_console", {}) if isinstance(data.get("admin_console", {}), dict) else {}
+        notification_cfg = data.get("notification", {}) if isinstance(data.get("notification", {}), dict) else {}
+        ai_cfg = data.get("ai", {}) if isinstance(data.get("ai", {}), dict) else {}
+
+        mode = str(admin_console_cfg.get("mode", "") or "").strip()
+        if mode not in {"telegram_id", "telegram_bot"}:
+            raise ValueError("admin_console.mode 必须配置为 telegram_id 或 telegram_bot")
+
+        telegram_id_cfg = admin_console_cfg.get("telegram_id", {}) if isinstance(admin_console_cfg.get("telegram_id", {}), dict) else {}
+        telegram_bot_cfg = admin_console_cfg.get("telegram_bot", {}) if isinstance(admin_console_cfg.get("telegram_bot", {}), dict) else {}
+
+        if mode == "telegram_id":
+            chat_id = _normalize_chat_target(telegram_id_cfg.get("chat_id"))
+            if chat_id in (None, ""):
+                raise ValueError("admin_console.telegram_id.chat_id 未配置")
+        else:
+            bot_token = str(telegram_bot_cfg.get("bot_token", "") or "").strip()
+            chat_id = _normalize_chat_target(telegram_bot_cfg.get("chat_id"))
+            if not bot_token or chat_id in (None, ""):
+                raise ValueError("admin_console.telegram_bot.bot_token 或 chat_id 未配置")
+
+        channels_cfg = notification_cfg.get("channels", {}) if isinstance(notification_cfg.get("channels", {}), dict) else {}
+        notification_cfg = {"channels": channels_cfg}
+
+        # 从配置中读取user_id，如果没有则使用目录名的哈希值
+        self.user_id = telegram_cfg.get("user_id", 0)
+        if self.user_id == 0:
+            # 使用目录名作为user_id的备选
+            # 修复：多用户分支 - 变量名写错导致 NameError（user_id 缺失时会直接崩溃）。
+            dir_name = os.path.basename(self.user_dir)
+            try:
+                self.user_id = int(dir_name)
+            except ValueError:
+                # 如果目录名不是数字，使用哈希值
+                self.user_id = hash(dir_name) % 100000000
+        
+        self.config = UserConfig(
+            user_id=self.user_id,
+            name=account_cfg.get("name", data.get("name", f"用户{self.user_id}")),
+            telegram=telegram_cfg,
+            groups=groups_cfg,
+            zhuque=zhuque_cfg,
+            admin_console=admin_console_cfg,
+            notification=notification_cfg,
+            ai=ai_cfg,
+        )
+        self.account_slug = _build_user_dir_slug(
+            self.user_dir,
+            fallback=(f"user-{self.user_id}" if self.user_id else "unknown"),
+        )
+        _USER_LOG_SLUG_REGISTRY[str(self.user_id)] = self.account_slug
+        log_event(
+            logging.INFO,
+            'load_config',
+            '加载用户配置成功',
+            f'user_id={self.user_id}, name={self.config.name}, file={os.path.basename(config_path)}'
+        )
+
+    def get_user_config_path(self) -> str:
+        return self._config_path or self._resolve_user_config_path()
+
+    def reload_user_config(self):
+        """重新加载账号配置并刷新模型配置。"""
+        with self._lock:
+            self._load_config()
+            self._model_manager_ai_sig = ""
+        if self._model_manager is not None:
+            self.get_model_manager().load_models()
+
+    def update_ai_config(self, new_ai_config: Dict[str, Any]) -> str:
+        """
+        更新并持久化账号 ai 配置到对应 *_config.json。
+        返回写入路径。
+        """
+        if not isinstance(new_ai_config, dict):
+            raise ValueError("ai 配置必须是对象(dict)")
+
+        with self._lock:
+            config_path = self.get_user_config_path()
+            data = load_json_with_comments(config_path)
+            if not isinstance(data, dict):
+                data = {}
+
+            ai_data = dict(new_ai_config)
+            data["ai"] = ai_data
+
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+
+            self._config_path = config_path
+            self._config_data = data
+            self.config.ai = ai_data
+            self._model_manager_ai_sig = ""
+
+        if self._model_manager is not None:
+            self.get_model_manager().load_models()
+        return config_path
+    
+    def _load_state(self):
+        state_path = os.path.join(self.user_dir, "state.json")
+        default_rt = get_default_runtime()
+        
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # 合并默认运行时变量和保存的运行时变量
+                saved_runtime = data.get("runtime", {})
+                merged_runtime = {**default_rt, **saved_runtime}
+                # 兼容旧状态：新增“账号默认风控开关”时，优先沿用历史当前开关，避免升级后被重置。
+                if "risk_base_default_enabled" not in saved_runtime:
+                    merged_runtime["risk_base_default_enabled"] = bool(
+                        merged_runtime.get("risk_base_enabled", True)
+                    )
+                if "risk_deep_default_enabled" not in saved_runtime:
+                    merged_runtime["risk_deep_default_enabled"] = bool(
+                        merged_runtime.get("risk_deep_enabled", True)
+                    )
+                
+                self.state = UserState(
+                    history=data.get("history", [])[-2000:],
+                    bet_type_history=data.get("bet_type_history", [])[-2000:],
+                    predictions=data.get("predictions", [])[-2000:],
+                    bet_sequence_log=trim_bet_sequence_log(
+                        data.get("bet_sequence_log", [])[-MAX_BET_SEQUENCE_LOG:],
+                        merged_runtime,
+                    ),
+                    runtime=merged_runtime
+                )
+                log_event(logging.DEBUG, 'load_state', '加载用户状态成功', f'user_id={self.user_id}')
+            except Exception as e:
+                log_event(logging.ERROR, 'load_state', '加载用户状态失败', f'user_id={self.user_id}, error={str(e)}, action=使用默认状态')
+                self.state = UserState(runtime=default_rt)
+        else:
+            self.state = UserState(runtime=default_rt)
+            log_event(logging.INFO, 'load_state', '创建新用户状态', f'user_id={self.user_id}')
+
+        # 修复：多用户分支 - 新建用户若历史为空会长期无法下注；兼容导入 master 单用户 state.json 历史。
+        if len(self.state.history) < 40:
+            self._try_migrate_legacy_state()
+
+    def _try_migrate_legacy_state(self):
+        """尝试从根目录 legacy state.json 导入历史与关键运行时字段。"""
+        legacy_state_path = "state.json"
+        if not os.path.exists(legacy_state_path):
+            return False
+
+        # 仅导入与当前账号匹配的单用户状态，避免多账号串状态
+        try:
+            legacy_cfg_path = os.path.abspath("config.py")
+            if not os.path.exists(legacy_cfg_path):
+                return False
+
+            spec = importlib.util.spec_from_file_location("ydxbot_legacy_config", legacy_cfg_path)
+            if spec is None or spec.loader is None:
+                return False
+            legacy_config = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(legacy_config)
+
+            if int(getattr(legacy_config, "user", 0)) != int(self.user_id):
+                return False
+        except Exception:
+            return False
+
+        try:
+            with open(legacy_state_path, 'r', encoding='utf-8') as f:
+                legacy_state = json.load(f)
+        except Exception as e:
+            log_event(logging.WARNING, 'load_state', '读取legacy状态失败', f'user_id={self.user_id}, error={str(e)}')
+            return False
+
+        legacy_history = [x for x in legacy_state.get("history", []) if x in [0, 1]][-2000:]
+        if len(legacy_history) < 40:
+            return False
+
+        self.state.history = legacy_history
+        self.state.bet_type_history = legacy_state.get("bet_type_history", [])[-2000:]
+        self.state.predictions = legacy_state.get("predictions", [])[-2000:]
+        self.state.bet_sequence_log = trim_bet_sequence_log(
+            legacy_state.get("bet_sequence_log", [])[-MAX_BET_SEQUENCE_LOG:],
+            self.state.runtime,
+        )
+
+        legacy_runtime = legacy_state.get("state", {})
+        for key in [
+            "win_count", "lose_count", "bet_amount", "bet_sequence_count", "win_total",
+            "total", "earnings", "period_profit", "explode_count", "mode", "initial_amount",
+            "lose_stop", "lose_once", "lose_twice", "lose_three", "lose_four",
+            "stop_count", "pause_count", "account_balance", "current_model_id"
+        ]:
+            if key in legacy_runtime:
+                self.state.runtime[key] = legacy_runtime[key]
+
+        log_event(logging.INFO, 'load_state', '已导入legacy单用户状态', f'user_id={self.user_id}, history_len={len(legacy_history)}')
+        self.save_state()
+        return True
+    
+    def _load_presets(self):
+        presets_path = os.path.join(self.user_dir, "presets.json")
+        
+        # 内置预设作为权威基线（代码更新后应覆盖同名旧值）
+        self.presets = dict(constants.PRESETS)
+        current_preset_reset = False
+        
+        if os.path.exists(presets_path):
+            try:
+                with open(presets_path, 'r', encoding='utf-8') as f:
+                    user_presets = json.load(f)
+                    if not isinstance(user_presets, dict):
+                        raise ValueError("presets.json 必须是对象(dict)")
+
+                    overridden_builtins = 0
+                    custom_count = 0
+                    dropped_legacy = 0
+                    for key, value in user_presets.items():
+                        if key in getattr(constants, "LEGACY_PRESET_NAMES", set()):
+                            dropped_legacy += 1
+                            continue
+                        if key in constants.PRESETS:
+                            overridden_builtins += 1
+                            continue
+                        self.presets[key] = value
+                        custom_count += 1
+
+                log_event(
+                    logging.DEBUG,
+                    'load_presets',
+                    '加载用户预设成功',
+                    f'user_id={self.user_id}, custom={custom_count}, builtin_refreshed={overridden_builtins}, legacy_removed={dropped_legacy}'
+                )
+            except Exception as e:
+                log_event(logging.ERROR, 'load_presets', '加载用户预设失败', f'user_id={self.user_id}, error={str(e)}')
+        else:
+            log_event(logging.INFO, 'load_presets', '初始化默认预设', f'user_id={self.user_id}')
+
+        current_preset_name = str(self.state.runtime.get("current_preset_name", "") or "").strip()
+        if current_preset_name and current_preset_name not in self.presets:
+            self.state.runtime["current_preset_name"] = ""
+            current_preset_reset = True
+        
+        # 保存合并后的预设到文件（确保文件是最新的）
+        self.save_presets()
+        if current_preset_reset:
+            self.save_state()
+    
+    def save_state(self):
+        with self._lock:
+            state_path = os.path.join(self.user_dir, "state.json")
+            self.state.bet_sequence_log = trim_bet_sequence_log(
+                self.state.bet_sequence_log,
+                self.state.runtime,
+            )
+            data = {
+                "history": self.state.history[-2000:],
+                "bet_type_history": self.state.bet_type_history[-2000:],
+                "predictions": self.state.predictions[-2000:],
+                "bet_sequence_log": self.state.bet_sequence_log,
+                "runtime": self.state.runtime
+            }
+            try:
+                with open(state_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                log_event(logging.DEBUG, 'save_state', '保存用户状态成功', f'user_id={self.user_id}')
+            except Exception as e:
+                log_event(logging.ERROR, 'save_state', '保存用户状态失败', f'user_id={self.user_id}, error={str(e)}')
+    
+    def save_presets(self):
+        with self._lock:
+            presets_path = os.path.join(self.user_dir, "presets.json")
+            try:
+                with open(presets_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.presets, f, indent=4, ensure_ascii=False)
+                log_event(logging.DEBUG, 'save_presets', '保存用户预设成功', f'user_id={self.user_id}')
+            except Exception as e:
+                log_event(logging.ERROR, 'save_presets', '保存用户预设失败', f'user_id={self.user_id}, error={str(e)}')
+    
+    def get_runtime(self, key: str, default=None):
+        return self.state.runtime.get(key, default)
+    
+    def set_runtime(self, key: str, value: Any):
+        self.state.runtime[key] = value
+
+    def get_model_manager(self):
+        """
+        获取账号独立模型管理器。
+        说明：每个账号持有独立实例，避免多账号并发时模型配置串号。
+        """
+        ai_cfg = self.config.ai if isinstance(self.config.ai, dict) else {}
+        ai_sig = json.dumps(ai_cfg, sort_keys=True, ensure_ascii=False)
+
+        if self._model_manager is None:
+            from model_manager import ModelManager
+            self._model_manager = ModelManager()
+
+        if ai_sig != self._model_manager_ai_sig:
+            self._model_manager.apply_shared_config({"ai": ai_cfg})
+            self._model_manager_ai_sig = ai_sig
+
+        return self._model_manager
+
+
+class UserManager:
+    def __init__(self, users_dir: str = "users", config_dir: str = "config", shared_dir: Optional[str] = None):
+        self.users_dir = users_dir
+        self.config_dir = config_dir
+        self.shared_dir = shared_dir
+        self.users: Dict[int, UserContext] = {}
+        self.global_config: Dict[str, Any] = {}
+        log_event(logging.INFO, 'init', '用户管理器初始化', f'users_dir={users_dir}')
+    
+    def _load_global_config(self):
+        candidates: List[str] = []
+        # 兼容旧测试/旧部署：若显式传入 shared_dir，则优先读取该路径。
+        if self.shared_dir:
+            candidates.extend(
+                [
+                    os.path.join(self.shared_dir, "global.local.json"),
+                    os.path.join(self.shared_dir, "global.json"),
+                    os.path.join(self.shared_dir, "global.example.json"),
+                ]
+            )
+
+        candidates.extend(
+            [
+                os.path.join(self.config_dir, "global_config.json"),
+                os.path.join(self.config_dir, "global_config.example.json"),
+                # 兼容旧命名
+                os.path.join(self.config_dir, "global.json"),
+                os.path.join(self.config_dir, "global.example.json"),
+                os.path.join("shared", "global.local.json"),
+                os.path.join("shared", "global.json"),
+                os.path.join("shared", "global.example.json"),
+            ]
+        )
+
+        chosen_path = ""
+        self.global_config = {}
+        for path in candidates:
+            if os.path.exists(path):
+                self.global_config = load_json_with_comments(path)
+                chosen_path = path
+                break
+
+        if chosen_path:
+            if chosen_path.endswith("global.example.json") or chosen_path.endswith("global_config.example.json"):
+                log_event(logging.WARNING, 'load_global', '使用示例全局配置（请复制为本地私有配置）', f'path={chosen_path}')
+            else:
+                log_event(logging.INFO, 'load_global', '加载全局配置成功', f'path={chosen_path}')
+        else:
+            log_event(logging.WARNING, 'load_global', '全局配置文件不存在', f'checked={candidates}')
+
+        # 同步共享 AI 配置给模型管理器，保证当前运行链路稳定。
+        try:
+            from model_manager import model_manager
+            model_manager.apply_shared_config(self.global_config)
+        except Exception as e:
+            log_event(logging.WARNING, 'load_global', '同步模型共享配置失败', f'error={str(e)}')
+    
+    def load_all_users(self) -> int:
+        self._load_global_config()
+        
+        if not os.path.exists(self.users_dir):
+            os.makedirs(self.users_dir)
+            log_event(logging.INFO, 'load_users', '创建用户目录', f'path={self.users_dir}')
+            return 0
+        
+        loaded_count = 0
+        for user_id_str in os.listdir(self.users_dir):
+            if user_id_str.startswith('_'):
+                continue
+            
+            user_dir = os.path.join(self.users_dir, user_id_str)
+            if os.path.isdir(user_dir):
+                try:
+                    ctx = UserContext(user_dir, self.global_config)
+                    self.users[ctx.user_id] = ctx
+                    loaded_count += 1
+                except Exception as e:
+                    log_event(logging.ERROR, 'load_user', '加载用户失败', f'user_dir={user_dir}, error={str(e)}')
+        
+        log_event(logging.INFO, 'load_users', '加载用户完成', f'count={loaded_count}')
+        return loaded_count
+    
+    def get_user(self, user_id: int) -> Optional[UserContext]:
+        return self.users.get(user_id)
+    
+    def get_all_users(self) -> Dict[int, UserContext]:
+        return self.users
+    
+    def create_user(self, user_id: int, config: dict) -> UserContext:
+        user_dir = os.path.join(self.users_dir, str(user_id))
+        os.makedirs(user_dir, exist_ok=True)
+        
+        dir_name = os.path.basename(os.path.normpath(user_dir))
+        config_path = os.path.join(user_dir, f"{dir_name}_config.json")
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        
+        ctx = UserContext(user_dir)
+        self.users[user_id] = ctx
+        log_event(logging.INFO, 'create_user', '创建用户成功', f'user_id={user_id}')
+        return ctx
+    
+    def delete_user(self, user_id: int) -> bool:
+        if user_id not in self.users:
+            return False
+        
+        user_dir = os.path.join(self.users_dir, str(user_id))
+        import shutil
+        shutil.rmtree(user_dir)
+        del self.users[user_id]
+        log_event(logging.INFO, 'delete_user', '删除用户成功', f'user_id={user_id}')
+        return True
+    
+    def get_button_mapping(self) -> Dict[str, Dict[int, int]]:
+        return self.global_config.get("button_mapping", {
+            "small": {500: 14, 2000: 12, 20000: 10, 50000: 8, 250000: 6, 1000000: 4, 5000000: 2, 50000000: 0},
+            "big": {500: 15, 2000: 13, 20000: 11, 50000: 9, 250000: 7, 1000000: 5, 5000000: 3, 50000000: 1}
+        })
+    
+    def get_iflow_config(self) -> Dict:
+        # 兼容：通用配置仍可定义 ai（例如旧版 global/global_config 配置）
+        return self.global_config.get("ai") or self.global_config.get("iflow", {})
