@@ -4153,8 +4153,8 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
 
     bet_amount = calculate_bet_amount(rt)
     if bet_amount <= 0:
+        lose_stop = int(rt.get("lose_stop", 13))
         if not rt.get("limit_stop_notified", False):
-            lose_stop = int(rt.get("lose_stop", 13))
             lose_count = int(rt.get("lose_count", 0))
             mes = (
                 "⚠️ 已达到预设连投上限，已自动暂停\n"
@@ -4171,7 +4171,7 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             rt["bet_amount"] = int(rt.get("initial_amount", 500))
             rt["lose_count"] = 0
             rt["win_count"] = 0
-            rt["earnings"] = rt.get("earnings", 0) + profit if 'profit' in locals() else rt.get("earnings", 0)
+            rt["earnings"] = rt.get("earnings", 0)  # 移除 profit 引用
             
             _enter_pause(rt, 10, "连输止损暂停，10 局后重置首注")
             log_event(
