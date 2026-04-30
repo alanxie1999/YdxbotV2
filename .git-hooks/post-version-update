@@ -1,0 +1,25 @@
+#!/bin/bash
+# Git post-commit hook - 自动更新版本号和日期
+# 安装方法：
+#   cp .git-hooks/post-version-update .git/hooks/post-commit
+#   chmod +x .git/hooks/post-commit
+
+VERSION_FILE="zq_multiuser.py"
+
+# 检查是否存在版本文件
+if [ ! -f "$VERSION_FILE" ]; then
+    exit 0
+fi
+
+# 获取当前日期
+CURRENT_DATE=$(date +%Y-%m-%d)
+
+# 更新日期
+sed -i "s|^日期：.*|日期：$CURRENT_DATE|" "$VERSION_FILE"
+
+# 如果有改动，自动提交
+if ! git diff --quiet "$VERSION_FILE"; then
+    git add "$VERSION_FILE"
+    git commit --amend --no-edit
+    echo "📝 自动更新日期：$CURRENT_DATE"
+fi
