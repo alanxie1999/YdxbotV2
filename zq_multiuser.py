@@ -301,6 +301,15 @@ FIXED_PATTERNS = {
     "000000": {"follow": "0", "label": "小龙延续"},
 }
 
+# 序列下注规律：检测到触发前缀后，按后续序列依次下注
+SEQUENCE_BET_PATTERNS = {
+    "00101": {
+        "trigger_prefix": "00101",
+        "follow_sequence": [0, 1, 0, 1, 0, 0],
+        "label": "00101触发按序下注",
+    },
+}
+
 # 同手位防卡死：避免 SKIP/超时导致长期不落单
 STALL_GUARD_SKIP_MAX = 2
 STALL_GUARD_TIMEOUT_MAX = 2
@@ -3008,6 +3017,109 @@ def _clear_fixed_pattern_runtime(rt: dict) -> None:
     rt["fixed_pattern_seq"] = ""
     rt["fixed_pattern_side"] = ""
     rt["fixed_pattern_label"] = ""
+
+
+def _detect_sequence_bet_trigger(
+    history: list,
+) -> Dict[str, Any]:
+    """检测是否匹配序列下注的触发前缀。"""
+    if not isinstance(history, list):
+        return {"active": False}
+
+    for pattern_name, pattern_config in SEQUENCE_BET_PATTERNS.items():
+        trigger_prefix = pattern_config["trigger_prefix"]
+        trigger_len = len(trigger_prefix)
+
+        if len(history) < trigger_len:
+            continue
+
+        near_to_far = [int(x) for x in history[-trigger_len:]]
+        seq = "".join(str(x) for x in near_to_far)
+
+        if seq == trigger_prefix:
+            return {
+                "active": True,
+                "pattern_name": pattern_name,
+                "trigger_prefix": trigger_prefix,
+                "follow_sequence": list(pattern_config["follow_sequence"]),
+                "label": pattern_config["label"],
+            }
+
+    return {"active": False}
+
+
+def _apply_sequence_bet_override(
+    rt: dict,
+    history: list,
+    prediction: int,
+) -> int:
+    """序列下注：检测到触发前缀后，按后续序列依次下注。"""
+    seq_active = rt.get("seq_bet_active", False)
+    seq_index = rt.get("seq_bet_index", 0)
+    seq_values = rt.get("seq_bet_values", [])
+    seq_label = rt.get("seq_bet_label", "")
+    seq_trigger = rt.get("seq_bet_trigger", "")
+
+    if not seq_active:
+        trigger = _detect_sequence_bet_trigger(history)
+        if not trigger.get("active", False):
+            _clear_sequence_bet_runtime(rt)
+            return int(prediction)
+
+        seq_active = True
+        seq_index = 0
+        seq_values = list(trigger["follow_sequence"])
+        seq_label = trigger["label"]
+        seq_trigger = trigger["trigger_prefix"]
+
+    if seq_index >= len(seq_values):
+        _clear_sequence_bet_runtime(rt)
+        new_trigger = _detect_sequence_bet_trigger(history)
+        if not new_trigger.get("active", False):
+            return int(prediction)
+        seq_active = True
+        seq_index = 0
+        seq_values = list(new_trigger["follow_sequence"])
+        seq_label = new_trigger["label"]
+        seq_trigger = new_trigger["trigger_prefix"]
+
+    forced_prediction = int(seq_values[seq_index])
+    side_text = "大" if forced_prediction == 1 else "小"
+    position = seq_index + 1
+    total = len(seq_values)
+    reason_text = f"检测到{seq_label}（触发{seq_trigger}），按序下注第{position}/{total}手：{side_text}"
+
+    rt["seq_bet_active"] = True
+    rt["seq_bet_index"] = seq_index + 1
+    rt["seq_bet_values"] = seq_values
+    rt["seq_bet_label"] = seq_label
+    rt["seq_bet_trigger"] = seq_trigger
+    rt["last_predict_source"] = "sequence_bet"
+    rt["last_predict_tag"] = "SEQUENCE_BET"
+    rt["last_predict_confidence"] = 100
+    rt["last_predict_reason"] = reason_text
+    rt["last_predict_info"] = _build_predict_basis_text(
+        history=history,
+        prediction=forced_prediction,
+        source="sequence_bet",
+        pattern_tag="SEQUENCE_BET",
+        rhythm_tag=seq_label,
+        tail_streak_len=1,
+        tail_streak_char=forced_prediction,
+    )
+
+    if seq_index + 1 >= len(seq_values):
+        _clear_sequence_bet_runtime(rt)
+
+    return forced_prediction
+
+
+def _clear_sequence_bet_runtime(rt: dict) -> None:
+    rt["seq_bet_active"] = False
+    rt["seq_bet_index"] = 0
+    rt["seq_bet_values"] = []
+    rt["seq_bet_label"] = ""
+    rt["seq_bet_trigger"] = ""
 
 
 def _apply_alternation_break_override(
