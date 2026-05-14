@@ -302,8 +302,8 @@ FIXED_PATTERNS = {
     "11010": {"follow": "reverse", "label": "11010反向下注"},
     "001010": {"follow": "same", "label": "001010同向下注"},
     "110101": {"follow": "same", "label": "110101同向下注"},
-    "10100": {"follow": "reverse", "duration": 2, "label": "10100 后续 2 次反向"},
-    "01011": {"follow": "reverse", "duration": 2, "label": "01011 后续 2 次反向"},
+    "10100": {"follow": "same", "duration": 2, "label": "10100 后续 2 次同向"},
+    "01011": {"follow": "same", "duration": 2, "label": "01011 后续 2 次同向"},
 }
 
 # 同手位防卡死：避免 SKIP/超时导致长期不落单
@@ -4288,10 +4288,11 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
             label = fixed_signal.get("label", "固定规律")
             duration = fixed_signal.get("duration", 1)
             
-            if duration > 1 and follow == "reverse":
+            if duration > 1:
                 rt["forced_bet_remaining"] = duration - 1
                 rt["forced_bet_direction"] = prediction
-                reason = f"检测到{label}（{seq}），后续 {duration} 次反向下注{'大' if prediction == 1 else '小'}"
+                direction_text = "反向" if follow == "reverse" else "同向"
+                reason = f"检测到{label}（{seq}），后续 {duration} 次{direction_text}下注{'大' if prediction == 1 else '小'}"
             elif follow == "reverse":
                 reason = f"检测到{label}（{seq}），反向下注{'大' if prediction == 1 else '小'}"
             elif follow == "same":

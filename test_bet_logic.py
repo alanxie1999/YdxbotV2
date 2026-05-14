@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""完整下注逻辑模拟 - 包含长龙不中后重置逻辑"""
+"""模拟测试：10100/01011 同向下注逻辑"""
 
 FIXED_PATTERNS = {
     "010101": {"follow": "reverse", "label": "交替循环反转"},
@@ -10,19 +10,9 @@ FIXED_PATTERNS = {
     "11010": {"follow": "reverse", "label": "11010反向下注"},
     "001010": {"follow": "same", "label": "001010同向下注"},
     "110101": {"follow": "same", "label": "110101同向下注"},
+    "10100": {"follow": "same", "duration": 2, "label": "10100 后续 2 次同向"},
+    "01011": {"follow": "same", "duration": 2, "label": "01011 后续 2 次同向"},
 }
-
-
-def _get_history_tail_streak(history):
-    if not isinstance(history, list) or not history:
-        return 0, -1
-    tail_value = int(history[-1])
-    streak = 1
-    for idx in range(len(history) - 2, -1, -1):
-        if int(history[idx]) != tail_value:
-            break
-        streak += 1
-    return streak, tail_value
 
 
 def _detect_fixed_pattern_signal(history):
@@ -47,112 +37,81 @@ def _detect_fixed_pattern_signal(history):
                 pred = latest
             return {"active": True, "detected_seq": recent_seq,
                     "follow_pattern": follow, "label": config["label"],
-                    "prediction": pred}
+                    "prediction": pred, "duration": config.get("duration", 1)}
     return {"active": False}
 
 
-def _get_dragon_extra(rt, history):
-    if rt.get("lose_count", 0) > 0:
-        rt["dragon_extra_active"] = False
-        return 0
-    if not isinstance(history, list) or len(history) < 6:
-        rt["dragon_extra_active"] = False
-        return 0
-    streak, _ = _get_history_tail_streak(history)
-    if streak >= 6:
-        rt["dragon_extra_active"] = True
-        return 250000
-    if rt.get("dragon_extra_active", False):
-        return 250000
-    return 0
-
-
 def get_prediction(history, rt):
-    # 优先级 1: 固定规律
+    forced_remaining = rt.get("forced_bet_remaining", 0)
+    forced_direction = rt.get("forced_bet_direction", 0)
+    
+    if forced_remaining > 0:
+        rt["forced_bet_remaining"] = forced_remaining - 1
+        return forced_direction, "强制延续 (剩{})".format(rt["forced_bet_remaining"]), "forced"
+
     fixed = _detect_fixed_pattern_signal(history)
     if fixed.get("active"):
-        return fixed["prediction"], fixed["label"], fixed["follow_pattern"], fixed["detected_seq"]
+        duration = fixed.get("duration", 1)
+        if duration > 1:
+            rt["forced_bet_remaining"] = duration - 1
+            rt["forced_bet_direction"] = fixed["prediction"]
+            return fixed["prediction"], fixed["label"], "fixed_forced"
+        else:
+            return fixed["prediction"], fixed["label"], "fixed"
     
-    # 优先级 2: 5 位交替打破
     if len(history) >= 5:
         last_5 = "".join(str(x) for x in history[-5:])
         if last_5 in ("10101", "01010"):
             pred = 1 - history[-1]
-            return pred, f"5 位交替{last_5}反向", "reverse", last_5
+            return pred, f"5 位交替{last_5}反向", "alternation"
     
-    # 优先级 3: 跟随上一手
     if history:
-        return history[-1], "跟随上一手", "follow", ""
+        return history[-1], "跟随上一手", "follow"
     
-    return 1, "无历史默认大", "default", ""
+    return 1, "无历史默认大", "default"
 
 
-def simulate(history_sequence, description="", initial_amount=500):
+def simulate(history_sequence, description=""):
     print(f"\n{'='*70}")
     print(f"测试: {description}")
     print(f"序列: {' '.join(str(x) for x in history_sequence)}\n")
     
-    rt = {
-        "lose_count": 0, "win_count": 0, "bet_amount": initial_amount,
-        "initial_amount": initial_amount, "dragon_extra_active": False,
-        "total_bet": 0, "total_win": 0, "total_extra": 0, "dragon_bet_count": 0
-    }
+    rt = {"forced_bet_remaining": 0, "forced_bet_direction": 0}
     
     for i in range(len(history_sequence)):
         hist = history_sequence[:i]
         actual = history_sequence[i]
         
-        pred, label, follow, seq = get_prediction(hist, rt)
-        extra = _get_dragon_extra(rt, hist)
-        streak, side = _get_history_tail_streak(hist)
+        prev_forced = rt.get("forced_bet_remaining", 0)
+        pred, label, source = get_prediction(hist, rt)
         
-        current_bet = rt["bet_amount"] + extra
         match = pred == actual
         m = "✓" if match else "✗"
         pt = "大" if pred == 1 else "小"
         at = "大" if actual == 1 else "小"
-        ex = f" +25万(龙尾{streak}连)" if extra > 0 else ""
         
-        print(f"  第{i+1:2d}手: {pt} -> {at} {m} [{label}]{ex} (下注{current_bet})")
+        forced_status = f" [强: {rt.get('forced_bet_remaining', 0)}]" if rt.get("forced_bet_remaining", 0) > 0 or prev_forced > 0 else ""
         
-        if match:
-            rt["win_count"] = rt.get("win_count", 0) + 1
-            rt["lose_count"] = 0
-            win_amount = rt["bet_amount"] * 0.99
-            rt["total_win"] += win_amount + extra
-            rt["bet_amount"] = initial_amount
-            if extra > 0:
-                rt["dragon_bet_count"] += 1
-        else:
-            rt["lose_count"] += 1
-            rt["win_count"] = 0
-            # 长龙额外加注不中后，按默认金额下注
-            if rt.get("dragon_extra_active", False):
-                rt["bet_amount"] = initial_amount
-                rt["dragon_extra_active"] = False
-                print(f"         -> 龙尾不中，重置为默认金额{initial_amount}")
-            else:
-                rt["bet_amount"] = rt["bet_amount"] * 2.1
-        
-        rt["total_bet"] += current_bet
-        rt["total_extra"] += extra
-    
-    net = rt["total_win"] - rt["total_bet"]
-    print(f"\n  统计: 总下注={rt['total_bet']:.0f}, 总赢={rt['total_win']:.0f}, 净盈亏={net:.0f}")
-    print(f"  长龙加注: 总额={rt['total_extra']}, 成功次数={rt.get('dragon_bet_count', 0)}")
+        print(f"  第{i+1:2d}手: {pt} -> {at} {m} [{label}]{forced_status}")
 
 
-print("完整下注逻辑模拟")
+print("10100/01011 同向逻辑测试")
 print("="*70)
 
-# 测试 1: 6 连大后额外加注，不中后重置
-simulate([1, 1, 1, 1, 1, 1, 1, 0, 1], "6 连大后额外加注，第 8 手不中重置")
+# Case 1: 10100 (Ends 0) -> Predict 0 (Same). Forced 1 more.
+# Sequence: 1 0 1 0 0 -> Pred 0.
+simulate([1, 0, 1, 0, 0, 0, 0], "10100 触发：后续 2 次同向（即下注 0）")
 
-# 测试 2: 长龙连续中后不中
-simulate([1, 1, 1, 1, 1, 1, 1, 1, 1, 0], "9 连大后不中")
+# Case 2: 01011 (Ends 1) -> Predict 1 (Same). Forced 1 more.
+# Sequence: 0 1 0 1 1 -> Pred 1.
+simulate([0, 1, 0, 1, 1, 1, 1], "01011 触发：后续 2 次同向（即下注 1）")
 
-# 测试 3: 001010 同向
-simulate([0, 0, 1, 0, 1, 0, 0], "001010 同向下注")
-
-# 测试 4: 00101 反向
-simulate([0, 0, 1, 0, 1, 0], "00101 反向下注")
+# Case 3: 10100 -> Forced Same (0).
+# Next comes 01011 (Ends 1).
+# Logic: 10100 sets forced_same=0 (rem 1).
+# Next bet is forced 0. Actual is 0.
+# History now: ... 0 0 0.
+# If next history is 0 0 0 1 0 1 1 -> 01011 detected?
+# Yes, if forced status clears or if priority handles it.
+# Since forced_remaining is handled in Priority 0, it runs FIRST.
+simulate([1, 0, 1, 0, 0, 0, 1, 1, 1], "10100 后接 01011，强制同向优先级测试")
