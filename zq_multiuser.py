@@ -4803,6 +4803,10 @@ def calculate_bet_amount(rt: dict, history: list = None) -> int:
     lose_twice = float(rt.get("lose_twice", 2.1))
     lose_three = float(rt.get("lose_three", 2.1))
     lose_four = float(rt.get("lose_four", 2.05))
+    
+    # 检测是否为固定金额模式（所有倍投系数为 1.0）
+    is_fixed_bet = (lose_once == 1.0 and lose_twice == 1.0 and 
+                    lose_three == 1.0 and lose_four == 1.0)
 
     dragon_extra = _get_dragon_extra_bet_amount(rt, history)
 
@@ -4812,6 +4816,10 @@ def calculate_bet_amount(rt: dict, history: list = None) -> int:
 
     if (lose_count + 1) > lose_stop:
         return 0
+
+    # 固定金额模式：不倍投，始终返回初始金额
+    if is_fixed_bet:
+        return constants.closest_multiple_of_500(initial_amount) + dragon_extra
 
     base_amount = int(rt.get("bet_amount", initial_amount))
     if lose_count == 1:
@@ -8080,10 +8088,20 @@ def _build_yc_result_message(params, preset_name: str, current_fund: int, auto_t
     )
 
     fund_text = f"{fmt_wan(current_fund)}万" if current_fund > 0 else "未设置"
+    
+    # 检测是否为固定金额模式
+    is_fixed_bet = (params['lose_once'] == 1.0 and params['lose_twice'] == 1.0 and 
+                    params['lose_three'] == 1.0 and params['lose_four'] == 1.0)
+    
     cover_streak = 0
     cover_required = 0
     cover_profit = 0
-    if current_fund > 0 and effective_rows:
+    if is_fixed_bet:
+        # 固定金额模式：显示固定金额和最大可下注次数
+        cover_streak = current_fund // int(params['initial_amount']) if current_fund > 0 else 0
+        cover_required = int(params['initial_amount'])
+        cover_profit = int(params['initial_amount'] * 0.98)
+    elif current_fund > 0 and effective_rows:
         cover_rows = [row for row in effective_rows if row["cumulative_loss"] <= current_fund]
         if cover_rows:
             cover_row = cover_rows[-1]
@@ -8099,41 +8117,44 @@ def _build_yc_result_message(params, preset_name: str, current_fund: int, auto_t
     if header_line:
         lines.append(header_line.rstrip("\n"))
     lines.append("```")
+    
+    mode_label = "【固定金额模式】" if is_fixed_bet else ""
     lines.extend(
         [
-            "🎯 策略参数",
+            "🎯 策略参数 " + mode_label,
             f"预设名称：{preset_name}",
             f"菠菜资金：{fund_text}",
-            f"策略命令: {command_text}",
-            f"🏁 起始连数: {params['continuous']}",
-            f"🔢 下注次数: {params['lose_stop']}次",
-            f"💰 首注金额: {fmt_wan(int(params['initial_amount']))}万",
-            f"💰 单注上限: {max_single_bet_limit / 10000:,.0f}万",
+            f"策略命令：{command_text}",
+            f"🏁 起始连数：{params['continuous']}",
+            f"🔢 下注次数：{params['lose_stop']}次",
+            f"💰 首注金额：{fmt_wan(int(params['initial_amount']))}万",
+            f"💰 单注上限：{max_single_bet_limit / 10000:,.0f}万",
             "",
             "🎯 策略总结:",
             f"菠菜资金：{fund_text}",
-            f"资金最多连数: {cover_streak}连",
-            f"{cover_streak}连所需本金: {fmt_wan(cover_required)}万",
-            f"{cover_streak}连获得盈利: {fmt_wan(cover_profit)}万",
+            f"资金最多连数：{cover_streak}连",
+            f"{cover_streak}连所需本金：{fmt_wan(cover_required)}万" if not is_fixed_bet else f"单次下注金额：{fmt_wan(cover_required)}万",
+            f"{cover_streak}连获得盈利：{fmt_wan(cover_profit)}万" if not is_fixed_bet else f"单次盈利：{fmt_wan(cover_profit)}万",
             "",
-            "连数|倍率|下注| 盈利 |所需本金",
-            "---|----|------|------|------",
         ]
     )
-
-    for row in rows:
-        multiplier_text = f"{row['multiplier']:.2f}".rstrip("0")
-        if multiplier_text.endswith("."):
-            multiplier_text += "0"
-        row_text = (
-            f"{str(row['streak']).center(3)}|"
-            f"{multiplier_text.center(4)}|"
-            f"{fmt_table_wan(row['bet']).center(6)}|"
-            f"{fmt_table_wan(row['profit_if_win']).center(6)}|"
-            f"{fmt_table_wan(row['cumulative_loss']).center(6)}"
-        )
-        lines.append(row_text)
-
+    
+    if not is_fixed_bet:
+        lines.append("连数 | 倍率 | 下注 | 盈利 | 所需本金")
+        lines.append("---|----|------|------|------")
+        for row in rows:
+            multiplier_text = f"{row['multiplier']:.2f}".rstrip("0")
+            if multiplier_text.endswith("."):
+                multiplier_text += "0"
+            row_text = (
+                f"{str(row['streak']).center(3)}|"
+                f"{multiplier_text.center(4)}|"
+                f"{fmt_table_wan(row['bet']).center(6)}|"
+                f"{fmt_table_wan(row['profit_if_win']).center(6)}|"
+                f"{fmt_table_wan(row['cumulative_loss']).center(6)}"
+            )
+            lines.append(row_text)
+    
     lines.append("```")
     return "\n".join(lines)
 
