@@ -1950,14 +1950,16 @@ def _build_help_card() -> str:
         "<b>🎯 固定金额模式（新）</b>\n"
         "• <code>/st fix500_same</code> 固定 500，同向跟随\n"
         "• <code>/st fix500_rev</code> 固定 500，反向对立\n"
-        "• <code>/st fix1000_same</code> 固定 1000，同向跟随\n"
-        "• <code>/st fix1000_rev</code> 固定 1000，反向对立\n"
-        "• <code>/st fix2000_same/fix2000_rev</code> 固定 2000\n"
-        "• <code>/st fix5000_same/fix5000_rev</code> 固定 5000\n"
-        "• <code>/st fix1w_same/fix1w_rev</code> 固定 10000\n"
-        "• <code>/st fix10w_same/fix10w_rev</code> 固定 10 万\n"
-        "• <code>/st fix25w_same/fix25w_rev</code> 固定 25 万\n"
-        "<i>同向=跟随上一手结果，反向=与上一手结果相反</i>\n"
+        "• <code>/st fix500_0</code> 固定 500，永远下小\n"
+        "• <code>/st fix500_1</code> 固定 500，永远下大\n"
+        "• <code>/st fix1000_same/fix1000_rev</code> 固定 1000\n"
+        "• <code>/st fix1000_0/fix1000_1</code> 固定 1000，指定方向\n"
+        "• <code>/st fix2000_same/fix2000_rev/fix2000_0/fix2000_1</code> 固定 2000\n"
+        "• <code>/st fix5000_same/fix5000_rev/fix5000_0/fix5000_1</code> 固定 5000\n"
+        "• <code>/st fix1w_same/fix1w_rev/fix1w_0/fix1w_1</code> 固定 1 万\n"
+        "• <code>/st fix10w_same/fix10w_rev/fix10w_0/fix10w_1</code> 固定 10 万\n"
+        "• <code>/st fix25w_same/fix25w_rev/fix25w_0/fix25w_1</code> 固定 25 万\n"
+        "<i>same=跟随上一手，reverse=与上一手相反，0=永远下小，1=永远下大</i>\n"
         "<i>连输 10 局自动暂停 10 局，暂停结束后继续</i>\n\n"
         "<b>🛠 系统与数据（进阶）</b>\n"
         "• <code>/res tj</code> 重置收益/胜率统计\n"
@@ -4312,23 +4314,37 @@ async def _process_bet_on_slim(client, event, user_ctx: UserContext, global_conf
         rt["last_predict_reason"] = f"强制延续下注 (剩余 {forced_remaining} 次)"
         log_event(logging.INFO, 'bet_on', '强制延续', user_id=user_ctx.user_id,
                   data=f"direction={prediction}, remaining={forced_remaining}")
-    # 优先级 0.5: 预设级别的方向设定（固定金额模式专用）
-    elif rt.get("bet_direction") in ("same", "reverse") and history:
+    # 优先级 0.5: 预设级别的固定方向设定（固定金额模式专用）
+    elif rt.get("bet_direction") in ("0", "1", "same", "reverse") and history:
         bet_direction = rt.get("bet_direction")
-        if bet_direction == "same":
-            prediction = history[-1]  # 同向：跟随上一手
+        if bet_direction in ("0", "1"):
+            # 固定方向：0=永远下小，1=永远下大
+            prediction = int(bet_direction)
+            direction_text = "小" if prediction == 0 else "大"
+            rt["last_predict_source"] = "preset_fixed_direction"
+            rt["last_predict_tag"] = f"FIXED_{prediction}"
+            rt["last_predict_confidence"] = 100
+            rt["last_predict_reason"] = f"预设固定方向：永远下{direction_text}"
+            log_event(logging.INFO, 'bet_on', '固定方向', user_id=user_ctx.user_id,
+                      data=f"bet_direction={bet_direction}, prediction={prediction}")
+        elif bet_direction == "same":
+            # 同向：跟随上一手
+            prediction = history[-1]
             rt["last_predict_source"] = "preset_same_direction"
             rt["last_predict_tag"] = "PRESET_SAME"
             rt["last_predict_confidence"] = 100
             rt["last_predict_reason"] = f"预设同向下注：跟随上一手{'大' if prediction == 1 else '小'}"
+            log_event(logging.INFO, 'bet_on', '预设方向', user_id=user_ctx.user_id,
+                      data=f"bet_direction={bet_direction}, prediction={prediction}")
         else:  # reverse
-            prediction = 1 - history[-1]  # 反向：与上一手相反
+            # 反向：与上一手相反
+            prediction = 1 - history[-1]
             rt["last_predict_source"] = "preset_reverse_direction"
             rt["last_predict_tag"] = "PRESET_REVERSE"
             rt["last_predict_confidence"] = 100
             rt["last_predict_reason"] = f"预设反向下注：与上一手相反{'大' if prediction == 1 else '小'}"
-        log_event(logging.INFO, 'bet_on', '预设方向', user_id=user_ctx.user_id,
-                  data=f"bet_direction={bet_direction}, prediction={prediction}")
+            log_event(logging.INFO, 'bet_on', '预设方向', user_id=user_ctx.user_id,
+                      data=f"bet_direction={bet_direction}, prediction={prediction}")
     # 优先级 1: 固定数据规律检测（支持 5 位和 6 位模式）
     elif True:
         fixed_signal = _detect_fixed_pattern_signal(history)
