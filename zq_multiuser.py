@@ -1955,6 +1955,8 @@ def _build_help_card() -> str:
         "• <code>/st fix2000_same/fix2000_rev</code> 固定 2000\n"
         "• <code>/st fix5000_same/fix5000_rev</code> 固定 5000\n"
         "• <code>/st fix1w_same/fix1w_rev</code> 固定 10000\n"
+        "• <code>/st fix10w_same/fix10w_rev</code> 固定 10 万\n"
+        "• <code>/st fix25w_same/fix25w_rev</code> 固定 25 万\n"
         "<i>同向=跟随上一手结果，反向=与上一手结果相反</i>\n"
         "<i>连输 10 局自动暂停 10 局，暂停结束后继续</i>\n\n"
         "<b>🛠 系统与数据（进阶）</b>\n"
